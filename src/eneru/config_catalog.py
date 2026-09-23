@@ -16,7 +16,7 @@ an explanation.
 shows everything.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional, Tuple, Union
 
 from eneru.actions import REMOTE_ACTIONS
@@ -72,6 +72,8 @@ class Option:
     nullable: bool = False
     minimum: Optional[float] = None
     maximum: Optional[float] = None
+    # True: ``minimum`` itself is rejected (the loader wants "> minimum").
+    minimum_exclusive: bool = False
     tier: str = ADVANCED
     # Example shown when the value is empty (e.g. "UPS@192.168.1.10").
     example: str = ""
@@ -185,7 +187,7 @@ CLGP_SECTION = Section(
         Option("duration", "int",
                "Seconds of lost NUT connection (on mains) before the "
                "CONNECTION_LOST notification is sent.",
-               _d(_CLGP, "duration"), minimum=0),
+               _d(_CLGP, "duration"), minimum=1),
         Option("flap_threshold", "int",
                "Warn once the connection has dropped and recovered this many "
                "times within 24 hours: a sign of a flaky network or upsd.",
@@ -228,7 +230,7 @@ TRIGGERS_SECTION = Section(
                     Option("critical_rate", "float",
                            "Shut down when charge drops faster than this many "
                            "percent per minute.", _d(_DEP, "critical_rate"),
-                           minimum=0),
+                           minimum=0, minimum_exclusive=True),
                     Option("grace_period", "int",
                            "Seconds after power loss before the drain rate "
                            "may trigger (the first minute is noisy).",
@@ -362,9 +364,14 @@ PRE_SHUTDOWN_SECTION = Section(
                example="systemctl stop my-service"),
         Option("timeout", "int",
                "Seconds this step may take; empty = the server's "
-               "command_timeout.", None, nullable=True, minimum=0),
+               "command_timeout.", None, nullable=True, minimum=1),
         Option("path", "str", "Compose file path (stop_compose only).", None,
                nullable=True),
+        Option("use_sudo", "tristate",
+               "Sudo for this step only. Empty = follow the server's use_sudo; "
+               "false runs it as the SSH user (e.g. `systemctl --user`, "
+               "`podman` for that user, or a `cd … &&` command); true forces "
+               "`sudo -n`.", None, nullable=True),
         ListSection("mounts", "Mounts (unmount_filesystems only)",
                     "Remote mount points to unmount.", MOUNT_SECTION,
                     tier=BASIC),
@@ -584,6 +591,21 @@ UPS_LIST = ListSection(
     UPS_ENTRY_SECTION, tier=BASIC,
     new_item=(("name", "ups@localhost"), ("is_local", False)))
 
+def _without_depletion_window(triggers: Section) -> Section:
+    """TRIGGERS_SECTION for a redundancy group: the loader rejects
+    ``redundancy_groups[].triggers.depletion.window`` (the drain rate is
+    computed per UPS), so the editor must not offer it."""
+    children = tuple(
+        replace(c, children=tuple(
+            o for o in c.children if o.key != "window"))
+        if isinstance(c, Section) and c.key == "depletion" else c
+        for c in triggers.children)
+    return replace(triggers, children=children)
+
+
+REDUNDANCY_TRIGGERS_SECTION = _without_depletion_window(TRIGGERS_SECTION)
+
+
 REDUNDANCY_SECTION = Section(
     "", "Redundancy group",
     "Resources fed by several UPSes (dual-PSU servers). They shut down only "
@@ -607,7 +629,7 @@ REDUNDANCY_SECTION = Section(
                choices=("critical", "degraded", "healthy")),
         Option("is_local", "bool",
                "On: these UPSes power the machine running Eneru.", False),
-        TRIGGERS_SECTION,
+        REDUNDANCY_TRIGGERS_SECTION,
         REMOTE_SERVERS_LIST,
         VMS_SECTION,
         CONTAINERS_SECTION,

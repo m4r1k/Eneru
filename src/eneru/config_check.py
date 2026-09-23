@@ -48,6 +48,7 @@ from eneru.config import (
     is_validation_error,
     resolve_energy_config,
 )
+from eneru.mqtt import _redact_broker
 from eneru.utils import command_exists, format_seconds, is_numeric, run_command
 
 # Finding levels, most severe first.
@@ -421,7 +422,8 @@ def _feature_findings(config: Config) -> List[Finding]:
         if broker and "://" not in broker:
             out.append(Finding(
                 LEVEL_WARN, "features",
-                f"MQTT broker '{broker}' has no mqtt:// or mqtts:// scheme",
+                f"MQTT broker '{_redact_broker(broker)}' has no mqtt:// or "
+                "mqtts:// scheme",
                 "Host/port fall back to the raw string and TLS stays off. "
                 "Use mqtt://host:1883 or mqtts://host:8883."))
         elif broker.startswith("mqtt://") and "@" in broker.split("://", 1)[1]:
@@ -1040,6 +1042,13 @@ def action_checks(action: str, use_sudo: bool, *, path: str = "",
     return [RemoteCheck(f"unknown action '{action}'", "exit 2", "run")]
 
 
+# Shell builtins/keywords: `sudo -n <one of these>` can never work.
+_SHELL_BUILTINS = frozenset({
+    "cd", "export", "source", ".", "if", "for", "while", "until", "case",
+    "(", "{", "!", "set", "unset", "exec", "eval", "alias", "ulimit", "umask",
+})
+
+
 def command_checks(command: str, use_sudo: bool, *,
                    final: bool = False, user: str = "") -> Tuple[List[RemoteCheck], List[str]]:
     """Presence + sudo-permission checks for a command we must NOT run.
@@ -1053,14 +1062,26 @@ def command_checks(command: str, use_sudo: bool, *,
     unless they already start with sudo (only the first command of a
     pipeline/list is prefixed).
     """
+    from eneru.shutdown.remote import with_sudo
     notes: List[str] = []
-    effective = command
-    stripped = (command or "").lstrip()
-    if use_sudo and not stripped.startswith("sudo "):
-        effective = f"sudo -n {command}"
+    # The runtime's own prefix rule, so the check inspects exactly the
+    # command that will be sent (F-124).
+    effective = with_sudo(command or "", use_sudo)
     binary, via_sudo, args = command_binary(effective)
     if not binary:
         notes.append(f"could not parse '{command}'; nothing was checked")
+        return [], notes
+    if via_sudo and (binary in _SHELL_BUILTINS or binary.startswith(("(", "{"))):
+        # `sudo -n cd /opt && …` fails: sudo runs programs, not shell
+        # builtins, keywords or compounds (`(a; b)`, `{ a; }`, `if …`).
+        # Checking `command -v cd` would pass and send the operator to the
+        # wrong fix, so report the real cause instead.
+        notes.append(
+            f"'{command}' runs the shell "
+            f"{'builtin' if binary in _SHELL_BUILTINS else 'compound'} "
+            f"'{binary}' through sudo, "
+            "which cannot work (sudo only runs programs). Use "
+            "`sudo -n sh -c '…'`, or set `use_sudo: false` on this step.")
         return [], notes
     tokens, _ = first_command_tokens(effective)
     if via_sudo and tokens and any(
@@ -1131,6 +1152,10 @@ def remote_checks(config: Config, server: RemoteServerConfig
     checks: List[RemoteCheck] = []
     notes: List[str] = []
     for cmd in server.pre_shutdown_commands:
+        # The step's own override, else the server's use_sudo (F-098),
+        # exactly as RemoteShutdownMixin._step_use_sudo decides at runtime.
+        step_sudo = bool(server.use_sudo if getattr(cmd, "use_sudo", None) is None
+                         else cmd.use_sudo)
         if cmd.action:
             mounts = cmd.mounts
             if cmd.action == "unmount_filesystems" and server.is_host_loopback:
@@ -1139,9 +1164,9 @@ def remote_checks(config: Config, server: RemoteServerConfig
                 notes.append("unmount_filesystems has no `mounts` listed: the "
                              "step does nothing and is reported as failed")
             checks.extend(action_checks(
-                cmd.action, server.use_sudo, path=cmd.path or "", mounts=mounts))
+                cmd.action, step_sudo, path=cmd.path or "", mounts=mounts))
         elif cmd.command:
-            c, n = command_checks(cmd.command, server.use_sudo)
+            c, n = command_checks(cmd.command, step_sudo)
             checks.extend(c)
             notes.extend(n)
             notes.append(f"custom command '{cmd.command}': only its binary was "
@@ -1208,7 +1233,9 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     for note in notes:
         warn = ("most systems refuse" in note or "first command runs under sudo" in note
                 or "no `mounts` listed" in note or "environment variables" in note)
-        add(LEVEL_WARN if warn else LEVEL_INFO, note)
+        level = LEVEL_ERROR if "which cannot work" in note else (
+            LEVEL_WARN if warn else LEVEL_INFO)
+        add(level, note)
     if not checks:
         return out
     script = build_remote_script(checks)

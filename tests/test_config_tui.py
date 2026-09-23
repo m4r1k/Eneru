@@ -1468,6 +1468,11 @@ def test_config_changes_formats_every_kind():
     assert not [ln for ln in lines if ln.startswith(("~ e", "+ e", "- e"))]
 
 
+def test_config_changes_reports_a_type_only_change():
+    """F-138/T6: 1 == True in Python, but `1` -> `true` is a real change."""
+    assert tui.config_changes({"a": 1}, {"a": True}) == ["~ a: 1 -> true"]
+
+
 def test_new_file_changes_include_the_seeded_defaults(tmp_path):
     doc = ConfigDocument.load(tmp_path / "fresh.yaml")
     tui.seed_new_document(doc)
@@ -1577,3 +1582,19 @@ def test_change_list_redacts_webhooks_and_scalar_urls():
         {}, {"discord": {"webhook_url": "https://discord.com/api/webhooks/1/SECRET"},
              "notifications": {"urls": "ntfy://user:SECRET@host/t"}})
     assert lines and not [ln for ln in lines if "SECRET" in ln]
+
+
+
+def test_mqtt_broker_credentials_are_masked_in_the_editor(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    m.set_mode(tui.MODE_ADVANCED)
+    m.doc.set(("mqtt", "broker"), "mqtts://alice:s3cret@broker:8883")
+    m.revalidate()
+    goto(m, "features")
+    select(m, lambda r: r.path == ("mqtt",))
+    press(m, ENTER)
+    row = select(m, lambda r: r.label == "broker")
+    assert "s3cret" not in row.value
+    assert not [c for c in m.changes() if "s3cret" in c]
+    press(m, ENTER, "\x15", "mqtt://bob:hunter2@h:1883", ENTER)
+    assert "hunter2" not in m.message and "broker = " in m.message

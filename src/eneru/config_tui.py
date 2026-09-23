@@ -129,7 +129,10 @@ class Prompt:
 
 
 def _redact_urls(opt: cat.Option, value: Any) -> Any:
-    """Apprise URLs often embed tokens/passwords: never show them raw."""
+    """Apprise URLs and MQTT brokers often embed credentials: never show raw."""
+    if opt.key == "broker" and isinstance(value, str):
+        from eneru.mqtt import _redact_broker
+        return _redact_broker(value)
     if opt.key != "urls":
         return value
     from eneru.utils import redact_apprise_url
@@ -175,6 +178,8 @@ def parse_input(opt: cat.Option, text: str) -> Tuple[bool, Any, str]:
     else:
         value = text
     if opt.kind in ("int", "float"):
+        if opt.minimum is not None and opt.minimum_exclusive and value <= opt.minimum:
+            return False, None, f"must be > {opt.minimum:g}"
         if opt.minimum is not None and value < opt.minimum:
             return False, None, f"must be >= {opt.minimum:g}"
         if opt.maximum is not None and value > opt.maximum:
@@ -207,6 +212,9 @@ def _show(path: str, value: Any) -> str:
     if any(word in path.rsplit(".", 1)[-1] for word in _SECRET_KEYS):
         return "********" if value else "(empty)"
     leaf = path.rsplit(".", 1)[-1]
+    if isinstance(value, str) and leaf == "broker":
+        from eneru.mqtt import _redact_broker
+        return _redact_broker(value)
     if isinstance(value, str) and (".urls[" in f".{path}" or leaf == "urls"
                                    or leaf == "webhook_url"):
         from eneru.utils import redact_apprise_url
@@ -707,7 +715,13 @@ class EditorModel:
         self._write_through_scalar(path, value)
         # Never echo a password into the status bar (screen shares, tmux
         # logs, PTY recordings): the input line and the row are masked too.
-        shown = "********" if secret and value else _fmt_value_generic(value)
+        if secret and value:
+            shown = "********"
+        elif label == "broker" and isinstance(value, str):
+            from eneru.mqtt import _redact_broker
+            shown = _redact_broker(value)
+        else:
+            shown = _fmt_value_generic(value)
         self._edited(f"{label} = {shown}")
 
     def _write_through_scalar(self, path: Tuple[Any, ...], value: Any) -> None:

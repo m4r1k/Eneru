@@ -79,8 +79,10 @@ a tool the shutdown will find.
     `use_sudo: true` runs the **predefined actions**, **custom
     `pre_shutdown_commands`** and the **final shutdown command** through
     `sudo -n` (a command that already starts with `sudo` is left as written).
-    Only the first command of a pipeline or list is prefixed. The checker
-    notes when a custom command chains more commands under sudo.
+    Only the first command of a pipeline or list is prefixed. A step can
+    override it with its own `use_sudo: false` (or `true`). The checker notes
+    when a custom command chains more commands under sudo, and reports an
+    error for a shell builtin (`cd`, `export`, …) that would run under sudo.
 
 ### The power-loss preview
 

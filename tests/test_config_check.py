@@ -163,6 +163,10 @@ class TestLoading:
     def test_build_structural_error(self):
         config, f = cc.build_config({"ups": "just-a-string"})
         assert config is None and f and f[0].level == "error"
+        # The loader's own structural message, not the generic
+        # "Config could not be parsed" crash fallback.
+        assert (f[0].section, f[0].message) == (
+            "ups", "'ups' must be a mapping or a list, got str.")
 
     def test_build_section_error(self):
         from eneru.config import ConfigSectionError
@@ -1042,6 +1046,14 @@ class TestCli:
             cli._cmd_config_edit(argparse.Namespace(config=str(p)))
         assert not seen["doc"].has(("behavior",))
 
+    def test_edit_exit_code_is_the_editors(self, monkeypatch, tmp_path):
+        self._tty(monkeypatch)
+        from eneru import config_tui
+        monkeypatch.setattr(config_tui, "run_editor", lambda doc, mode: 3)
+        with pytest.raises(SystemExit) as exc:
+            cli._cmd_config_edit(argparse.Namespace(config=str(tmp_path / "c.yaml")))
+        assert exc.value.code == 3
+
     def test_argparse_wiring(self, monkeypatch, tmp_path):
         p = tmp_path / "c.yaml"
         p.write_text("{}")
@@ -1476,3 +1488,150 @@ def test_path_findings_skip_wrongly_typed_paths(env):
     config.statistics.db_directory = 123
     config.logging.file = ["not", "a", "path"]
     assert isinstance(cc._path_findings(config), list)  # no TypeError
+
+
+class TestStepSudoAndBuiltins:
+    """6.2.0 release review F-098: per-step sudo + shell builtins."""
+
+    def test_builtin_under_sudo_is_an_error_without_misleading_checks(self):
+        checks, notes = cc.command_checks("cd /opt/app && docker compose down", True)
+        assert checks == []
+        assert "shell builtin 'cd'" in notes[0] and "use_sudo: false" in notes[0]
+        checks, notes = cc.command_checks("sudo -n export X=1", False)
+        assert checks == [] and "shell builtin 'export'" in notes[0]
+        # Without sudo, a builtin is just a normal (unchecked-by-sudo) command.
+        checks, notes = cc.command_checks("cd /opt && ls", False)
+        assert [c.kind for c in checks] == ["exists"]
+
+    def test_remote_checks_follow_each_steps_own_use_sudo(self):
+        srv = server(use_sudo=True, shutdown_command="shutdown -h now",
+                     pre_shutdown_commands=[
+                         RemoteCommandConfig(command="systemctl --user stop a",
+                                             use_sudo=False),
+                         RemoteCommandConfig(command="systemctl stop b"),
+                         RemoteCommandConfig(action="stop_vms", use_sudo=False)])
+        checks, _ = cc.remote_checks(Config(), srv)
+        scripts = [c.script for c in checks]
+        assert "sudo -n -l systemctl --user stop a" not in scripts
+        assert "sudo -n -l systemctl stop b" in scripts
+        assert not [s for s in scripts if "sudo -n virsh" in s]
+
+    def test_builtin_note_is_reported_as_error(self, env):
+        srv = server(use_sudo=True, shutdown_command="shutdown -h now",
+                     pre_shutdown_commands=[RemoteCommandConfig(
+                         command="cd /opt && make stop")])
+        with patch("eneru.remote_health.run_remote_probe", return_value=(True, "", 1)), \
+                patch.object(cc, "_run", return_value=(0, "", "")):
+            out = cc.probe_remote(Config(), srv)
+        assert any(f.level == "error" and "shell builtin 'cd'" in f.message
+                   for f in out)
+
+
+
+def test_scheme_less_mqtt_broker_credentials_are_redacted():
+    config = build({"ups": {"name": "u@h"},
+                    "mqtt": {"enabled": True, "broker": "alice:s3cret@broker:1883"}})
+    out = cc._feature_findings(config)
+    msgs = " ".join(f.message for f in out)
+    assert "scheme" in msgs and "s3cret" not in msgs
+
+
+class TestGroupIReviewFixes:
+    """6.2.0 release review F-124/F-125: check/runtime parity + wiring."""
+
+    # -- F-124: the check inspects exactly the command the runtime sends --
+
+    @pytest.mark.parametrize("command", [
+        "shutdown -h now", "   shutdown -h now", "sudo shutdown -h now",
+        "sudo\tshutdown -h now", "/usr/bin/sudo shutdown -h now",
+        "  sudo -n systemctl stop x", "sudo", "sudoedit /etc/hosts",
+    ])
+    @pytest.mark.parametrize("use_sudo", [True, False])
+    def test_effective_command_matches_the_runtime(self, command, use_sudo):
+        from eneru.shutdown.remote import RemoteShutdownMixin
+        with patch.object(cc, "command_binary", wraps=cc.command_binary) as spy:
+            cc.command_checks(command, use_sudo)
+        assert spy.call_args_list[0].args[0] == \
+            RemoteShutdownMixin._with_sudo(command, use_sudo)
+
+    def test_tab_and_absolute_sudo_are_not_double_prefixed(self):
+        for command in ("sudo\tsystemctl stop a", "/usr/bin/sudo systemctl stop a"):
+            checks, notes = cc.command_checks(command, True)
+            assert checks[-1].script == "sudo -n -l systemctl stop a", command
+            assert notes == []
+
+    @pytest.mark.parametrize("command,token", [
+        ("(systemctl stop a)", "(systemctl"),
+        ("{ systemctl stop a; }", "{"),
+        ("if true; then systemctl stop a; fi", "if"),
+        ("for u in a b; do systemctl stop $u; done", "for"),
+        ("while false; do :; done", "while"),
+        ("case x in x) systemctl stop a;; esac", "case"),
+        ("! systemctl is-active a", "!"),
+    ])
+    def test_compound_first_token_under_sudo_is_flagged(self, command, token):
+        checks, notes = cc.command_checks(command, True)
+        assert checks == []
+        assert f"'{token}' through sudo" in notes[0]
+        assert "which cannot work" in notes[0]
+        # Without sudo the shell runs it normally: no such note.
+        _, notes = cc.command_checks(command, False)
+        assert not any("which cannot work" in n for n in notes)
+
+    # -- F-125: static_findings wiring --
+
+    def test_loopback_contract_error_reaches_static_findings(self, env):
+        # A container with local actions and an explicit "no loopback":
+        # `eneru run` exits 1, so the check must report the same ERROR.
+        env.runtime = "container (Docker)"
+        data = {"ups": {"name": "ups@h"},
+                "virtual_machines": {"enabled": True},
+                "remote_servers": [{"name": "nas", "enabled": True,
+                                    "host": "10.0.0.2", "user": "root",
+                                    "is_host_loopback": False}]}
+        out = cc.static_findings(build(data), data)
+        assert any(f.level == "error"
+                   and "no enabled is_host_loopback delegate" in f.message
+                   for f in out), joined(out)
+
+    def test_privilege_findings_reach_static_findings(self, env):
+        env.euid = 10001
+        data = {"ups": {"name": "ups@h"}, "virtual_machines": {"enabled": True}}
+        out = cc.static_findings(build(data), data)
+        assert any(f.level == "warning" and "must run as root" in f.message
+                   for f in out), joined(out)
+
+    def test_loopback_delegate_is_synthesized_without_the_key(self, env):
+        # The check prepares non-strictly: a missing default key is reported
+        # (as the ERROR `eneru run` would hit) but the delegate is still
+        # synthesized, so its delegated view is checked instead of a
+        # misleading "no loopback" contract error.
+        env.runtime = "container (Docker)"
+        env.euid = 10001
+        data = {"ups": {"name": "ups@h"}}
+        config = build(data)
+        real_stat = Path.stat
+        key = cli._LOOPBACK_DEFAULT_SSH_KEY_PATH
+
+        def fake_stat(self, *a, **k):
+            if str(self) == key:
+                raise FileNotFoundError(2, "No such file", key)
+            return real_stat(self, *a, **k)
+        with patch.object(Path, "stat", fake_stat):
+            out = cc.static_findings(config, data)
+        assert cli._find_host_loopback(config) is not None
+        assert not any("no enabled is_host_loopback" in f.message for f in out)
+        assert any("delegated to the host over loopback SSH" in f.message
+                   for f in out), joined(out)
+
+    # -- F-125: remote probe script hardening --
+
+    def test_probe_script_wraps_every_check_in_timeout(self):
+        script = cc.build_remote_script([
+            cc.RemoteCheck("a", "true", "run"), cc.RemoteCheck("b", "false", "run")])
+        assert f'T="timeout {cc.REMOTE_CHECK_TIMEOUT}"' in script
+        assert script.count("out=$($T sh -c ") == 2
+
+    def test_parse_remote_output_ignores_unmarked_lines(self):
+        text = (f"junk 0 0 ok\n7 1 fake\n{cc._REMOTE_MARKER} 1 0 real\n")
+        assert cc.parse_remote_output(text) == {1: (0, "real")}

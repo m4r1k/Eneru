@@ -52,7 +52,8 @@ def _write_in_place(target: Path, text: str) -> None:
     Opened without truncation, written, then trimmed: a failed write can't
     leave an empty config (the `.bak` covers the rest).
     """
-    with open(target, "r+", encoding="utf-8", newline="") as fh:
+    fd = os.open(str(target), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r+", encoding="utf-8", newline="") as fh:
         fh.write(text)
         fh.truncate()
         fh.flush()
@@ -368,6 +369,10 @@ class ConfigDocument:
         self._pending_trailing: List[Tuple[Any, Any]] = []
         self.newline = "\n"
         self.last_backup: Optional[Path] = None
+        # F-107: where the path resolved when loaded. A save refuses to follow
+        # a symlink swapped in afterwards (e.g. by the unprivileged owner of
+        # the file while root has the editor open).
+        self._loaded_realpath = os.path.realpath(self.path)
 
     # -- construction ---------------------------------------------------
 
@@ -797,6 +802,11 @@ class ConfigDocument:
         where the previous version went.
         """
         target = Path(os.path.realpath(path if path else self.path))
+        if path is None and str(target) != self._loaded_realpath:
+            raise PermissionError(
+                errno.EPERM, "the config path now points somewhere else than "
+                "when it was opened (symlink swapped?); refusing to write "
+                "through it", str(self.path))
         text = self._serialized()
         target.parent.mkdir(parents=True, exist_ok=True)
         mode, owner = 0o600, None
@@ -820,12 +830,15 @@ class ConfigDocument:
             return self._saved(target, text)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                # Mode/owner through the descriptor, never the path, so a
+                # swapped temp name can't redirect root's chmod/chown.
+                os.fchmod(fh.fileno(), mode)
+                if (owner is not None and hasattr(os, "geteuid")
+                        and os.geteuid() == 0):
+                    os.fchown(fh.fileno(), *owner)
                 fh.write(text)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.chmod(tmp, mode)
-            if owner is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
-                os.chown(tmp, *owner)
             try:
                 os.replace(tmp, target)
             except OSError as exc:
@@ -843,6 +856,7 @@ class ConfigDocument:
         return self._saved(target, text)
 
     def _saved(self, target: Path, text: str) -> Path:
+        self._loaded_realpath = os.path.realpath(target)
         self.path = target
         self.existed = True
         self.modified = False
