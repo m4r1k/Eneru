@@ -206,7 +206,9 @@ def _flatten(node: Any, prefix: str = "") -> Dict[str, Any]:
 def _show(path: str, value: Any) -> str:
     if any(word in path.rsplit(".", 1)[-1] for word in _SECRET_KEYS):
         return "********" if value else "(empty)"
-    if ".urls[" in f".{path}" and isinstance(value, str):
+    leaf = path.rsplit(".", 1)[-1]
+    if isinstance(value, str) and (".urls[" in f".{path}" or leaf == "urls"
+                                   or leaf == "webhook_url"):
         from eneru.utils import redact_apprise_url
         return redact_apprise_url(value)
     if value is None:
@@ -1002,8 +1004,9 @@ class EditorModel:
 
     def _write_file(self) -> None:
         n_changes = len(self.changes())
-        state_dir = (self.vget(("statistics", "db_directory"))
-                     or cat.STATISTICS_SECTION.children[0].default)
+        state_dir = self.vget(("statistics", "db_directory"))
+        if not (isinstance(state_dir, str) and os.path.isabs(state_dir)):
+            state_dir = cat.STATISTICS_SECTION.children[0].default
         try:
             path = self.doc.save(backup_dir=state_dir)
         except OSError as exc:

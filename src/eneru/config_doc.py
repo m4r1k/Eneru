@@ -47,9 +47,14 @@ _NO_WRITE_ERRNOS = (errno.EACCES, errno.EPERM, errno.EROFS)
 
 
 def _write_in_place(target: Path, text: str) -> None:
-    """Rewrite ``target`` through its existing inode (bind-mount friendly)."""
-    with open(target, "w", encoding="utf-8", newline="") as fh:
+    """Rewrite ``target`` through its existing inode (bind-mount friendly).
+
+    Opened without truncation, written, then trimmed: a failed write can't
+    leave an empty config (the `.bak` covers the rest).
+    """
+    with open(target, "r+", encoding="utf-8", newline="") as fh:
         fh.write(text)
+        fh.truncate()
         fh.flush()
         os.fsync(fh.fileno())
 
@@ -849,33 +854,51 @@ class ConfigDocument:
                       backup_dir: Optional[Union[str, Path]] = None) -> Path:
         """Copy the current file to `<name>.bak`; return where it went.
 
-        Created 0600 from the first byte (it holds the same secrets as the
-        config); O_NOFOLLOW refuses a planted symlink. When the config's own
+        Written to a temp name first and renamed over the old `.bak`, so a
+        failed copy never destroys the previous good backup. Created 0600
+        from the first byte (it holds the same secrets as the config);
+        O_NOFOLLOW/O_EXCL refuse planted symlinks. When the config's own
         directory isn't writable, the copy goes to ``backup_dir``.
         """
-        candidates = [target.with_name(target.name + ".bak")]
-        if backup_dir:
-            candidates.append(Path(backup_dir) / (target.name + ".bak"))
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        for i, bak in enumerate(candidates):
+        dirs = [target.parent]
+        if isinstance(backup_dir, (str, Path)) and os.path.isabs(str(backup_dir)):
+            dirs.append(Path(backup_dir))
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0))
+        with open(target, "rb") as src:
+            content = src.read()
+        for i, directory in enumerate(dirs):
+            bak = directory / (target.name + ".bak")
+            tmp = directory / f".{target.name}.bak.{os.getpid()}"
             try:
-                fd = os.open(str(bak), flags, 0o600)
+                fd = os.open(str(tmp), flags, 0o600)
+            except FileExistsError:
+                os.unlink(tmp)
+                fd = os.open(str(tmp), flags, 0o600)
             except OSError as exc:
-                if exc.errno in _NO_WRITE_ERRNOS and i + 1 < len(candidates):
+                if exc.errno in _NO_WRITE_ERRNOS and i + 1 < len(dirs):
                     continue
                 raise
             try:
                 os.fchmod(fd, 0o600)
-                with open(target, "rb") as src:
-                    data = memoryview(src.read())
+                data = memoryview(content)
                 while data:  # os.write may write less than asked
                     written = os.write(fd, data)
                     if written <= 0:
                         raise OSError(errno.EIO, "short write", str(bak))
                     data = data[written:]
                 os.fsync(fd)
-            finally:
+            except BaseException:
                 os.close(fd)
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            os.close(fd)
+            # rename(2) swaps the name atomically and never follows a planted
+            # `.bak` symlink (the link itself is replaced).
+            os.rename(tmp, bak)
             return bak
         raise AssertionError("unreachable")  # pragma: no cover
 

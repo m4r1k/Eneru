@@ -69,8 +69,8 @@ checker. Eneru can't know whether an arbitrary command is safe to run, so it
 only proves the command is reachable.
 
 Per remote server, the login probe (and, for a loopback, the identity probe)
-each use their own short SSH connection; every predefined-action and
-shutdown-command check then runs together in one more session, with the same
+each use their own short SSH connection; every predefined-action, custom
+command and shutdown-command check then runs together in one more session, with the same
 PATH augmentation the real shutdown uses (`/usr/sbin`, `/sbin`,
 `/usr/local/sbin`, Synology's `/usr/syno/sbin`). A tool the checker finds is
 a tool the shutdown will find.
@@ -155,7 +155,8 @@ before you save.
   directory isn't writable the `.bak` goes to the state directory
   (`statistics.db_directory`, `/var/lib/eneru` in the image). The mode of an
   existing file is kept; its owner and group are kept when the editor runs as
-  root (a non-root save writes the file as that user). If the file changed on disk while you were
+  root or when the file is rewritten in place (the usual container case). A
+  non-root save that replaces the file writes it as that user. If the file changed on disk while you were
   editing, the editor asks before overwriting it.
 - **New keys get an explanation.** When the editor adds a key (or creates a
   new file), it writes a comment above the key explaining it.

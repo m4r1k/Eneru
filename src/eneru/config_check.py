@@ -374,12 +374,10 @@ def _optional_module_findings(config: Config) -> List[Finding]:
                 "Notifications are configured but the 'apprise' package is "
                 "not installed", "Install apprise (deb: apprise, pip: "
                 "eneru[notifications]); until then nothing is delivered."))
-    auth = config.api.auth
-    # Auth is a tristate: left unset, it auto-enables once the auth DB exists
-    # (a user or API key was created), and then the daemon needs bcrypt too.
-    auth_on = auth.enabled is True or (
-        not auth.enabled_explicitly_set and Path(str(auth.db_path)).exists())
-    if config.api.enabled and auth_on:
+    # The daemon's own rule (explicit flag wins; unset auto-enables once the
+    # auth DB holds a user). It never creates the DB as a side effect.
+    from eneru.auth import auth_is_active
+    if config.api.enabled and auth_is_active(config.api.auth):
         try:
             import bcrypt  # noqa: F401
         except ImportError:
@@ -521,13 +519,17 @@ def _path_findings(config: Config) -> List[Finding]:
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None or geteuid() != 0:
         return out
+    db_dir = config.statistics.db_directory
     paths = [
         ("logging.file", config.logging.file),
         ("logging.state_file", config.logging.state_file),
-        ("statistics.db_directory", str(Path(config.statistics.db_directory) / "x")),
+        # A child path, so the check tests the directory itself.
+        ("statistics.db_directory",
+         str(Path(db_dir) / "x") if isinstance(db_dir, str) else db_dir),
     ]
     for key, value in paths:
-        if not value:
+        # Wrong types are reported by validation; don't crash the check.
+        if not value or not isinstance(value, str):
             continue
         parent = Path(value).parent
         if parent.exists() and not os.access(parent, os.W_OK):
@@ -775,7 +777,32 @@ def probe_ups(config: Config, group: UPSGroupConfig) -> List[Finding]:
 # Live probes: remote servers
 # ---------------------------------------------------------------------------
 
-_SUDO_ARG_OPTS = {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"}
+# sudo options that take a separate argument (short and long forms).
+_SUDO_ARG_OPTS = {
+    "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-R",
+    "--user", "--group", "--close-from", "--chdir", "--host", "--prompt",
+    "--role", "--type", "--other-user", "--command-timeout", "--chroot",
+}
+_SUDO_ARG_LETTERS = set("ugCDhprtUTR")
+
+
+def _sudo_opt_width(tokens: List[str], i: int) -> int:
+    """How many tokens the sudo option at ``tokens[i]`` consumes (1 or 2).
+
+    Handles `-u X`, attached `-uX`, clusters like `-nu X` (the last letter
+    takes the argument) and long `--user X` / `--user=X`.
+    """
+    opt = tokens[i]
+    if opt in _SUDO_ARG_OPTS:
+        return 2
+    if opt.startswith("--") or "=" in opt:
+        return 1
+    letters = opt[1:]
+    for pos, letter in enumerate(letters):
+        if letter in _SUDO_ARG_LETTERS:
+            # Argument attached (-uX / -nuX) or in the next token (-nu X).
+            return 1 if pos + 1 < len(letters) else 2
+    return 1
 _POWER_BINARIES = {"shutdown", "poweroff", "halt", "reboot", "synoshutdown",
                    "systemctl", "init"}
 
@@ -817,8 +844,7 @@ def command_binary(command: str) -> Tuple[Optional[str], bool, List[str]]:
         return tokens[0], False, tokens[1:]
     i = 1
     while i < len(tokens) and tokens[i].startswith("-"):
-        opt = tokens[i]
-        i += 2 if opt in _SUDO_ARG_OPTS else 1
+        i += _sudo_opt_width(tokens, i)
     # sudo also accepts VAR=value assignments before the command.
     while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
         i += 1
@@ -844,11 +870,22 @@ def sudo_target_opts(command: str) -> List[str]:
     i = 1
     while i < len(tokens) and tokens[i].startswith("-"):
         opt = tokens[i]
-        if opt in ("-u", "-g") and i + 1 < len(tokens):
-            out += [opt, tokens[i + 1]]
+        width = _sudo_opt_width(tokens, i)
+        value = tokens[i + 1] if width == 2 and i + 1 < len(tokens) else None
+        if opt in ("--user", "--group") and value is not None:
+            out += [opt, value]
         elif opt.startswith(("--user=", "--group=")):
             out.append(opt)
-        i += 2 if opt in _SUDO_ARG_OPTS else 1
+        elif not opt.startswith("--"):
+            letters = opt[1:]
+            for pos, letter in enumerate(letters):
+                if letter in _SUDO_ARG_LETTERS:
+                    if letter in "ug":
+                        arg = letters[pos + 1:] or value
+                        if arg:
+                            out += [f"-{letter}", arg]
+                    break
+        i += width
     return out
 
 
@@ -1025,6 +1062,14 @@ def command_checks(command: str, use_sudo: bool, *,
     if not binary:
         notes.append(f"could not parse '{command}'; nothing was checked")
         return [], notes
+    tokens, _ = first_command_tokens(effective)
+    if via_sudo and tokens and any(
+            re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t) for t in tokens[1:tokens.index(binary)]
+            if binary in tokens):
+        notes.append(
+            f"'{command}' sets environment variables through sudo; that is "
+            "refused unless the sudoers rule allows it (SETENV / env_keep), "
+            "and `sudo -l` doesn't check it.")
     if via_sudo and first_command_tokens(command)[1]:
         notes.append(
             f"'{command}': only its first command runs under sudo; wrap the "
@@ -1162,7 +1207,7 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     checks, notes = remote_checks(config, server)
     for note in notes:
         warn = ("most systems refuse" in note or "first command runs under sudo" in note
-                or "no `mounts` listed" in note)
+                or "no `mounts` listed" in note or "environment variables" in note)
         add(LEVEL_WARN if warn else LEVEL_INFO, note)
     if not checks:
         return out

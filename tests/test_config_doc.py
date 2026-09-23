@@ -894,7 +894,7 @@ def test_backup_is_private_even_if_old_bak_was_public(tmp_path):
     assert stat.S_IMODE(p.stat().st_mode) == 0o644
 
 
-def test_backup_refuses_planted_symlink(tmp_path):
+def test_backup_never_follows_a_planted_symlink(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("a: 1\n")
     victim = tmp_path / "victim"
@@ -902,10 +902,13 @@ def test_backup_refuses_planted_symlink(tmp_path):
     (tmp_path / "c.yaml.bak").symlink_to(victim)
     doc = ConfigDocument.load(p)
     doc.set(("a",), 2)
-    with pytest.raises(OSError):
-        doc.save()
+    doc.save()
+    # The link was replaced by a private regular file; its target untouched.
+    bak = tmp_path / "c.yaml.bak"
     assert victim.read_text() == "keep\n"
-    assert p.read_text() == "a: 1\n"
+    assert not bak.is_symlink() and bak.read_text() == "a: 1\n"
+    assert stat.S_IMODE(bak.stat().st_mode) == 0o600
+    assert p.read_text() == "a: 2\n"
 
 
 def test_save_preserves_owner_as_root(tmp_path):
@@ -1048,7 +1051,9 @@ def test_save_rewrites_in_place_when_the_directory_is_not_writable(tmp_path):
     real_open = os.open
 
     def bak_open(path, *a, **k):
-        if str(path) == str(p) + ".bak":
+        # The config's own directory refuses new files (like /etc/ups-monitor
+        # in the image); the state directory accepts them.
+        if Path(path).parent == tmp_path and ".bak" in str(path):
             raise PermissionError(13, "Permission denied")
         return real_open(path, *a, **k)
     with patch.object(cd.tempfile, "mkstemp", side_effect=_eacces), \
@@ -1181,3 +1186,39 @@ def test_backup_write_loops_over_short_writes(tmp_path):
     with patch.object(cd.os, "write", return_value=0):
         with pytest.raises(OSError):
             ConfigDocument._write_backup(p)
+
+
+@pytest.mark.unit
+def test_in_place_write_shrinks_without_truncating_first(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\nlong: " + "x" * 100 + "\n")
+    cd._write_in_place(p, "a: 2\n")
+    assert p.read_text() == "a: 2\n"
+
+
+@pytest.mark.unit
+def test_failed_backup_keeps_the_previous_good_backup(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("new\n")
+    (tmp_path / "c.yaml.bak").write_text("old good backup\n")
+    with patch.object(cd.os, "write", side_effect=OSError(28, "ENOSPC")):
+        with pytest.raises(OSError):
+            ConfigDocument._write_backup(p)
+    assert (tmp_path / "c.yaml.bak").read_text() == "old good backup\n"
+    assert not [f for f in os.listdir(tmp_path) if f.startswith(".c.yaml.bak")]
+
+
+@pytest.mark.unit
+def test_stale_backup_temp_file_is_replaced(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("x\n")
+    (tmp_path / f".c.yaml.bak.{os.getpid()}").write_text("stale")
+    assert ConfigDocument._write_backup(p).read_text() == "x\n"
+
+
+@pytest.mark.unit
+def test_relative_or_bogus_backup_dir_is_ignored(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("x\n")
+    assert ConfigDocument._write_backup(p, "relative/dir").parent == tmp_path
+    assert ConfigDocument._write_backup(p, 123).parent == tmp_path

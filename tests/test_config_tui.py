@@ -1555,3 +1555,25 @@ def test_basic_mode_offers_remote_unmount_mounts(tmp_path):
     step = cat.PRE_SHUTDOWN_SECTION
     assert [c.key for c in step.children if isinstance(c, cat.ListSection)
             and cat.has_tier(c, tui.MODE_BASIC)] == ["mounts"]
+
+
+def test_backup_dir_falls_back_to_default_for_odd_db_directory(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    m.doc.set(("statistics", "db_directory"), 123)
+    m.doc.set(("triggers", "low_battery_threshold"), 25)
+    m.revalidate()
+    seen = {}
+
+    def fake_save(**k):
+        seen.update(k)
+        return m.doc.path
+    with patch.object(m.doc, "save", side_effect=fake_save):
+        m._write_file()
+    assert seen["backup_dir"] == cat.STATISTICS_SECTION.children[0].default
+
+
+def test_change_list_redacts_webhooks_and_scalar_urls():
+    lines = tui.config_changes(
+        {}, {"discord": {"webhook_url": "https://discord.com/api/webhooks/1/SECRET"},
+             "notifications": {"urls": "ntfy://user:SECRET@host/t"}})
+    assert lines and not [ln for ln in lines if "SECRET" in ln]

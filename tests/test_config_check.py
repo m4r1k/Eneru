@@ -1414,12 +1414,15 @@ class TestSecondReviewRound:
         assert "\x1b" not in out and "\x07" not in out and "evil" in out
 
     def test_bcrypt_needed_when_auth_auto_enables(self, env, tmp_path):
+        # Mirrors the daemon (eneru.auth.auth_is_active): unset auth turns on
+        # only once the auth DB holds a user; an empty DB keeps it off.
+        from eneru.auth import AuthStore
         db = tmp_path / "auth.db"
-        db.write_text("")
         data = {"ups": {"name": "u@h"},
                 "api": {"enabled": True, "auth": {"db_path": str(db)}}}
         config = build(data)
         assert not config.api.auth.enabled_explicitly_set  # tristate: auto
+        store = AuthStore(str(db))
         real_import = __import__
 
         def no_bcrypt(name, *a, **k):
@@ -1428,11 +1431,11 @@ class TestSecondReviewRound:
             return real_import(name, *a, **k)
         with patch("builtins.__import__", side_effect=no_bcrypt):
             out = cc._optional_module_findings(config)
-        assert any("bcrypt" in f.message for f in out)
-        db.unlink()
+        assert not any("bcrypt" in f.message for f in out)  # DB but no user
+        store.create_user("admin", "a-long-enough-password")
         with patch("builtins.__import__", side_effect=no_bcrypt):
             out = cc._optional_module_findings(config)
-        assert not any("bcrypt" in f.message for f in out)
+        assert any("bcrypt" in f.message for f in out)
 
     def test_load_raw_reads_utf8_regardless_of_locale(self, tmp_path):
         p = tmp_path / "c.yaml"
@@ -1444,3 +1447,32 @@ class TestSecondReviewRound:
         with patch("builtins.open", side_effect=latin1_default):
             data, _ = cc.load_raw(str(p))
         assert data["notifications"]["title"] == "\U0001F3E2 Lab"
+
+
+class TestSudoOptionForms:
+    @pytest.mark.parametrize("cmd,binary,target", [
+        ("sudo -udeploy tool a", "tool", ["-u", "deploy"]),
+        ("sudo -nu deploy tool a", "tool", ["-u", "deploy"]),
+        ("sudo --user deploy tool a", "tool", ["--user", "deploy"]),
+        ("sudo --group=ops tool a", "tool", ["--group=ops"]),
+        ("sudo -R /x tool a", "tool", []),
+        ("sudo -gops -n tool a", "tool", ["-g", "ops"]),
+        ("sudo -nk tool a", "tool", []),
+    ])
+    def test_forms(self, cmd, binary, target):
+        assert cc.command_binary(cmd)[0] == binary
+        assert cc.sudo_target_opts(cmd) == target
+
+    def test_env_assignment_under_sudo_is_noted(self):
+        _, notes = cc.command_checks("sudo -n LANG=C tool", False)
+        assert any("environment variables" in n for n in notes)
+        _, notes = cc.command_checks("sudo -n tool", False)
+        assert not any("environment variables" in n for n in notes)
+
+
+def test_path_findings_skip_wrongly_typed_paths(env):
+    # Regression: `statistics.db_directory: 123` crashed the whole check as root.
+    config = build({"ups": {"name": "u@h"}})
+    config.statistics.db_directory = 123
+    config.logging.file = ["not", "a", "path"]
+    assert isinstance(cc._path_findings(config), list)  # no TypeError
