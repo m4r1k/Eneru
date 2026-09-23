@@ -89,6 +89,8 @@ is a JSON object: `{"username": "<username>", "password": "<password>"}`.
 > behind the **same** auth boundary as the rest of the read API — don't expose
 > it unauthenticated just because a scraper is easier to wire up that way.
 | `/api/v1/config` | sanitized | sanitized (anonymous) / **extended** (authenticated) |
+| Audit rows in `/api/v1/events` (`CONTROL_*`, `CONFIG_RELOAD`, `EVENTS_DELETED`, `LOGIN_FAILURE`) | shown | hidden (anonymous) / shown (authenticated) |
+| Remote-check error text (`last_error` in `/remote-health`, the loopback `lastError` in `/ready` and `/api/v1/ups`) | shown | `check failed; sign in for details` (anonymous) / full text (authenticated) |
 | `/api/v1/auth/state` | open | open (always) |
 | write endpoints (UPS control, config reload) | **hard-disabled (403)** | required (401 without a credential) |
 
@@ -141,7 +143,7 @@ UPS rows include a stable `groupId` derived from the configured UPS name. Multi-
 
 For wide-range viewing and paging, `/api/v1/events` also accepts `from`/`to` (Unix seconds) and a source-qualified cursor: `before=<ts>&beforeSource=<source>&beforeId=<id>`, using the oldest row already displayed. Each event row carries the required identity: `source` (the UPS `groupId`) plus `id` (a stable, never-reused per-UPS row id), alongside `ts`, `eventType`, and `detail`. Clients should still de-duplicate loaded pages by `(source, id)`. A timestamp-only `before=<ts>` is accepted for compatibility and uses an inclusive timestamp boundary. Likewise, `/api/v1/ups/<name>/history` accepts `from`/`to`; omitting `from` returns from the earliest retained data (the hourly-aggregate retention horizon), and `from > to` is a 400.
 
-**Deleting events.** `DELETE /api/v1/ups/<name>/events` removes selected events. It requires authentication (writes are hard-disabled when `api.auth` is off -> 403; missing credential -> 401). The JSON body is `{"items": [{"id": <int>, "ts": <int>, "eventType": "<str>"}, ...]}` (max 1000 items -> 413; malformed -> 400). Each row is matched on all three fields, so a stale client can only delete the exact rows it last saw. A mismatch deletes nothing. The response is `{"ups": "<name>", "deleted": <count>}`; if statistics is disabled the endpoint returns 503. Deletions are recorded to the events table as `EVENTS_DELETED` audit rows.
+**Deleting events.** `DELETE /api/v1/ups/<name>/events` removes selected events. It requires authentication (writes are hard-disabled when `api.auth` is off -> 403; missing credential -> 401). The JSON body is `{"items": [{"id": <int>, "ts": <int>, "eventType": "<str>"}, ...]}` (max 1000 items -> 413; malformed -> 400). Each row is matched on all three fields, so a stale client can only delete the exact rows it last saw. A mismatch deletes nothing. The response is `{"ups": "<name>", "deleted": <count>, "protected": <count>}`; if statistics is disabled the endpoint returns 503. Deletions are recorded to the events table as `EVENTS_DELETED` audit rows. Audit rows (`CONTROL_*`, `CONFIG_RELOAD`, `EVENTS_DELETED`, `LOGIN_FAILURE`) can't be deleted through the API: they are skipped, the rest of the selection is still deleted, and the skipped count is returned as `protected` and noted in the audit line.
 
 ## Transport security
 

@@ -175,6 +175,28 @@ def block_journal_side_channels(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def block_real_umount(monkeypatch):
+    """F-099: local unmount runs through the bounded
+    ``eneru.shutdown.filesystems._run_umount`` (a Popen, not ``run_command``),
+    so the ``run_command`` patches above no longer intercept it. Replace it in
+    EVERY test with a recorder that returns success, so no test can ever run a
+    real ``umount`` on the developer's host. Tests of the helper itself import
+    the real function at module import time; tests asserting umount argv read
+    ``eneru.shutdown.filesystems._run_umount.calls`` or patch it again.
+    """
+    import eneru.shutdown.filesystems as _fs
+
+    calls = []
+
+    def fake_umount(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return 0, "", ""
+    fake_umount.calls = calls
+    monkeypatch.setattr(_fs, "_run_umount", fake_umount)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_login_throttle():
     """ISS-032: the API login throttle is process-global module state; clear it
     around every test so failed-login tests can't bleed into unrelated ones.

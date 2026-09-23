@@ -203,7 +203,7 @@ def test_unmount_filesystems_dry_run_catches_malformed_options(tmp_path):
 def test_unmount_filesystems_success(tmp_path):
     """Successful umount logs success and stops."""
     monitor = _make_fs_monitor(tmp_path)
-    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(0, "", "")) as mock_run:
         monitor._unmount_filesystems()
     # One call: the umount itself
     assert mock_run.call_count == 1
@@ -216,7 +216,7 @@ def test_unmount_filesystems_success(tmp_path):
 def test_unmount_filesystems_includes_options(tmp_path):
     """Mount options are appended to the umount command."""
     monitor = _make_fs_monitor(tmp_path, mounts=[{"path": "/mnt/data", "options": "-l"}])
-    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(0, "", "")) as mock_run:
         monitor._unmount_filesystems()
     cmd = mock_run.call_args.args[0]
     assert cmd == ["umount", "-l", "/mnt/data"]
@@ -230,7 +230,7 @@ def test_unmount_filesystems_multi_flag_options_split(tmp_path):
     monitor = _make_fs_monitor(
         tmp_path, mounts=[{"path": "/mnt/data", "options": "-l -f"}],
     )
-    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(0, "", "")) as mock_run:
         monitor._unmount_filesystems()
     cmd = mock_run.call_args.args[0]
     assert cmd == ["umount", "-l", "-f", "/mnt/data"]
@@ -249,7 +249,7 @@ def test_unmount_filesystems_malformed_options_skip_mount(tmp_path, capsys):
         ],
     )
     monitor.logger = MagicMock()
-    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(0, "", "")) as mock_run:
         # Must not raise.
         monitor._unmount_filesystems()
     # Only the good mount reached run_command; the bad one was skipped.
@@ -267,7 +267,7 @@ def test_unmount_filesystems_malformed_options_skip_mount(tmp_path, capsys):
 def test_unmount_filesystems_timeout_proceeds(tmp_path):
     """umount returning 124 (timeout) is logged but does not raise."""
     monitor = _make_fs_monitor(tmp_path)
-    with patch("eneru.shutdown.filesystems.run_command", return_value=(124, "", "")):
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(124, "", "")):
         monitor._unmount_filesystems()  # Must not raise
 
 
@@ -276,16 +276,14 @@ def test_unmount_filesystems_failure_checks_mountpoint(tmp_path):
     """On non-timeout failure, mountpoint is checked before logging an error."""
     monitor = _make_fs_monitor(tmp_path)
 
-    def fake_run(cmd, **kwargs):
-        if cmd[0] == "umount":
-            return (1, "", "device busy")
-        # mountpoint -q
-        return (0, "", "")  # mounted, real failure
-
-    with patch("eneru.shutdown.filesystems.run_command", side_effect=fake_run) as mock_run:
+    with patch("eneru.shutdown.filesystems._run_umount",
+               return_value=(1, "", "")) as mock_umount, \
+            patch("eneru.shutdown.filesystems.run_command",
+                  return_value=(0, "", "")) as mock_run:  # mounted: real failure
         monitor._unmount_filesystems()
-    # umount + mountpoint check
-    assert mock_run.call_count == 2
+    # umount, then one mountpoint check
+    assert mock_umount.call_count == 1
+    assert mock_run.call_args.args[0] == ["mountpoint", "-q", "/mnt/data"]
 
 
 @pytest.mark.unit
@@ -293,12 +291,9 @@ def test_unmount_filesystems_failure_when_already_unmounted(tmp_path):
     """Non-zero umount + mountpoint failure means it was already unmounted."""
     monitor = _make_fs_monitor(tmp_path)
 
-    def fake_run(cmd, **kwargs):
-        if cmd[0] == "umount":
-            return (1, "", "not mounted")
-        return (1, "", "")  # mountpoint says not mounted
-
-    with patch("eneru.shutdown.filesystems.run_command", side_effect=fake_run):
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(1, "", "")), \
+            patch("eneru.shutdown.filesystems.run_command",
+                  return_value=(1, "", "")):  # mountpoint says not mounted
         monitor._unmount_filesystems()  # Must not raise
 
 
@@ -312,8 +307,92 @@ def test_unmount_filesystems_multiple_mounts_independent(tmp_path):
             {"path": "/mnt/b", "options": ""},
         ],
     )
-    with patch("eneru.shutdown.filesystems.run_command", return_value=(0, "", "")) as mock_run:
+    with patch("eneru.shutdown.filesystems._run_umount", return_value=(0, "", "")) as mock_run:
         monitor._unmount_filesystems()
     targets = [c.args[0][-1] for c in mock_run.call_args_list]
     assert "/mnt/a" in targets
     assert "/mnt/b" in targets
+
+
+# --- F-099: the umount itself is wall-clock bounded ------------------------
+
+from eneru.shutdown import filesystems as _fs_mod  # noqa: E402
+
+# Captured at import, before the autouse block_real_umount fixture swaps the
+# module attribute for a recorder: this is the real bounded helper.
+_REAL_RUN_UMOUNT = _fs_mod._run_umount
+
+
+class _StuckProc:
+    """A child in D-state: never exits, and kill() doesn't make it exit."""
+
+    def __init__(self):
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, *a, **k):  # pragma: no cover - must never be called
+        raise AssertionError("waited on a D-state child")
+
+
+@pytest.mark.unit
+def test_run_umount_abandons_a_stuck_child_after_the_deadline():
+    proc = _StuckProc()
+    clock = iter([0.0, 0.5, 1.2, 2.5])
+    with patch.object(_fs_mod.subprocess, "Popen", return_value=proc), \
+            patch.object(_fs_mod.time, "monotonic", side_effect=lambda: next(clock)), \
+            patch.object(_fs_mod.time, "sleep"):
+        rc, out, err = _REAL_RUN_UMOUNT(["umount", "/mnt/nfs"], 2)
+    assert rc == 124 and proc.killed and "timed out" in err
+
+
+@pytest.mark.unit
+def test_run_umount_returns_exit_code_and_handles_kill_errors():
+    ok = MagicMock()
+    ok.poll.return_value = 0
+    with patch.object(_fs_mod.subprocess, "Popen", return_value=ok):
+        assert _REAL_RUN_UMOUNT(["umount", "/x"], 5) == (0, "", "")
+    # Finishes exactly at the deadline: the final poll sees the exit code.
+    late = MagicMock()
+    late.poll.side_effect = [None, 32]
+    clock = iter([0.0, 0.1, 9.0])
+    with patch.object(_fs_mod.subprocess, "Popen", return_value=late), \
+            patch.object(_fs_mod.time, "monotonic", side_effect=lambda: next(clock)), \
+            patch.object(_fs_mod.time, "sleep"):
+        assert _REAL_RUN_UMOUNT(["umount", "/x"], 1)[0] == 32
+    stuck = MagicMock()
+    stuck.poll.return_value = None
+    stuck.kill.side_effect = ProcessLookupError()
+    clock = iter([0.0, 5.0])
+    with patch.object(_fs_mod.subprocess, "Popen", return_value=stuck), \
+            patch.object(_fs_mod.time, "monotonic", side_effect=lambda: next(clock)):
+        assert _REAL_RUN_UMOUNT(["umount", "/x"], 1)[0] == 124
+    with patch.object(_fs_mod.subprocess, "Popen", side_effect=FileNotFoundError("umount")):
+        assert _REAL_RUN_UMOUNT(["umount", "/x"], 1)[0] == 127
+
+
+@pytest.mark.unit
+def test_stuck_umount_does_not_block_the_drain(tmp_path):
+    """The drain moves on to the next mount after a hung one."""
+    monitor = _make_fs_monitor(
+        tmp_path, mounts=[{"path": "/mnt/dead", "options": ""},
+                          {"path": "/mnt/ok", "options": ""}])
+    seen = []
+
+    def fake(cmd, timeout):
+        seen.append(cmd[-1])
+        return (124, "", "Command timed out") if cmd[-1] == "/mnt/dead" else (0, "", "")
+    with patch("eneru.shutdown.filesystems._run_umount", side_effect=fake):
+        monitor._unmount_filesystems()
+    assert seen == ["/mnt/dead", "/mnt/ok"]
+
+
+@pytest.mark.unit
+def test_conftest_guard_replaces_real_umount():
+    """Safety net: inside tests the module helper is always the recorder."""
+    assert _fs_mod._run_umount is not _REAL_RUN_UMOUNT
+    assert hasattr(_fs_mod._run_umount, "calls")

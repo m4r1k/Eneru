@@ -1616,6 +1616,18 @@ def _resolve_auth_store(args):
 
 
 def _resolve_password(args):
+    """Resolve the password (see :func:`_read_password`) and enforce the
+    F-111 minimum length on operator-chosen ones; ``--generate`` output
+    (24 characters) always passes."""
+    password, generated = _read_password(args)
+    if not generated and len(password) < auth.MIN_PASSWORD_LENGTH:
+        raise SystemExit(
+            f"ERROR: password must be at least {auth.MIN_PASSWORD_LENGTH} "
+            "characters (or use --generate)")
+    return password, generated
+
+
+def _read_password(args):
     """Resolve a password without ever accepting it as a CLI argument value.
 
     Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``.

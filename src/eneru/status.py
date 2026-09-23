@@ -1084,7 +1084,8 @@ def live_remote_health(source: Any, config: Config) -> List[dict]:
 def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
                  start_ts: Optional[int] = None, end_ts: Optional[int] = None,
                  before_ts: Optional[int] = None,
-                 before_cursor: Optional[tuple] = None) -> List[dict]:
+                 before_cursor: Optional[tuple] = None,
+                 hide_types: Optional[frozenset] = None) -> List[dict]:
     """Return recent event rows aggregated from all per-UPS stats DBs.
 
     Each row carries a **source-qualified identity** — ``source`` (the UPS
@@ -1105,6 +1106,9 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
         (int(end_ts) if end_ts is not None else now)
     include_types = POWER_EVENT_TYPES if verbosity == 0 else None
     exclude_types = LIFECYCLE_EVENT_TYPES if verbosity == 1 else None
+    if hide_types:
+        # F-109: filtered in SQL (not after the LIMIT) so a page stays full.
+        exclude_types = set(exclude_types or ()) | set(hide_types)
     for group in config.ups_groups:
         source = sanitize_name(group.ups.name)
         local_end = end
