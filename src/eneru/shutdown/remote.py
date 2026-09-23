@@ -8,7 +8,7 @@ followed by the final shutdown command.
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
@@ -93,10 +93,14 @@ class RemoteShutdownResult:
     error: str = ""
     timed_out: bool = False
     crashed: bool = False
+    # Final shutdown command outcome for the dashboard's detail pop-up.
+    # ``exit_code`` stays None when the command never ran (dry-run, deadline).
+    exit_code: Optional[int] = None
+    response: str = ""
 
     @property
     def success(self) -> bool:
-        """Return True only when the final shutdown command was accepted.
+        """Return True only when the complete remote sequence succeeded.
 
         L6 (evaluated, intentional): for a loopback, ``crashed`` (a Phase-A
         pre-action crash) and ``shutdown_sent`` (the Phase-C poweroff succeeded)
@@ -112,7 +116,19 @@ class RemoteShutdownResult:
             and not self.timed_out
             and not self.crashed
             and not self.error
+            and self.pre_commands.failed == 0
+            and not self.pre_commands.timed_out
+            and not self.pre_commands.error
         )
+
+
+def _record_command_output(result: "RemoteShutdownResult",
+                           capture: Dict[str, Any]) -> None:
+    """Copy the final command's exit code and output onto ``result``."""
+    exit_code = capture.get("exit_code")
+    result.exit_code = exit_code if isinstance(exit_code, int) else None
+    parts = [str(capture.get(key) or "").strip() for key in ("stdout", "stderr")]
+    result.response = "\n".join(part for part in parts if part)
 
 
 def loopback_poweroff_sent(result: "RemoteShutdownResult") -> bool:
@@ -177,6 +193,19 @@ class RemoteShutdownMixin:
         if not use_sudo or stripped.startswith("sudo "):
             return command
         return f"sudo -n {command}"
+
+    def _track_remote_start(self, server: RemoteServerConfig) -> Optional[int]:
+        tracker = getattr(self, "_shutdown_progress", None)
+        if tracker is not None:
+            return tracker.remote_start(server.name or server.host, server.host)
+        return None
+
+    def _track_remote_finish(
+        self, result: RemoteShutdownResult, generation: Optional[int],
+    ) -> None:
+        tracker = getattr(self, "_shutdown_progress", None)
+        if tracker is not None:
+            tracker.remote_finish(result, generation)
 
     def _shutdown_remote_servers(self) -> List[RemoteShutdownResult]:
         """Shutdown all enabled remote servers via SSH.
@@ -262,12 +291,14 @@ class RemoteShutdownMixin:
         # post-phase write back into the same record (pre_commands +
         # shutdown_sent live on the same object).
         loopback_results: Dict[int, RemoteShutdownResult] = {}
+        loopback_generations: Dict[int, Optional[int]] = {}
         for lb in loopbacks:
             loopback_results[id(lb)] = RemoteShutdownResult(
                 server=lb.name or lb.host,
                 host=lb.host,
                 pre_commands=RemotePreShutdownResult(),
             )
+            loopback_generations[id(lb)] = self._track_remote_start(lb)
 
         # M2 NOTE: an earlier rc10 iteration ran a fresh, blocking
         # run_loopback_identity_probe() here before the destructive phases. It
@@ -325,15 +356,28 @@ class RemoteShutdownMixin:
                     result.crashed = True
 
         # Phase B: non-loopback remotes (existing parallel phased path).
-        for key in sorted_regular_keys:
-            phase_idx += 1
-            phase_servers = regular_phases[key]
-            names = ", ".join(s.name or s.host for s in phase_servers)
-            if num_phases > 1:
-                self._log_message(
-                    f"  📋  Phase {phase_idx}/{num_phases} (order={key}): {names}"
-                )
-            regular_results.extend(self._shutdown_servers_parallel(phase_servers))
+        try:
+            for key in sorted_regular_keys:
+                phase_idx += 1
+                phase_servers = regular_phases[key]
+                names = ", ".join(s.name or s.host for s in phase_servers)
+                if num_phases > 1:
+                    self._log_message(
+                        f"  📋  Phase {phase_idx}/{num_phases} (order={key}): {names}"
+                    )
+                regular_results.extend(
+                    self._shutdown_servers_parallel(phase_servers))
+        except Exception as exc:
+            # Loopback rows start before Phase A. If peer orchestration itself
+            # crashes, close those rows before propagating the phase failure.
+            for lb in loopbacks:
+                result = loopback_results[id(lb)]
+                result.completed = False
+                result.error = str(exc)
+                result.crashed = True
+                self._track_remote_finish(
+                    result, loopback_generations[id(lb)])
+            raise
 
         # Phase C: loopback poweroff — host goes down LAST.
         if has_loopback_post:
@@ -357,6 +401,9 @@ class RemoteShutdownMixin:
                     result = loopback_results[id(lb)]
                     result.error = str(exc)
                     result.crashed = True
+                finally:
+                    self._track_remote_finish(
+                        loopback_results[id(lb)], loopback_generations[id(lb)])
 
         results: List[RemoteShutdownResult] = (
             list(loopback_results.values()) + regular_results
@@ -434,13 +481,16 @@ class RemoteShutdownMixin:
             )
             return
 
+        capture: Dict[str, Any] = {}
         success, error_msg = self._run_remote_command(
             server,
             shutdown_command,
             server.command_timeout,
             "shutdown",
             is_final_shutdown=True,
+            capture=capture,
         )
+        _record_command_output(result, capture)
 
         if success:
             result.shutdown_sent = True
@@ -528,7 +578,9 @@ class RemoteShutdownMixin:
             coerced.shutdown_sent = True
             return coerced
 
-        def shutdown_server_thread(server: RemoteServerConfig):
+        def shutdown_server_thread(
+            server: RemoteServerConfig, generation: Optional[int],
+        ):
             """Thread worker for shutting down a single server."""
             result = None
             try:
@@ -551,25 +603,45 @@ class RemoteShutdownMixin:
                     f"  ❌  Remote shutdown thread for {display} crashed: {exc}"
                 )
                 result = default_result(server, error=str(exc), crashed=True)
+            self._track_remote_finish(result, generation)
             with lock:
                 results[threading.current_thread()] = result
 
         deadline = time.monotonic() + max_timeout
         threads: List[threading.Thread] = []
+        thread_generations: Dict[threading.Thread, Optional[int]] = {}
         for server in servers:
+            generation = self._track_remote_start(server)
             t = threading.Thread(
                 target=shutdown_server_thread,
-                args=(server,),
+                args=(server, generation),
                 name=f"remote-shutdown-{server.name or server.host}",
                 daemon=True,
             )
-            t.start()
+            thread_generations[t] = generation
+            try:
+                t.start()
+            except Exception as exc:
+                # e.g. "can't start new thread" under resource exhaustion.
+                # Record it and keep going: workers already started are still
+                # joined below, and the caller still reaches the loopback
+                # poweroff (Phase C) instead of aborting the whole phase.
+                display = server.name or server.host
+                self._log_message(
+                    f"  ❌  Could not start remote shutdown worker for {display}: {exc}"
+                )
+                failed = default_result(server, error=str(exc), crashed=True)
+                self._track_remote_finish(failed, generation)
+                with lock:
+                    results[t] = failed
             threads.append(t)
 
         # Deadline-based join: cap total wait at max_timeout regardless of
         # how many threads are stuck. Per-thread join() with the same
         # max_timeout would stack to N × max_timeout in the worst case.
         for t in threads:
+            if t.ident is None:
+                continue  # never started; its failure is already recorded
             remaining = max(0.0, deadline - time.monotonic())
             t.join(timeout=remaining)
 
@@ -591,6 +663,8 @@ class RemoteShutdownMixin:
                         timed_out=True,
                         error="remote shutdown worker timed out",
                     )
+                    generation = thread_generations.get(thread)
+                    self._track_remote_finish(result, generation)
                 final_results.append(result)
         return final_results
 
@@ -603,12 +677,15 @@ class RemoteShutdownMixin:
         *,
         deadline: Optional[float] = None,
         is_final_shutdown: bool = False,
+        capture: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
         """Run a single command on a remote server via SSH.
 
         ``is_final_shutdown`` marks the ONE poweroff command (not
         pre_shutdown_commands): only then is an exit-255 transport teardown
-        treated as "sent (unconfirmed)" rather than a failure (F-077). On
+        treated as "sent (unconfirmed)" rather than a failure (F-077).
+        ``capture``, when given, receives the raw ``exit_code``/``stdout``/
+        ``stderr`` of the SSH invocation (untouched if it never ran). On
         success the second tuple element is normally "" but carries a
         human-readable note ("SSH transport ended (result unknown)") for that
         unconfirmed case so callers can log it honestly.
@@ -668,6 +745,8 @@ class RemoteShutdownMixin:
                 return False, "remote shutdown deadline exceeded"
             command_timeout = max(1, min(command_timeout, int(remaining)))
         exit_code, stdout, stderr = run_command(ssh_cmd, timeout=command_timeout)
+        if capture is not None:
+            capture.update(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
         if exit_code == 0:
             return True, ""
@@ -903,7 +982,6 @@ class RemoteShutdownMixin:
             host=server.host,
             pre_commands=RemotePreShutdownResult(),
         )
-
         self._log_message(f"🌐  Initiating remote shutdown: {display_name} ({server.host})...")
 
         # Send notification for remote server shutdown start
@@ -963,6 +1041,7 @@ class RemoteShutdownMixin:
             )
             return result
 
+        capture: Dict[str, Any] = {}
         success, error_msg = self._run_remote_command(
             server,
             shutdown_command,
@@ -970,7 +1049,9 @@ class RemoteShutdownMixin:
             "shutdown",
             deadline=deadline,
             is_final_shutdown=True,
+            capture=capture,
         )
+        _record_command_output(result, capture)
 
         if success:
             result.shutdown_sent = True

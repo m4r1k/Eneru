@@ -6,6 +6,8 @@ ups:
   - name: "UPS1@localhost:3493"
     display_name: "E2E UPS1"
     check_interval: 1
+    energy:
+      nominal_power: 800
   - name: "UPS2@localhost:3493"
     display_name: "E2E UPS2"
     check_interval: 1
@@ -46,6 +48,10 @@ redundancy_groups:
 
 behavior:
   dry_run: true
+
+energy:
+  enabled: true
+  nominal_power: 1200
 
 logging:
   file: null

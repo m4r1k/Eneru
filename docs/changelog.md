@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc4] - 2026-09-23
+
+### Added
+
+- **Remote shutdown results open in a pop-up.** On the Shutdown tab, each
+  remote's result badge opens a dialog with its start/finish times,
+  pre-command results, the final command's exit code, and the server's
+  response (scrollable, last 8,000 characters). Raw output is credential-redacted
+  (best effort) and returned only to authenticated API readers; anonymous
+  readers see a sign-in prompt instead.
+- **Live trigger status on the Shutdown tab.** Each redundancy-group trigger
+  line shows how many members are healthy right now ("now 2 of 2 healthy").
+  Each remote also shows its timings and pre-command results under its badge.
+
+### Changed
+
+- **A configured `nominal_power` now overrides NUT's reported rating.** The
+  precedence is `ups.realpower`, then configured `nominal_power`, then
+  `ups.realpower.nominal`, then `ups.power.nominal`. A configured value above
+  the UPS's reported `ups.realpower.nominal` logs one warning (usually a VA
+  figure or a typo). A global `nominal_power` applies to every UPS without its
+  own, so mixed fleets should set it per UPS.
+  Estimated kWh and cost are computed from stored samples when read, so
+  existing today/month/year totals and reports are recalculated with the new
+  precedence after upgrading.
+
+### Fixed
+
+- **A remote worker that can't start no longer skips the host poweroff.** If
+  a remote-shutdown thread fails to start (e.g. resource exhaustion), that
+  server is recorded as crashed. The other workers are still awaited, and the
+  loopback host poweroff still runs.
+- **Single-UPS `ups.energy` is rejected instead of silently ignored.** Per-UPS
+  energy overrides work only in list form; the legacy dict form now fails
+  validation and points to the top-level `energy:` section.
+- **Older redundancy callbacks keep working.** A `local_shutdown_callback`
+  that accepts only the reason is still called (without the progress
+  tracker).
+- **Group energy cost gaps no longer read as kWh gaps.** A member with
+  `cost_per_kwh: null` now sets `costPartial` on the redundancy-group energy
+  block (dashboard hint on the cost row) instead of the kWh `partial` badge.
+- **Redundancy shutdown errors close the running phase.** An unexpected
+  exception marks the interrupted phase `failed` instead of leaving it
+  `running` under a failed run.
+- **Shutdown progress polling pauses in background tabs**, and the UPS plan
+  endpoint reads the running monitor's coordinator-handoff flag.
+
+## [6.2.0-rc3] - 2026-09-23
+
+### Added
+
+- **Redundancy groups are first-class dashboard scopes.** The global View
+  selector can now focus telemetry, events, remotes, and shutdown details on a
+  configured redundancy group. Group status includes member telemetry,
+  aggregate energy, conservative failover load, trigger settings, and the
+  group-owned shutdown plan.
+- **Shutdown progress is visible while the sequence runs.** Per-UPS and
+  redundancy-group API endpoints expose sanitized phase and remote-target
+  state. The Shutdown tab polls these snapshots once per second while visible
+  and retains the last result for incident review.
+
+### Changed
+
+- **Energy estimates use each UPS's effective rating.** Per-UPS tariff and
+  nominal-power overrides now participate in live status, history, reports,
+  reloads, and group totals. When NUT reports `ups.realpower.nominal`, Eneru
+  prefers that watt rating over configured or apparent-power fallbacks.
+
 ### Fixed
 
 - **Self-test completion no longer mixes two UPS readings.** Eneru now reads the

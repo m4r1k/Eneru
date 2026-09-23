@@ -123,6 +123,8 @@ def test_dashboard_js_contains_v61_surfaces(minimal_config):
     assert "u.energy" in text
     assert "runSelfTest(" in text
     assert "/self-test" in text
+    assert 'attrs["data-remote-role"] = s.role || "shutdown"' in text
+    assert 'item.getAttribute("data-remote-role") === "shutdown"' in text
     # The self-test button must debounce: a non-idempotent hardware POST can't be
     # double-clicked into multiple tests.
     assert "if (btn) btn.disabled = true" in text
@@ -556,6 +558,57 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
 
 @pytest.mark.unit
 @pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_empty_redundancy_overview_renders_no_data(minimal_config):
+    """A group with no current members must render the normal empty state."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    scope_start = js.index("function rowsForScope")
+    scope_helper = js[scope_start:js.index("function scopedRows", scope_start)]
+    render_start = js.index("function renderOverviewSummary")
+    render = js[render_start:js.index("function monitoringBadge", render_start)]
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [{name: "empty", upsSources: []}];
+        const nodes = {
+          "overview-hero": {
+            childNodes: [],
+            replaceChildren(...children) { this.childNodes = children; },
+            appendChild(node) { this.childNodes.push(node); },
+          },
+          "overview-summary": {
+            childNodes: [],
+            replaceChildren(...children) { this.childNodes = children; },
+            appendChild(node) { this.childNodes.push(node); },
+          },
+        };
+        const document = {getElementById: id => nodes[id]};
+        function currentScope() { return "redundancy:empty"; }
+        function el(tag, attrs) { return {tag, attrs: attrs || {}}; }
+        function heroCard() { throw new Error("heroCard must not render"); }
+        function fleetOverview() { throw new Error("fleetOverview must not render"); }
+        function kpiCard() { throw new Error("kpiCard must not render"); }
+    """) + scope_helper + render + textwrap.dedent("""
+        renderOverviewSummary([{name: "rack"}, {name: "lab"}]);
+        process.stdout.write(JSON.stringify({
+          hero: nodes["overview-hero"].childNodes,
+          summaryCount: nodes["overview-summary"].childNodes.length,
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "hero": [{
+            "tag": "p",
+            "attrs": {"class": "chart-note", "text": "No UPS data yet."},
+        }],
+        "summaryCount": 0,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_fleet_overview_marks_blank_telemetry_unknown(minimal_config):
     """Empty monitoring values must render as unknown, never as bare units."""
     js = _handler(minimal_config, path="/app.js")._serve_static(
@@ -607,23 +660,34 @@ def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config)
     assert html.count("Chart UPS") == 3
     assert '" (primary)"' not in js
 
+    scope_start = js.index("function rowsForScope")
+    scope_helper = js[scope_start:js.index("function scopedRows", scope_start)]
     start = js.index("function chartSourceName")
-    helper = js[start:js.index("function populateChartUpsSelects", start)]
-    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
-        const rows = [{name: "rack"}, {name: "desk"}];
+    helper = js[start:js.index("function updateChartSourceVisibility", start)]
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [{name: "rack-pair", upsSources: ["rack", "desk"]}];
+    """) + scope_helper + helper + textwrap.dedent("""
+        const rows = [{name: "rack"}, {name: "desk"}, {name: "lab"}];
         process.stdout.write(JSON.stringify({
-          fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "desk"),
+          fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "lab"),
           fleetDefaultsFirst: chartSourceName(SCOPE_ALL, rows, "missing"),
-          scopedFollowsView: chartSourceName("desk", rows, "rack"),
+          scopedFollowsView: chartSourceName("ups:desk", rows, "rack"),
+          groupKeepsMember: chartSourceName("redundancy:rack-pair", rows, "desk"),
+          groupRejectsNonmember: chartSourceName("redundancy:rack-pair", rows, "lab"),
           emptyHasNoSource: chartSourceName(SCOPE_ALL, [], "rack"),
         }));
     """)
     result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     assert json.loads(result.stdout) == {
-        "fleetKeepsPrior": "desk",
+        "fleetKeepsPrior": "lab",
         "fleetDefaultsFirst": "rack",
         "scopedFollowsView": "desk",
+        "groupKeepsMember": "desk",
+        "groupRejectsNonmember": "rack",
         "emptyHasNoSource": "",
     }
 
@@ -642,22 +706,37 @@ def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
 
     start = js.index("function rowsForScope")
     helper = js[start:js.index("function scopedRows", start)]
-    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
-        const rows = [{name: "rack"}, {name: "desk"}];
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [
+          {name: "rack-pair", upsSources: ["rack", "desk"]},
+          {name: "empty", upsSources: []},
+        ];
+    """) + helper + textwrap.dedent("""
+        const rows = [{name: "rack"}, {name: "desk"}, {name: "lab"}];
+        const redundancy = rowsForScope(rows, "redundancy:rack-pair");
         process.stdout.write(JSON.stringify({
           fleet: rowsForScope(rows, SCOPE_ALL).map(row => row.name),
-          rack: rowsForScope(rows, "rack").map(row => row.name),
-          desk: rowsForScope(rows, "desk").map(row => row.name),
+          rack: rowsForScope(rows, "ups:rack").map(row => row.name),
+          desk: rowsForScope(rows, "ups:desk").map(row => row.name),
+          redundancy: redundancy.map(row => row.name),
+          redundancyRejectsNonmember: !redundancy.some(row => row.name === "lab"),
+          emptyRedundancy: rowsForScope(rows, "redundancy:empty").map(row => row.name),
           staleFallsBackSafely: rowsForScope(rows, "missing").map(row => row.name),
         }));
     """)
     result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     assert json.loads(result.stdout) == {
-        "fleet": ["rack", "desk"],
+        "fleet": ["rack", "desk", "lab"],
         "rack": ["rack"],
         "desk": ["desk"],
-        "staleFallsBackSafely": ["rack", "desk"],
+        "redundancy": ["rack", "desk"],
+        "redundancyRejectsNonmember": True,
+        "emptyRedundancy": [],
+        "staleFallsBackSafely": ["rack", "desk", "lab"],
     }
 
 
@@ -672,8 +751,13 @@ def test_dashboard_control_discards_stale_scope_render(minimal_config):
     control_start = js.index("let _controlBuiltKey")
     control = js[control_start:js.index(
         "async function renderVariableForms", control_start)]
-    script = "const SCOPE_ALL = '__all__';\n" + helper + textwrap.dedent("""
-        let scope = "lab";
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [];
+    """) + helper + textwrap.dedent("""
+        let scope = "ups:lab";
         let cfgSnapshot = {nutControl: {
           enabled: true, allowedCommands: [], allowedVariables: [],
         }};
@@ -707,6 +791,7 @@ def test_dashboard_control_discards_stale_scope_render(minimal_config):
         }
         function token() { return "session"; }
         function currentScope() { return scope; }
+        function scopedGroup() { return null; }
         function selectTab() {}
         function runCommand() {}
         function runSelfTest() {}
@@ -729,7 +814,7 @@ def test_dashboard_control_discards_stale_scope_render(minimal_config):
           const lab = renderControl({ups: [
             {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
           ]});
-          scope = "apc";
+          scope = "ups:apc";
           const apc = renderControl({ups: [
             {name: "lab", label: "Lab"}, {name: "apc", label: "APC"},
           ]});
@@ -1015,12 +1100,41 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert 'id="shutdown-plan"' in html
     assert "function renderShutdownPlan" in js and "shutdown-plan" in js
     assert ".sd-flow" in css and ".sd-node" in css
+    assert "function shutdownPlanTargets" in js
+    assert "function refreshShutdownProgress" in js
+    assert 'setInterval(refreshShutdownProgress, 1000)' in js
+    assert "document.hidden || activeTab !== \"shutdown\"" in js
+    assert '"/api/v1/redundancy-groups/"' in js
+    # #100 follow-ups: live trigger count, remote timings/pre-commands, and a
+    # result pop-up with the server response + exit code (signed-in only).
+    assert "function updateTriggerLive" in js and '"now " + healthy' in js
+    assert "function remoteProgressMeta" in js and ".sd-remote-meta" in css
+    assert "function openRemoteDetail" in js
+    assert "pre.scrollTop = pre.scrollHeight" in js
+    # Badges update in place across 1 s polls so keyboard focus survives.
+    assert "badge._remote = remote" in js and "dropStaleBadges()" in js
+    assert "target.isConnected" in js
+    assert "res.data.remoteDetailAvailable" in js
+    assert "Sign in to see the server's response and exit code." in js
+    assert 'id="remote-modal"' in html and 'id="remote-close"' in html
+    assert ".remote-output" in css and "overflow: auto" in css
+    assert ".sd-state-running" in css and ".sd-progress" in css
+    for state, color in (("ok", "ok"), ("warn", "warn"),
+                         ("crit", "crit"), ("muted", "muted")):
+        assert f".sd-progress.s-{state} {{ color: var(--{color}); }}" in css
     # Shutdown plan is reachable per-UPS (remote-only/multi-UPS) + shows the
     # redundancy-group quorum trigger.
     assert 'id="shutdown-ups"' in html
     assert "function populateShutdownUpsSelect" in js
     assert "function shutdownTriggerNodes" in js and ".sd-trigger" in css
     assert "drops below" in js
+    # The global selector can scope every telemetry tab to a whole redundancy
+    # group without confusing that value with a raw UPS name.
+    assert 'const SCOPE_GROUP = "redundancy:"' in js
+    assert 'text: "Redundancy · " + group.name' in js
+    assert 'group.name + " · group total"' in js
+    assert "en.costPartial" in js
+    assert 'hintedRow("Failover load"' in js
     # Battery: per-term breakdown + score trend graph (new history endpoint).
     assert "BH_TERM_LABELS" in js and "function renderBatteryHealthGraph" in js
     assert "battery-health-history" in js

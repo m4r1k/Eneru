@@ -1091,7 +1091,7 @@ class TestExecutorShutdown:
             containers=ContainersConfig(enabled=True),
             filesystems=FilesystemsConfig(
                 sync_enabled=True,
-                unmount=UnmountConfig(enabled=False),
+                unmount=UnmountConfig(enabled=True),
             ),
         )
         ex, _ = self._make(group=group, tmp_path=tmp_path)
@@ -1117,7 +1117,12 @@ class TestExecutorShutdown:
         callback = MagicMock()
         group = _redundancy_group(
             is_local=True,
+            virtual_machines=VMConfig(enabled=True),
             containers=ContainersConfig(enabled=True),
+            filesystems=FilesystemsConfig(
+                sync_enabled=True,
+                unmount=UnmountConfig(enabled=True),
+            ),
         )
         ex = RedundancyGroupExecutor(
             group,
@@ -1137,7 +1142,8 @@ class TestExecutorShutdown:
             assert ex.shutdown(reason="x") is True
 
         assert calls == ["vms", "sync", "unmount", "remote"]
-        callback.assert_called_once_with("redundancy:rg")
+        callback.assert_called_once_with(
+            "redundancy:rg", progress=ex._shutdown_progress)
 
     @pytest.mark.unit
     def test_loopback_delegate_skips_local_phases_and_callback(
@@ -1426,20 +1432,105 @@ class TestLocalShutdownCallback:
     host still running."""
 
     @pytest.mark.unit
-    def test_callback_fires_on_is_local_quorum_loss(
-        self, tmp_path: Path,
-    ) -> None:
-        callback = MagicMock()
+    @pytest.mark.parametrize(("handoff_state", "progress_state"), [
+        ("failed", "failed"),
+        ("timed-out", "timed-out"),
+        ("pending", "running"),
+    ])
+    def test_callback_outcome_updates_redundancy_progress(
+            self, tmp_path: Path, handoff_state: str,
+            progress_state: str) -> None:
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=(
+                lambda _reason, progress=None: handoff_state),
+        )
+
+        ex.shutdown(reason="quorum lost")
+
+        progress = ex._shutdown_progress.snapshot()
+        handoff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert progress["state"] == progress_state
+        assert handoff["state"] == (
+            "succeeded" if handoff_state == "pending" else handoff_state)
+
+    @pytest.mark.unit
+    def test_legacy_reason_only_callback_still_fires(self, tmp_path: Path):
+        # A callback written before the progress kwarg existed must still be
+        # called (without it) so the local host is powered off.
+        calls = []
         group = _redundancy_group(name="rack-local", is_local=True)
         ex = RedundancyGroupExecutor(
             group, base_config=_base_config(tmp_path=tmp_path),
-            local_shutdown_callback=callback,
+            local_shutdown_callback=lambda reason: calls.append(reason),
         )
         ex.shutdown(reason="quorum lost")
-        callback.assert_called_once()
+        assert calls == ["redundancy:rack-local"]
+
+    @pytest.mark.unit
+    def test_accepts_keyword_helper(self):
+        from eneru.redundancy import _accepts_keyword
+
+        assert _accepts_keyword(lambda r, progress=None: r, "progress")
+        assert _accepts_keyword(lambda r, **kw: r, "progress")
+        assert not _accepts_keyword(lambda r: r, "progress")
+        assert not _accepts_keyword(None, "progress")
+        # Builtins without a signature keep the current (keyword) contract.
+        with patch("eneru.redundancy.inspect.signature",
+                   side_effect=ValueError("no signature")):
+            assert _accepts_keyword(print, "progress")
+
+    @pytest.mark.unit
+    def test_callback_exception_marks_redundancy_progress_failed(
+            self, tmp_path: Path) -> None:
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=MagicMock(side_effect=RuntimeError("boom")),
+        )
+        logs = []
+        ex._log_message = logs.append
+
+        ex.shutdown(reason="quorum lost")
+
+        progress = ex._shutdown_progress.snapshot()
+        handoff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert progress["state"] == "failed"
+        assert handoff["state"] == "failed"
+        assert any("shutdown error: boom" in line for line in logs)
+
+    @pytest.mark.unit
+    def test_callback_fires_on_is_local_quorum_loss(
+        self, tmp_path: Path,
+    ) -> None:
+        callback_calls = []
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=lambda reason, progress=None: callback_calls.append(
+                (reason, ex._shutdown_progress.snapshot())),
+        )
+        ex.shutdown(reason="quorum lost")
+        assert len(callback_calls) == 1
+        assert callback_calls[0][1]["state"] == "running"
+        handoff = next(
+            phase for phase in callback_calls[0][1]["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert handoff["state"] == "succeeded"
+        assert ex._shutdown_progress.snapshot()["state"] == "succeeded"
         # The reason carries the redundancy group's name so the
         # coordinator's defense-in-depth lock log can attribute it.
-        assert "rack-local" in callback.call_args[0][0]
+        assert "rack-local" in callback_calls[0][0]
 
     @pytest.mark.unit
     def test_callback_NOT_invoked_for_non_local_group(self, tmp_path):
@@ -1466,6 +1557,12 @@ class TestLocalShutdownCallback:
         )
         # Must not raise.
         assert ex.shutdown(reason="quorum lost") is True
+        progress = ex._shutdown_progress.snapshot()
+        handoff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert handoff["state"] == "skipped"
 
     @pytest.mark.unit
     def test_callback_still_fires_when_remote_shutdown_raises(
@@ -1484,7 +1581,32 @@ class TestLocalShutdownCallback:
                 raise RuntimeError("ssh dead")
             mp.setattr(ex, "_shutdown_remote_servers", boom)
             ex.shutdown(reason="quorum lost")
-        callback.assert_called_once_with("redundancy:rack-local")
+        callback.assert_called_once_with(
+            "redundancy:rack-local", progress=ex._shutdown_progress)
+
+
+    @pytest.mark.unit
+    def test_unexpected_error_closes_running_phase(self, tmp_path: Path):
+        # An error escaping mid-phase must not leave that phase "running"
+        # under a failed run on the dashboard.
+        group = _redundancy_group(
+            name="rack-remote",
+            remote_servers=[RemoteServerConfig(
+                name="nas", host="10.0.0.2", user="root", enabled=True)],
+        )
+        ex = RedundancyGroupExecutor(
+            group, base_config=_base_config(tmp_path=tmp_path))
+        # A malformed result makes the success check raise while "remote"
+        # is still running.
+        ex._shutdown_remote_servers = lambda: [object()]
+
+        ex.shutdown(reason="quorum lost")
+
+        progress = ex._shutdown_progress.snapshot()
+        remote = next(
+            phase for phase in progress["phases"] if phase["id"] == "remote")
+        assert progress["state"] == "failed"
+        assert remote["state"] == "failed"
 
 
 class TestExecutorLogging:

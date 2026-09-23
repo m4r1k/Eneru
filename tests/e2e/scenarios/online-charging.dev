@@ -1,6 +1,8 @@
 # Scenario: Online, charging - normal operation
 ups.status: OL CHRG
 ups.load: 25
+ups.power.nominal: 1000
+ups.realpower.nominal: 1000
 
 battery.charge: 100
 battery.runtime: 1800

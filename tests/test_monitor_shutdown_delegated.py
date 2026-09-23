@@ -170,10 +170,9 @@ class TestDelegatedShutdownSequence:
     @pytest.mark.unit
     def test_pre_command_failure_surfaces_partial_drain_warning(self, tmp_path):
         """cubic P2: an ordinary pre-shutdown command that exits non-zero
-        increments pre_commands.failed WITHOUT setting crashed/error, so
-        RemoteShutdownResult.success stays True. The delegated path must still
-        warn about the partial drain (and still complete, since the poweroff
-        was delivered) rather than silently logging SEQUENCE COMPLETE."""
+        marks the full result unsuccessful. The delegated path must still warn
+        about the partial drain and complete because the poweroff was delivered,
+        rather than misreporting a missing poweroff."""
         monitor = _make_delegated_monitor(tmp_path)
         logs = []
         monitor._log_message = lambda m: logs.append(m)
@@ -188,7 +187,7 @@ class TestDelegatedShutdownSequence:
                 shutdown_sent=True, dry_run=monitor.config.behavior.dry_run,
                 pre_commands=RemotePreShutdownResult(failed=1),
             )
-            assert r.success is True  # the exact case cubic flagged
+            assert r.success is False
             return [r]
         monitor._shutdown_remote_servers = remote_spy
 

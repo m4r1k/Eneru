@@ -319,6 +319,9 @@ API_ENDPOINTS = (
     {"path": "/api/v1/ups/{name}/energy", "description": "Energy (kWh) and optional cost, today/month (v6.1)"},
     {"path": "/api/v1/ups/{name}/power", "description": "Per-sample load% + watts series for the Energy chart (v6.1)"},
     {"path": "/api/v1/ups/{name}/shutdown-plan", "description": "Structured controlled-shutdown plan (phases, parallel groups, steps) (v6.1)"},
+    {"path": "/api/v1/ups/{name}/shutdown-progress", "description": "Current or most recent controlled-shutdown progress"},
+    {"path": "/api/v1/redundancy-groups/{name}/shutdown-plan", "description": "Structured redundancy-group shutdown plan"},
+    {"path": "/api/v1/redundancy-groups/{name}/shutdown-progress", "description": "Current or most recent redundancy-group shutdown progress"},
     {"path": "/api/v1/ups/{name}/self-test", "description": "POST to issue a UPS self-test (auth required, allowlisted) (v6.1)"},
     {"path": "/api/v1/config/reload", "description": "POST to re-read config and apply the safe subset live"},
 )
@@ -1095,6 +1098,63 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/ups":
             return 200, "application/json", collect_status(self.api_source)
 
+        if path.startswith("/api/v1/redundancy-groups/"):
+            parts = path.split("/")
+            group_name = unquote(parts[4]) if len(parts) > 4 else ""
+            group = next(
+                (item for item in self.api_config.redundancy_groups
+                 if item.name == group_name), None)
+            if group is None:
+                return 404, "application/json", self._not_found(
+                    "Redundancy group not found")
+            executors = getattr(
+                self.api_source, "_redundancy_executors", {}) or {}
+            executor = executors.get(group_name)
+            if len(parts) == 6 and parts[5] == "shutdown-progress":
+                tracker = getattr(executor, "_shutdown_progress", None)
+                return 200, "application/json", {
+                    "group": group_name,
+                    # Raw remote command output (redacted) is for signed-in
+                    # readers only, like config_summary(extended=True).
+                    "progress": (
+                        tracker.snapshot(include_detail=principal is not None)
+                        if tracker is not None else None),
+                    "remoteDetailAvailable": principal is not None,
+                }
+            if len(parts) == 6 and parts[5] == "shutdown-plan":
+                from eneru.config import Config, UPSGroupConfig
+                from eneru.shutdown.plan import build_shutdown_plan
+                if executor is not None:
+                    plan_config = executor.config
+                    delegated = executor._uses_loopback_delegate
+                else:
+                    plan_config = Config(
+                        ups_groups=[UPSGroupConfig(
+                            remote_servers=list(group.remote_servers),
+                            virtual_machines=group.virtual_machines,
+                            containers=group.containers,
+                            filesystems=group.filesystems,
+                            is_local=group.is_local,
+                        )],
+                        behavior=self.api_config.behavior,
+                        local_shutdown=self.api_config.local_shutdown,
+                    )
+                    delegated = False
+                plan = build_shutdown_plan(
+                    plan_config,
+                    is_local=group.is_local,
+                    delegated=bool(delegated),
+                    coordinator_mode=True,
+                    include_final_sync=False,
+                    reveal_commands=False,
+                )
+                return 200, "application/json", {
+                    "group": group_name,
+                    "upsSources": list(group.ups_sources),
+                    "minHealthy": group.min_healthy,
+                    "plan": plan,
+                }
+
         if path.startswith("/api/v1/ups/"):
             parts = path.split("/")
             ups_name = unquote(parts[4]) if len(parts) > 4 else ""
@@ -1149,16 +1209,43 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 group = (mon.config.ups_groups[0]
                          if getattr(mon.config, "ups_groups", None) else None)
                 is_local = group.is_local if group is not None else True
+                # Prefer the running monitor's own flag: a reloaded api_config
+                # can drift from the restart-only local_shutdown it started with.
+                coordinator_handoff = getattr(mon, "_coordinator_handoff", None)
+                if coordinator_handoff is None:
+                    all_groups = getattr(self.api_config, "ups_groups", []) or []
+                    coordinator_handoff = (
+                        is_local
+                        or (
+                            self.api_config.local_shutdown.trigger_on == "any"
+                            and not any(item.is_local for item in all_groups)
+                        )
+                    )
                 plan = build_shutdown_plan(
                     mon.config, is_local=is_local,
                     delegated=bool(getattr(mon, "_uses_loopback_delegate", False)),
                     coordinator_mode=bool(getattr(mon, "_coordinator_mode", False)),
+                    coordinator_handoff=coordinator_handoff,
                     # Raw shutdown commands can embed sensitive flags/creds, so
                     # they stay redacted for ALL readers — matching the
                     # config_summary(extended=True) / remote-health contract,
                     # which never reveals raw commands even to authenticated users.
                     reveal_commands=False)
                 return 200, "application/json", {"ups": ups_name, "plan": plan}
+            if len(parts) == 6 and parts[5] == "shutdown-progress":
+                mon = self._monitor_for(ups_name)
+                if mon is None:
+                    return 404, "application/json", self._not_found("UPS not found")
+                tracker = getattr(mon, "_shutdown_progress", None)
+                return 200, "application/json", {
+                    "ups": ups_name,
+                    # Raw remote command output (redacted) is for signed-in
+                    # readers only, like config_summary(extended=True).
+                    "progress": (
+                        tracker.snapshot(include_detail=principal is not None)
+                        if tracker is not None else None),
+                    "remoteDetailAvailable": principal is not None,
+                }
             if len(parts) == 6 and parts[5] == "battery-health-history":
                 # v6.1 battery-health score TREND for the Battery-tab graph.
                 # Battery aging plays out over YEARS, so default to the full
@@ -1255,8 +1342,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 else:
                     start = horizon
                 store = getattr(mon, "_stats_store", None)
-                nominal = getattr(getattr(mon.config, "energy", None),
-                                  "nominal_power", None)
+                from eneru.config import resolve_energy_config
+                nominal = getattr(
+                    resolve_energy_config(mon.config), "nominal_power", None)
                 return 200, "application/json", {
                     "ups": ups_name, "from": start, "to": end,
                     "data": power_series(store, start, end, nominal_fallback=nominal),

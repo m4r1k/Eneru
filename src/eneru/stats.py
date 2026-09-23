@@ -26,7 +26,8 @@ from eneru.utils import status_has_token
 # Sample columns: 12 raw NUT metrics from spec 2.12 (battery.charge,
 # battery.runtime, ups.load, input.voltage, output.voltage, battery.voltage,
 # ups.temperature, input.frequency, output.frequency, ups.status, plus
-# ups.realpower / ups.power.nominal for energy tracking) plus 3
+# ups.realpower / ups.realpower.nominal / ups.power.nominal for energy tracking)
+# plus 3
 # Eneru-derived state fields (depletion_rate, time_on_battery,
 # connection_state) that are the foundation for the future API.
 # Order is locked: appending only keeps INSERT tuples stable for migrations.
@@ -47,12 +48,13 @@ SAMPLE_FIELDS: Tuple[str, ...] = (
     "output_frequency",  # Hz                (added v2)
     "real_power",        # W   ups.realpower      (added v7, energy)
     "power_nominal",     # VA  ups.power.nominal  (added v7, energy)
+    "real_power_nominal", # W  ups.realpower.nominal (added v8, energy)
 )
 
 # Bump and add a migration block in StatsStore._init_schema whenever the
 # samples / agg_5min / agg_hourly / events / meta / notifications schema
 # gains a column or table. See src/eneru/AGENTS.md "Stats schema evolution".
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # If the daemon or one-shot deferred-delivery helper dies after claiming a
 # notification but before marking it sent/pending, the next daemon open moves
@@ -169,6 +171,7 @@ def _sample_from_ups_data(
         _to_float(ups_data.get("output.frequency")),
         _to_float(ups_data.get("ups.realpower")),
         _to_float(ups_data.get("ups.power.nominal")),
+        _to_float(ups_data.get("ups.realpower.nominal")),
     )
 
 
@@ -343,6 +346,8 @@ class StatsStore:
                 # v7 additions (energy tracking):
                 ("real_power", "REAL"),
                 ("power_nominal", "REAL"),
+                # v8 addition (reported rated real power in watts):
+                ("real_power_nominal", "REAL"),
             )
         )
         agg_cols = """
@@ -366,7 +371,8 @@ class StatsStore:
             input_frequency_avg REAL,
             output_frequency_avg REAL,
             real_power_avg REAL,
-            power_nominal_avg REAL
+            power_nominal_avg REAL,
+            real_power_nominal_avg REAL
         """
         # F-027: was this DB already populated before we (re)create the tables?
         # A DB that has the `samples` table but NO `schema_version` meta row is
@@ -612,6 +618,14 @@ class StatsStore:
                     ON self_tests(started_ts);
             """)
 
+        if current < 8:
+            # v7 -> v8: preserve NUT's rated real power (W) separately from
+            # ups.power.nominal (VA). Energy estimation must prefer watts and
+            # must never silently label apparent power as measured watts.
+            self._safe_alter("samples", "real_power_nominal REAL")
+            for table in ("agg_5min", "agg_hourly"):
+                self._safe_alter(table, "real_power_nominal_avg REAL")
+
     def _migrate_events_to_v5(self) -> None:
         """Rebuild ``events`` with a stable id column.
 
@@ -836,7 +850,8 @@ class StatsStore:
                         output_voltage_avg, battery_voltage_avg,
                         ups_temperature_avg, ups_temperature_min, ups_temperature_max,
                         input_frequency_avg, output_frequency_avg,
-                        real_power_avg, power_nominal_avg
+                        real_power_avg, power_nominal_avg,
+                        real_power_nominal_avg
                     )
                     SELECT
                         (ts / {BUCKET_5MIN}) * {BUCKET_5MIN} AS bucket,
@@ -848,7 +863,8 @@ class StatsStore:
                         AVG(output_voltage), AVG(battery_voltage),
                         AVG(ups_temperature), MIN(ups_temperature), MAX(ups_temperature),
                         AVG(input_frequency), AVG(output_frequency),
-                        AVG(real_power), AVG(power_nominal)
+                        AVG(real_power), AVG(power_nominal),
+                        AVG(real_power_nominal)
                     FROM samples
                     {where_5}
                     GROUP BY bucket
@@ -903,7 +919,8 @@ class StatsStore:
                         output_voltage_avg, battery_voltage_avg,
                         ups_temperature_avg, ups_temperature_min, ups_temperature_max,
                         input_frequency_avg, output_frequency_avg,
-                        real_power_avg, power_nominal_avg
+                        real_power_avg, power_nominal_avg,
+                        real_power_nominal_avg
                     )
                     SELECT
                         (ts / {BUCKET_HOURLY}) * {BUCKET_HOURLY} AS bucket,
@@ -918,7 +935,8 @@ class StatsStore:
                         AVG(ups_temperature_avg),
                         MIN(ups_temperature_min), MAX(ups_temperature_max),
                         AVG(input_frequency_avg), AVG(output_frequency_avg),
-                        AVG(real_power_avg), AVG(power_nominal_avg)
+                        AVG(real_power_avg), AVG(power_nominal_avg),
+                        AVG(real_power_nominal_avg)
                     FROM agg_5min
                     {where_h}
                     GROUP BY bucket
@@ -2020,12 +2038,13 @@ class StatsStore:
         end_ts: int,
         *,
         prefer_tier: Optional[str] = None,
-    ) -> List[Tuple[int, Optional[float], Optional[float], Optional[float]]]:
-        """Return ``[(ts, real_power, ups_load, power_nominal)]`` for energy.
+    ) -> List[Tuple[int, Optional[float], Optional[float], Optional[float],
+                    Optional[float]]]:
+        """Return power rows for energy integration.
 
-        Picks the same retention tier as :meth:`query_range` so an energy
-        integral never mixes raw and aggregated rows. energy.py turns this
-        into kWh (real_power when present, else ups_load/100 * power_nominal).
+        Rows are ``(ts, real_power, ups_load, real_power_nominal,
+        power_nominal)``. Picks the same retention tier as :meth:`query_range`
+        so an energy integral never mixes raw and aggregated rows.
         Unlike query_range this keeps NULL cells (returned as ``None``) so the
         integrator can mark gaps rather than silently dropping them.
         """
@@ -2033,10 +2052,15 @@ class StatsStore:
             return []
         tier = prefer_tier or self._pick_tier(start_ts, end_ts)
         if tier == "samples":
-            cols = "ts, real_power, ups_load, power_nominal"
+            cols = (
+                "ts, real_power, ups_load, real_power_nominal, power_nominal"
+            )
             table = "samples"
         else:
-            cols = "ts, real_power_avg, ups_load_avg, power_nominal_avg"
+            cols = (
+                "ts, real_power_avg, ups_load_avg, "
+                "real_power_nominal_avg, power_nominal_avg"
+            )
             table = "agg_5min" if tier == "agg_5min" else "agg_hourly"
         try:
             with self._db_lock:
@@ -2053,6 +2077,7 @@ class StatsStore:
                         float(r[1]) if r[1] is not None else None,
                         float(r[2]) if r[2] is not None else None,
                         float(r[3]) if r[3] is not None else None,
+                        float(r[4]) if r[4] is not None else None,
                     )
                     for r in cur.fetchall()
                 ]
@@ -2145,6 +2170,7 @@ class StatsStore:
             "output_frequency": "output_frequency_avg",
             "real_power": "real_power_avg",
             "power_nominal": "power_nominal_avg",
+            "real_power_nominal": "real_power_nominal_avg",
         }
         return avg_map.get(metric, metric)
 

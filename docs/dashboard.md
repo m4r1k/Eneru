@@ -31,7 +31,11 @@ Open `http://<host>:9191/` in a browser.
   config + remote-health snapshot taken once per refresh, so opening it costs no
   extra requests.
 - **Redundancy groups:** a healthy/required rollup (how many member UPSes are
-  currently healthy vs the quorum target), when configured.
+  currently healthy vs the quorum target), when configured. The header **View**
+  selector can scope Overview, Power, Battery, Energy, Events, and Shutdown to
+  one redundancy group. Group views use the member UPS telemetry and show only
+  remote servers owned by that group. UPS write controls remain per-UPS, so the
+  Control tab asks you to select a UPS instead of exposing group-wide buttons.
 - **On-battery / shutdown banner:** driven by live UPS and redundancy status (not
   stale events), so it appears when a UPS goes on battery or shutdown is imminent
   and clears as soon as power returns.
@@ -50,8 +54,14 @@ Open `http://<host>:9191/` in a browser.
   when you are signed in **and** [`nut_control`](nut-control.md) is enabled. The
   controls reflect the configured command/variable allowlists; the server
   enforces them regardless of what the UI renders.
+- **Shutdown plan and progress:** the Shutdown tab shows the exact plan for a
+  UPS or redundancy group, including phase order, parallel remotes, advisory
+  remote health, and the current or most recent execution result. During an
+  active shutdown it marks phases and remote targets as running, succeeded,
+  failed, timed out, or skipped.
 
-The page polls every 10 seconds.
+The page polls status every 10 seconds. While the Shutdown tab is visible, it
+polls the small progress snapshots every second so phase changes appear promptly.
 
 ### Status and event wording
 

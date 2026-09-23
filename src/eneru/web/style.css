@@ -594,6 +594,12 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   padding: 0.7rem 0.9rem; border-radius: var(--r-md); background: var(--accent-weak);
   border: 1px solid var(--line); font-size: 0.95rem; }
 .sd-noop .ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.sd-progress { margin: 0.7rem 0; padding: 0.55rem 0.75rem;
+  border: 1px solid currentColor; border-radius: var(--r-sm); font-size: 0.85rem; }
+.sd-progress.s-ok { color: var(--ok); }
+.sd-progress.s-warn { color: var(--warn); }
+.sd-progress.s-crit { color: var(--crit); }
+.sd-progress.s-muted { color: var(--muted); }
 .sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
 .sd-node { position: relative; border: 1px solid var(--line-strong);
   border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;
@@ -616,13 +622,29 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   background: rgba(167,139,250,0.16); padding: 0.08rem 0.45rem; border-radius: 999px; }
 .sd-est { color: var(--muted); font-size: 0.8rem; }
 .sd-head .badge { margin-left: auto; }
+.sd-node.sd-state-running { border-color: var(--warn); }
+.sd-node.sd-state-succeeded { border-color: var(--ok); }
+.sd-node.sd-state-failed, .sd-node.sd-state-timed-out { border-color: var(--crit); }
 .sd-steps { margin: 0.6rem 0 0 calc(26px + 0.6rem); display: flex;
   flex-direction: column; gap: 0.4rem; }
 .sd-steps.sd-parallel { flex-direction: row; flex-wrap: wrap; }
 .sd-step { background: var(--panel-2); border: 1px solid var(--line);
   border-radius: var(--r-sm); padding: 0.4rem 0.65rem; font-size: 0.85rem; }
+.sd-step.sd-state-running { border-color: var(--warn); }
+.sd-step.sd-state-succeeded { border-color: var(--ok); }
+.sd-step.sd-state-failed, .sd-step.sd-state-timed-out { border-color: var(--crit); }
+.sd-health-badge, .sd-step .sd-progress-badge { display: inline-block; margin: 0.35rem 0.35rem 0 0; }
 .sd-parallel .sd-step { flex: 1 1 200px; }
 .sd-step-detail { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+button.sd-progress-badge { font-family: inherit; cursor: pointer; border: 0; }
+button.sd-progress-badge:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
+.sd-remote-meta { color: var(--muted); font-size: 0.75rem; margin-top: 0.2rem; }
+.sd-trigger-live { margin-left: 0.5rem; }
+/* Remote command output can be long; keep it scrollable inside the dialog. */
+.remote-output { max-height: 40vh; overflow: auto; white-space: pre-wrap;
+  word-break: break-word; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.5rem 0.6rem; margin: 0.3rem 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; }
 
 /* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
 /* Data series use a categorical palette (accent blue + violet), NOT the status

@@ -1,6 +1,7 @@
 """Tests for remote pre-shutdown command templating and execution."""
 
 import threading
+import time
 
 import pytest
 from unittest.mock import patch, MagicMock, call
@@ -1239,14 +1240,24 @@ class TestLoopbackShutdownOrdering:
             ],
         )
         remote_monitor.config.ups_groups[0].remote_servers = [loopback]
+        remote_monitor._shutdown_progress.start("test outage")
+        phase_a_snapshots = []
+
+        def fail_pre_actions(*_args, **_kwargs):
+            phase_a_snapshots.append(
+                remote_monitor._shutdown_progress.snapshot())
+            raise AttributeError("simulated crash")
 
         # Phase A raises mid-run; Phase C still has to send shutdown.
         with patch.object(remote_monitor, "_execute_remote_pre_shutdown",
-                          side_effect=AttributeError("simulated crash")), \
+                          side_effect=fail_pre_actions), \
              patch.object(remote_monitor, "_run_remote_command",
                           return_value=(True, "")) as mock_run:
             results = remote_monitor._shutdown_remote_servers()
 
+        live_row = phase_a_snapshots[0]["remotes"][0]
+        assert live_row["state"] == "running"
+        assert live_row["finishedAt"] is None
         # Phase C ran — the shutdown_command was issued.
         assert mock_run.call_count == 1
         assert mock_run.call_args.args[1] == "shutdown -h now"
@@ -1255,6 +1266,37 @@ class TestLoopbackShutdownOrdering:
         assert lb_result.crashed is True
         assert "simulated crash" in lb_result.pre_commands.error
         assert lb_result.shutdown_sent is True
+        final_row = remote_monitor._shutdown_progress.snapshot()["remotes"][0]
+        assert final_row["startedAt"] == live_row["startedAt"]
+        assert final_row["state"] == "failed"
+        assert final_row["outcome"] == "command-sent"
+
+    @pytest.mark.unit
+    def test_peer_orchestration_exception_finishes_loopback_progress(
+        self, remote_monitor
+    ):
+        loopback = RemoteServerConfig(
+            name="host-loopback", enabled=True, host="127.0.0.1",
+            user="root", is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+        )
+        nas = RemoteServerConfig(
+            name="NAS", enabled=True, host="10.0.0.10", user="root",
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback, nas]
+        remote_monitor._shutdown_progress.start("test outage")
+
+        with patch.object(
+                remote_monitor, "_shutdown_servers_parallel",
+                side_effect=RuntimeError("thread setup failed")):
+            with pytest.raises(RuntimeError, match="thread setup failed"):
+                remote_monitor._shutdown_remote_servers()
+
+        row = remote_monitor._shutdown_progress.snapshot()["remotes"][0]
+        assert row["state"] == "failed"
+        assert row["outcome"] == "not-sent"
+        assert row["finishedAt"] is not None
 
     @pytest.mark.unit
     def test_loopback_phase_c_exception_does_not_skip_other_loopbacks(
@@ -1815,3 +1857,161 @@ class TestParallelShutdownResilience:
             str(c) for c in remote_monitor.logger.log.call_args_list)
         assert "1 crashed" in log_text          # phase summary line
         assert "kaboom" in log_text             # the thread-crash trace line
+
+
+class TestRemoteProgressTracking:
+    """Progress tracking is optional: executors without a tracker no-op."""
+
+    @pytest.mark.unit
+    def test_tracking_without_tracker_is_noop(self):
+        from eneru.config import RemoteServerConfig
+        from eneru.shutdown.remote import RemoteShutdownMixin, RemoteShutdownResult
+
+        mixin = RemoteShutdownMixin()
+        server = RemoteServerConfig(name="nas", host="10.0.0.2", user="root")
+
+        assert mixin._track_remote_start(server) is None
+        mixin._track_remote_finish(
+            RemoteShutdownResult(server="nas", host="10.0.0.2"), None)
+
+
+class TestRemoteCommandOutputCapture:
+    """The final shutdown command's exit code and output reach the result
+    so authenticated dashboard readers can inspect the server's response."""
+
+    @pytest.fixture
+    def live_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        return monitor
+
+    @staticmethod
+    def _server(**kwargs):
+        from eneru.config import RemoteServerConfig
+
+        defaults = dict(name="nas", host="10.0.0.2", user="root",
+                        enabled=True, shutdown_command="poweroff")
+        defaults.update(kwargs)
+        return RemoteServerConfig(**defaults)
+
+    @pytest.mark.unit
+    def test_run_remote_command_fills_capture(self, live_monitor):
+        capture = {}
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(3, "partial\n", "boom\n")):
+            ok, msg = live_monitor._run_remote_command(
+                self._server(), "poweroff", 10, "shutdown", capture=capture)
+        assert (ok, msg) == (False, "boom")
+        assert capture == {"exit_code": 3, "stdout": "partial\n",
+                           "stderr": "boom\n"}
+
+    @pytest.mark.unit
+    def test_capture_untouched_when_command_never_runs(self, live_monitor):
+        capture = {}
+        with patch("eneru.shutdown.remote.run_command") as runner:
+            ok, _ = live_monitor._run_remote_command(
+                self._server(), "poweroff", 10, "shutdown",
+                deadline=time.monotonic() - 1, capture=capture)
+        runner.assert_not_called()
+        assert ok is False and capture == {}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("rc", "stdout", "stderr", "sent", "response"), [
+        (0, "Powering off\n", "", True, "Powering off"),
+        (1, "", "Permission denied\n", False, "Permission denied"),
+        (2, "out\n", "err\n", False, "out\nerr"),
+    ])
+    def test_regular_remote_records_exit_code_and_response(
+            self, live_monitor, rc, stdout, stderr, sent, response):
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(rc, stdout, stderr)):
+            result = live_monitor._shutdown_remote_server(self._server())
+        assert result.shutdown_sent is sent
+        assert result.exit_code == rc
+        assert result.response == response
+
+    @pytest.mark.unit
+    def test_loopback_poweroff_records_exit_code_and_response(
+            self, live_monitor):
+        from eneru.shutdown.remote import RemoteShutdownResult
+
+        server = self._server(name="host", host="127.0.0.1",
+                              is_host_loopback=True)
+        result = RemoteShutdownResult(server="host", host="127.0.0.1")
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(1, "", "sudo: a password is required\n")):
+            live_monitor._shutdown_loopback_command(server, result)
+        assert result.exit_code == 1
+        assert result.response == "sudo: a password is required"
+
+    @pytest.mark.unit
+    def test_dry_run_leaves_exit_code_unset(self, live_monitor):
+        live_monitor.config.behavior.dry_run = True
+        with patch("eneru.shutdown.remote.run_command") as runner:
+            result = live_monitor._shutdown_remote_server(self._server())
+        runner.assert_not_called()
+        assert result.exit_code is None and result.response == ""
+
+
+class TestRemoteWorkerStartFailure:
+    """A worker thread that can't start (resource exhaustion) is recorded as
+    crashed; other workers still run and the loopback poweroff still fires."""
+
+    @pytest.fixture
+    def live_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_start_failure_is_recorded_and_phase_c_still_runs(self, live_monitor):
+        from eneru.config import RemoteServerConfig
+        import threading as real_threading
+
+        nas = RemoteServerConfig(name="nas", host="10.0.0.2", user="root",
+                                 enabled=True, shutdown_command="poweroff")
+        web = RemoteServerConfig(name="web", host="10.0.0.3", user="root",
+                                 enabled=True, shutdown_command="poweroff")
+        host = RemoteServerConfig(name="host", host="127.0.0.1", user="root",
+                                  enabled=True, is_host_loopback=True,
+                                  shutdown_command="poweroff")
+        live_monitor.config.ups_groups[0].remote_servers = [nas, web, host]
+        sent = []
+
+        class FlakyThread(real_threading.Thread):
+            def start(self):
+                if self.name.endswith("nas"):
+                    raise RuntimeError("can't start new thread")
+                super().start()
+
+        def fake_run(server, command, timeout, desc, **kwargs):
+            sent.append(server.host)
+            return True, ""
+
+        with patch("eneru.shutdown.remote.threading.Thread", FlakyThread), \
+             patch.object(live_monitor, "_run_remote_command", side_effect=fake_run):
+            results = live_monitor._shutdown_remote_servers()
+
+        by_host = {r.host: r for r in results}
+        assert by_host["10.0.0.2"].crashed is True
+        assert "can't start new thread" in by_host["10.0.0.2"].error
+        assert by_host["10.0.0.3"].shutdown_sent is True
+        # The host poweroff (Phase C) still ran, after the peer that started.
+        assert by_host["127.0.0.1"].shutdown_sent is True
+        assert sent.index("10.0.0.3") < sent.index("127.0.0.1")

@@ -153,7 +153,7 @@ def test_apply_reload_group_non_trigger_change_restart(tmp_path):
 
 @pytest.mark.unit
 def test_apply_reload_per_ups_v61_overrides_live(tmp_path):
-    # Per-UPS battery_health / self_test overrides are read live by the v6.1
+    # Per-UPS battery_health / self_test / energy overrides are read live by the v6.1
     # resolvers each tick, so a reload must apply them IN PLACE — not punt the
     # whole group to restart-required (the original B1a gap CodeRabbit flagged).
     base = (
@@ -163,18 +163,23 @@ def test_apply_reload_per_ups_v61_overrides_live(tmp_path):
         "  - name: U1@h\n"
         "    battery_health:\n      expected_life_years: {y}\n"
         "    self_test:\n      schedule: {sch}\n      command: test.battery.start\n"
+        "    energy:\n      nominal_power: {watts}\n"
         "  - name: U2@h\n"
     )
-    live = _load(_write(tmp_path / "a.yaml", base.format(y=5, sch="monthly")))
-    new = _load(_write(tmp_path / "b.yaml", base.format(y=3, sch="weekly")))
+    live = _load(_write(
+        tmp_path / "a.yaml", base.format(y=5, sch="monthly", watts=600)))
+    new = _load(_write(
+        tmp_path / "b.yaml", base.format(y=3, sch="weekly", watts=900)))
     report = reloadmod.apply_reload(live, [live], new)
     assert "battery_health:U1@h" in report["applied"]
     assert "self_test:U1@h" in report["applied"]
+    assert "energy:U1@h" in report["applied"]
     # The whole group must NOT be punted to restart-required for a live field.
     assert "ups_groups:U1@h" not in report["restartRequired"]
     g1 = next(g for g in live.ups_groups if g.ups.name == "U1@h")
     assert g1.battery_health.expected_life_years == 3
     assert g1.self_test.schedule == "weekly"
+    assert g1.energy.nominal_power == 900
 
 
 @pytest.mark.unit

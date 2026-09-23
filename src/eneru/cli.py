@@ -1490,6 +1490,7 @@ def _cmd_shutdown_group(args):
             # rehearsal. Mirrors what RedundancyGroupExecutor does in
             # its own __init__.
             monitor._check_dependencies()
+            monitor._pending_shutdown_reason = "manual rehearsal via CLI"
             monitor._execute_shutdown_sequence()
         else:
             executor = RedundancyGroupExecutor(

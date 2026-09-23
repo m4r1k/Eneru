@@ -255,31 +255,33 @@ reload, or shutdown. See the `dashboard-preview` skill
 
 | Area | Coverage |
 |------|----------|
-| Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance, local ownership, loopback delegation config shape, redundancy rules |
-| Monitor state machine | OL/OB transitions, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger re-arming after a successful unknown-status interval, FSD, failsafe, shutdown trigger order, dry-run behavior |
-| Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases, remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), exception isolation across phases, dry-run + per-server notification paths |
+| Config loading and validation | YAML parsing, defaults, enum validation, multi-UPS inheritance (including per-UPS energy tariff/nominal-watt overrides, explicit-null clearing, single-error unknown-key reporting, and oversized-number rejection), local ownership, loopback delegation config shape, redundancy rules |
+| Monitor state machine | OL/OB transitions, one-time warning when configured `nominal_power` exceeds the reported watt rating, self-test power attribution and continuing-OB reclassification, failed-test latch and delayed later-outage trigger re-arming after a successful unknown-status interval, FSD, failsafe, shutdown trigger order, dry-run behavior |
+| Shutdown mixins | VMs, containers, compose files, filesystem sync and unmounts, remote SSH phases (including final-command exit code/response capture for regular and loopback remotes, and worker-start failures that still reach the loopback poweroff), remote pre-shutdown action rendering, loopback delegate bracketing (Phase A pre-actions → regulars → Phase C poweroff), full-lifecycle loopback progress, partial-drain failure reporting, exception isolation across phases, dry-run + per-server notification paths |
 | CLI inspection vs runtime | `python -m eneru validate` shutdown-sequence tree, `python -m eneru remote list` ORDER + last-known HEALTH columns, `python -m eneru shutdown remote` drill, container legacy-path rewrite — all partition `is_host_loopback` delegates out of `compute_effective_order` and invoke `_prepare_runtime_config` / `_load_config` so the inspection output matches what the daemon would execute |
-| Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, signal handling |
-| Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution |
+| Multi-UPS coordinator | Group routing, `is_local`, drain policy, local shutdown locking, trigger-specific progress reasons, shared poweroff outcomes for concurrent handoffs (including owner failure), positional startup-event compatibility, signal handling |
+| Redundancy runtime | Quorum evaluation, advisory triggers, connection-grace handling, idempotent group execution, aggregate member telemetry with configured watts overriding reported ratings, exact group plans, and live phase/remote progress snapshots including coordinator-callback failure |
 | Health monitoring | Voltage thresholds, AVR, bypass, overload, battery anomaly filtering |
 | Notifications | Plain-language power-event/status formatting with raw database preservation, retry queue, lifecycle classification, coalescing, suppression rules, atomic metadata preservation across memory replay/reload, container restart/upgrade stop-row deferral, deferred stop delivery claim/recovery races, reload-worker claim races, and mark-sent failure logging |
-| Statistics and TUI | SQLite schema (incl. the v5 `events.id` AUTOINCREMENT table-rebuild migration — column added, rows/version preserved, idempotent, id-not-reused-after-delete — and the v6 `notifications.delivering_at` migration for stale deferred-delivery claim recovery), self-test queries and conservative OB/OL history repair that excludes device observations and aborted results, stale-claim recovery failure propagation, aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
-| Observability | API routing, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
+| Statistics and TUI | SQLite schema (including the v5 `events.id` table rebuild, v6 notification claim recovery, v7 energy tables/columns, and v8 nominal-real-power columns with preservation, aggregate-tier queries, and replay-safe reopen coverage), self-test queries and conservative OB/OL history repair that excludes device observations and aborted results, stale-claim recovery failure propagation, aggregation, event tier filtering, wide-range + composite-cursor event paging across duplicate timestamps, `delete_events` (id+ts+type guard, dedup, per-DB isolation), TUI grouping, graphs, one-shot monitor output |
+| Observability | API routing, signed-in-only redacted remote shutdown detail, readiness, Prometheus escaping, power-quality metrics, remote-health sidecars, MQTT publishing |
 | Authentication | User/API-key SQLite store (bcrypt hashing, salt uniqueness, truncation, CRUD), `eneru user`/`apikey` CLI lifecycle, password-input safety (getpass/generate/stdin), lazy bcrypt import |
 | API auth middleware | Session manager (TTL/expiry), tiered authorization matrix (reads open vs `require_for_reads`, writes fail-closed when auth off), bearer/API-key resolution, session re-validation against user state (deleted user or password reset signs out; DB error preserves the session), login/logout, transition-only throttle auditing, Host-rejection warn-once, body-size + JSON validation including total body-read deadlines, read-error mapping, and closing keep-alive after an unread body, tiered `/config` |
 | Event management API | `DELETE /api/v1/ups/{name}/events` — authed delete + `EVENTS_DELETED` audit, anonymous 401 / auth-off 403, unknown UPS 404, stats-unavailable 503, malformed-body matrix (400) and oversize (413); monitor/coordinator routing to the live per-UPS store; events `from`/`to`/`before` paging and history `from > to`/`All` validation |
 | UPS control | `upscmd`/`upsrw` wrappers and output parsing (including PTY output on NUT errors), fixed-binary argv validation before subprocess execution, username/password pairing before PTY prompt handling, command/variable allowlist enforcement, per-group credential/allowlist overrides, feature-disabled and unknown-UPS handling, NUT-error mapping, self-test write-before-command state, duplicate refusal, repeated result polling, restart recovery, and terminal notification deduplication, fail-closed config validation (control requires auth), value sanitization, audit logging to the events table |
 | Config hot-reload | Strict load+validate (bad YAML / non-mapping / validation error rejected, running config kept), safe-vs-restart classification, in-place live apply across shared + per-monitor configs, subsystem reload hooks for stats/notifications/MQTT/remote-health, SIGHUP handler and API `/config/reload` endpoint |
 | Periodic reports | Daily/weekly/monthly scheduling and deduplication, retry after gather/render/enqueue failures, shared event/self-test/energy/restart windows, exclusive duration boundaries, missing-period fallback, poll/tier-aware sparse-sample handling, compact labeled UPS rows, estimated-energy markers, and aggregate multi-UPS totals |
-| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, human-readable NUT status/event labels with priority and retained vendor tokens, event filters, sortable Time header, uppercase remote-health status rendering, fleet-level summary counts and blank-telemetry handling, explicit chart-source persistence, Fleet/Lab/APC scoping on the authenticated Control tab including stale asynchronous render rejection, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, deployed-audit CLI parsing/safety helpers, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
+| Web dashboard | Static asset serving via `importlib.resources`, MIME mapping, path-traversal rejection, strict CSP + `nosniff` on HTML, bytes-body responses, dashboard open before the read gate, human-readable NUT status/event labels with priority and retained vendor tokens, event filters, sortable Time header, uppercase remote-health status rendering, fleet-level summary counts and blank-telemetry handling, explicit chart-source persistence, typed UPS/redundancy-group scoping including empty groups, group-safe Control behavior, state-colored shutdown progress and polling, live trigger health counts, remote timing/pre-command lines and the response/exit-code pop-up, stale asynchronous Control render rejection, control variable forms, `nutControl` exposure in the config summary, Power-tab line-quality handling for AVR `BOOST`/`TRIM` versus binary bypass/overload states, deployed-audit CLI parsing/safety helpers, and marker guards for the asset-level surfaces with no browser in CI (`[hidden]` reset, resize-safe graph, wide-history range/paging, delete-selected, drill-down, Light/Dark/System theme) |
 | Packaging | nFPM file list, package install paths, dynamic EL8 interpreter re-exec, EL8 repository routing, exact-version release smoke contracts, safe artifact selection, readable Actions-ref policy, parallel native AMD64/ARM64 OCI smoke tests with a required aggregate gate |
 
 Dashboard regression tests are split by responsibility:
 
 - `tests/test_dashboard.py` covers fleet summary rendering, explicit and
-  persistent chart sources, Control-tab view scoping, stale Control render
-  rejection, blank fleet telemetry, readable NUT/event labels, retained custom
-  status tokens, and tablet-width comparison-table access.
+  persistent chart sources, typed UPS/redundancy-group view scoping, group-safe
+  Control behavior, empty-group rendering, shutdown progress surfaces and state
+  colors, stale Control render rejection,
+  blank fleet telemetry, readable NUT/event labels, retained custom status
+  tokens, and tablet-width comparison-table access.
 - `tests/test_dashboard_tools.py` covers the deployed-audit CLI contract,
   focused drill-down planning, authentication-aware HTTP findings, unique
   scope captures, and structural fallbacks.
@@ -315,7 +317,7 @@ matrix wall-clock is bounded by a smaller slowest group):
 | UPS Single Core | Single UPS events, shutdown paths, embedded API, MQTT, unconditional remote PATH augmentation, real Compose timeout shutdown |
 | UPS Single Auth | v6.0 auth, UPS control, hot-reload, dashboard, event management, self-test attribution and failed-test outage trigger (tests 52–56, 62) |
 | UPS Multi | Independent UPS groups and local-drain policies |
-| Redundancy Quorum | Quorum behavior and advisory triggers (tests 21–27, 37, 38) |
+| Redundancy Quorum | Quorum behavior, advisory triggers, and group shutdown observability (tests 21–27, 37, 38, 63) |
 | Redundancy Regression | Runtime NUT-visibility regressions (R1, R2) |
 | Stats | SQLite, graphs, events, notification coalescing |
 | Loopback | Containerized local-host ownership through root and sudo SSH loopback, including generated local VM/container/sync/unmount actions, verified delegated-poweroff completion markers, and strict container SSH trust |
@@ -323,13 +325,13 @@ matrix wall-clock is bounded by a smaller slowest group):
 In the inventory below the **Group** column shows the original coarse
 focus area; *UPS Single* rows now run in **UPS Single Core** or **UPS
 Single Auth**, and *Redundancy* rows in **Redundancy Quorum** (21–27,
-37, 38) or **Redundancy Regression** (R1, R2), per the table above.
+37, 38, 63) or **Redundancy Regression** (R1, R2), per the table above.
 
 The scenario files simulate online, on-battery, neutral/unknown, low-battery, FSD, brownout, overload, hot-grid, nominal-voltage-mismatch, and passive self-test states.
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 62 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 64 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -377,7 +379,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 62 numb
 | 40 | UPS Single | Remote SSH healthcheck reaches the test target without sending shutdown commands |
 | 41 | CLI | Manual remote shutdown dry-run executes no configured remote commands |
 | 42 | CLI | Manual confirmed remote shutdown reaches only the selected target |
-| 43 | UPS Single | `/health`, `/ready`, `/metrics`, `/api/v1`, and JSON 404 endpoint discovery respond from the embedded API |
+| 43 | UPS Single | `/health`, `/ready`, `/metrics`, `/api/v1`, and JSON 404 discovery respond; a real NUT low-battery event publishes the exact per-UPS plan plus terminal phase/remote progress |
 | 44 | UPS Single | An unreachable remote target is reported as a bounded best-effort failure instead of stalling shutdown |
 | 45 | UPS Single | MQTT status publishing reaches the broker and includes power-quality fields |
 | 46 | UPS Single | The OCI image runs against the E2E NUT server with the API enabled only by CLI flags, and serves the browser dashboard (`/`, `/app.js`) |
@@ -397,6 +399,8 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 62 numb
 | 60 | UPS Single | A real local Compose stack is removed through Eneru's `down -t <seconds>` shutdown path |
 | 61 | Loopback | A real coordinator/list-form delegated poweroff reaches the SSH target, skips in-container poweroff, and persists a `sequence_complete` recovery marker |
 | 62 | UPS Single | Passive running/failed self-test states are recorded and attributed without ordinary outage alerts; failed tests that remain on battery are reclassified as outages, and a later outage after a successful unknown-status interval fires the delayed failed-test trigger without an OL poll |
+| 63 | Redundancy | The live API proves per-UPS nominal-watt override/global inheritance beating NUT's reported `ups.realpower.nominal` (with exactly one above-rating warning), anonymous readers never receiving raw remote output, redundancy member + aggregate energy/failover-load telemetry, the exact group shutdown plan, and terminal phase/remote progress after real quorum loss |
+| 64 | UPS Single | A real remote shutdown (harmless command exiting 3 on the SSH target) keeps anonymous progress sanitized while a signed-in read returns `exitCode: 3` and the command's output |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

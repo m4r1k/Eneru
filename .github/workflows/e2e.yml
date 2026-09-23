@@ -152,6 +152,7 @@ jobs:
           # user) must stay present, and the scenario file it depends on.
           grep -q "Test 62: self-test observation" tests/e2e/groups/single-ups-auth.sh
           grep -q "^ups.test.result:" tests/e2e/scenarios/self-test-passed.dev
+          grep -q "Test 64: authenticated remote shutdown response and exit code" tests/e2e/groups/single-ups-auth.sh
 
       - name: Verify v6.2 report and self-test E2E coverage is wired
         if: matrix.group == 'stats' || matrix.group == 'single-ups-auth'
@@ -180,11 +181,23 @@ jobs:
             grep -q "Test 59: Remote PATH augmentation always resolves bare commands" tests/e2e/groups/single-ups-core.sh
             grep -q "Test 60: Local Compose shutdown honors the configured timeout form" tests/e2e/groups/single-ups-core.sh
             grep -q 'shutdown_command: "eneru-path-probe"' tests/e2e/groups/single-ups-core.sh
+            grep -q "/api/v1/ups/TestUPS%40localhost%3A3493/shutdown-progress" tests/e2e/groups/single-ups-core.sh
           else
             grep -q "Test 61: E2E delegated poweroff delivery writes completion marker" tests/e2e/groups/loopback.sh
             grep -Eq "^[[:space:]]*delegated_completion_marker_case[[:space:]]*$" tests/e2e/groups/loopback.sh
             grep -q '"reason": "sequence_complete"' tests/e2e/groups/loopback.sh
           fi
+
+      - name: Verify redundancy progress E2E coverage is wired
+        if: matrix.group == 'redundancy-quorum'
+        run: |
+          grep -q "Test 63: Redundancy plan and live shutdown progress API" tests/e2e/groups/redundancy-quorum.sh
+          grep -q "/api/v1/redundancy-groups/rack-1-dual-psu/shutdown-plan" tests/e2e/groups/redundancy-quorum.sh
+          grep -q "/api/v1/redundancy-groups/rack-1-dual-psu/shutdown-progress" tests/e2e/groups/redundancy-quorum.sh
+          grep -q "/power?from=" tests/e2e/groups/redundancy-quorum.sh
+          grep -q 'nominal_power: 800' tests/e2e/config-e2e-redundancy.yaml
+          grep -q 'ups.realpower.nominal: 1000' tests/e2e/scenarios/online-charging.dev
+          grep -q 'remoteDetailAvailable' tests/e2e/groups/redundancy-quorum.sh
 
       - name: Collect logs on failure
         if: failure()

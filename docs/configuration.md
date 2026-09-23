@@ -192,7 +192,7 @@ Validation catches YAML errors, invalid enum values, local-resource ownership mi
 | `battery_health` | Global, overridable per UPS | Battery health score + replacement prediction (v6.1) |
 | `self_test` | Global, overridable per UPS | UPS battery self-test — observe device-run results (no config) and optionally issue on a schedule (v6.1; issuing is a write surface) |
 | `reports` | Global | Periodic summary reports via the notification channel (v6.1) |
-| `energy` | Global | kWh and optional cost tracking (v6.1) |
+| `energy` | Global defaults; tariff and nominal watts overridable per UPS | kWh and optional cost tracking (v6.1) |
 | `notifications` | Global | Apprise URLs, retry, coalescing, and event suppression |
 | `statistics` | Global | SQLite history location and retention |
 | `virtual_machines` | Single UPS or local group only | Libvirt VM shutdown |
@@ -222,6 +222,20 @@ In single-UPS mode this is `ups:`. In multi-UPS mode each list entry accepts the
 The grace period never weakens failsafe behavior. If Eneru loses UPS visibility while the UPS is on battery, shutdown starts immediately.
 
 See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guidance on flaky NUT servers and the flap-counter behavior.
+
+## Energy
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enables kWh tracking globally |
+| `cost_per_kwh` | `null` | Optional tariff; `null` disables cost fields |
+| `currency` | `USD` | ISO 4217 code used to format costs |
+| `cost_format` | `null` | Optional format such as `{value} EUR` |
+| `nominal_power` | `null` | Rated watts used to estimate power from load%; overrides `ups.realpower.nominal` and `ups.power.nominal` (warns once if above the reported watt rating) |
+
+In list-form `ups:`, only `cost_per_kwh` and `nominal_power` may appear in a
+per-UPS `energy:` block. Missing keys inherit the global value; explicit `null`
+clears it. See [Energy tracking](energy-tracking.md) for calculation details.
 
 ## Triggers
 

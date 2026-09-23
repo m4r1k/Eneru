@@ -16,6 +16,7 @@ from eneru import (
 )
 from eneru.monitor import UPSGroupMonitor
 from eneru.multi_ups import MultiUPSCoordinator
+from eneru.shutdown.progress import ShutdownProgress
 from eneru.shutdown.remote import RemoteShutdownResult
 
 
@@ -339,7 +340,7 @@ class TestMultiUPSCoordinator:
 
         calls = []
         coord._handle_local_shutdown = \
-            lambda label, loopback_results=None: calls.append(label)
+            lambda label, loopback_results=None, progress=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[0])
         assert len(calls) == 1
@@ -357,7 +358,7 @@ class TestMultiUPSCoordinator:
 
         calls = []
         coord._handle_local_shutdown = \
-            lambda label, loopback_results=None: calls.append(label)
+            lambda label, loopback_results=None, progress=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[1])
         assert len(calls) == 0
@@ -377,7 +378,7 @@ class TestMultiUPSCoordinator:
 
         calls = []
         coord._handle_local_shutdown = \
-            lambda label, loopback_results=None: calls.append(label)
+            lambda label, loopback_results=None, progress=None: calls.append(label)
 
         coord._on_group_shutdown(config.ups_groups[0])
         assert len(calls) == 1
@@ -422,9 +423,160 @@ class TestMultiUPSCoordinator:
         coord._handle_local_shutdown("UPS2")
 
         # The body's "triggered by" line fires once; the second call hit the
-        # guard (proceed=False) and returned before logging anything.
+        # admission guard and returned before logging anything.
         triggered = [m for m in logs if "Local shutdown triggered by" in m]
         assert triggered == ["🚨  Local shutdown triggered by UPS1"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("return_code", "expected"), [
+        (0, "succeeded"),
+        (1, "failed"),
+    ])
+    def test_concurrent_handoff_receives_owner_outcome(
+            self, tmp_path, return_code, expected):
+        """A second UPS shares the active poweroff outcome without blocking."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+        owner_outcome = []
+        waiter = ShutdownProgress("ups", "UPS2")
+        waiter.start("shared outage")
+        waiter.phase_finish("local-poweroff")
+
+        def blocked_poweroff(_command):
+            started.set()
+            release.wait(timeout=2)
+            return return_code, "", "poweroff refused" if return_code else ""
+
+        with patch("eneru.multi_ups.run_command", side_effect=blocked_poweroff), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            owner = threading.Thread(
+                target=lambda: owner_outcome.append(
+                    coord._handle_local_shutdown("UPS1")))
+            owner.start()
+            assert started.wait(timeout=2)
+
+            joined = coord._handle_local_shutdown("UPS2", progress=waiter)
+            assert joined == "pending"
+            release.set()
+            owner.join(timeout=2)
+
+        assert not owner.is_alive()
+        assert owner_outcome == [expected]
+        waiter_snapshot = waiter.snapshot()
+        waiter_poweroff = next(
+            phase for phase in waiter_snapshot["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert waiter_snapshot["state"] == expected
+        assert waiter_poweroff["state"] == expected
+
+    def _join_waiter_during_poweroff(self, coord, waiter, poweroff_effect):
+        """Run UPS1's poweroff with UPS2's waiter joining mid-flight."""
+        started = threading.Event()
+        release = threading.Event()
+        owner_errors = []
+
+        def blocked_poweroff(_command):
+            started.set()
+            release.wait(timeout=2)
+            return poweroff_effect()
+
+        def owner_body():
+            try:
+                coord._handle_local_shutdown("UPS1")
+            except Exception as exc:  # captured for the assertion
+                owner_errors.append(exc)
+
+        with patch("eneru.multi_ups.run_command", side_effect=blocked_poweroff), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            owner = threading.Thread(target=owner_body)
+            owner.start()
+            assert started.wait(timeout=2)
+            assert coord._handle_local_shutdown(
+                "UPS2", progress=waiter) == "pending"
+            release.set()
+            owner.join(timeout=2)
+        assert not owner.is_alive()
+        return owner_errors
+
+    @pytest.mark.unit
+    def test_concurrent_handoff_reports_waiter_failed_phase(self, tmp_path):
+        """A clean poweroff doesn't hide a failed phase in the waiter's run."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+        waiter = ShutdownProgress("ups", "UPS2")
+        waiter.start("shared outage")
+        waiter.phase_finish("vms", "failed")
+        waiter.phase_finish("local-poweroff")
+
+        errors = self._join_waiter_during_poweroff(
+            coord, waiter, lambda: (0, "", ""))
+
+        assert errors == []
+        assert waiter.snapshot()["state"] == "failed"
+
+    @pytest.mark.unit
+    def test_concurrent_handoff_owner_exception_fails_waiter(self, tmp_path):
+        coord = self._make_local_shutdown_coord(tmp_path)
+        waiter = ShutdownProgress("ups", "UPS2")
+        waiter.start("shared outage")
+        waiter.phase_finish("local-poweroff")
+
+        def boom():
+            raise RuntimeError("poweroff exploded")
+
+        errors = self._join_waiter_during_poweroff(coord, waiter, boom)
+
+        assert [str(exc) for exc in errors] == ["poweroff exploded"]
+        assert coord._local_shutdown_outcome == "failed"
+        assert coord._local_shutdown_in_flight is False
+        snapshot = waiter.snapshot()
+        poweroff = next(
+            phase for phase in snapshot["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert snapshot["state"] == "failed"
+        assert poweroff["state"] == "failed"
+
+    @pytest.mark.unit
+    def test_concurrent_handoff_does_not_rewrite_newer_progress_run(
+            self, tmp_path):
+        coord = self._make_local_shutdown_coord(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+        waiter = ShutdownProgress("ups", "UPS2")
+        waiter.start("first outage")
+        waiter.phase_finish("local-poweroff")
+
+        def blocked_poweroff(_command):
+            started.set()
+            release.wait(timeout=2)
+            return 1, "", "poweroff refused"
+
+        with patch("eneru.multi_ups.run_command", side_effect=blocked_poweroff), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            owner = threading.Thread(
+                target=lambda: coord._handle_local_shutdown("UPS1"))
+            owner.start()
+            assert started.wait(timeout=2)
+            assert coord._handle_local_shutdown(
+                "UPS2", progress=waiter) == "pending"
+            waiter.start("second outage")
+            release.set()
+            owner.join(timeout=2)
+
+        assert not owner.is_alive()
+        snapshot = waiter.snapshot()
+        poweroff = next(
+            phase for phase in snapshot["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert snapshot["reason"] == "second outage"
+        assert snapshot["state"] == "running"
+        assert poweroff["state"] == "pending"
 
     def _make_local_shutdown_coord(self, tmp_path):
         """Coordinator wired for the real (non-dry-run) host poweroff path."""
@@ -455,11 +607,12 @@ class TestMultiUPSCoordinator:
                    return_value=(1, "", "poweroff refused")) as run_cmd, \
              patch("eneru.multi_ups.write_shutdown_marker") as write_marker, \
              patch("eneru.multi_ups.delete_shutdown_marker") as del_marker:
-            coord._handle_local_shutdown("UPS1")
+            outcome = coord._handle_local_shutdown("UPS1")
 
         run_cmd.assert_called_once()
         write_marker.assert_called_once()   # marker written before poweroff
         del_marker.assert_called_once()     # torn down on failure
+        assert outcome == "failed"
         assert any(
             "host poweroff command failed (rc=1)" in c.args[0]
             for c in coord._log.call_args_list
@@ -492,11 +645,12 @@ class TestMultiUPSCoordinator:
                    return_value=(0, "", "")) as run_cmd, \
              patch("eneru.multi_ups.write_shutdown_marker") as write_marker, \
              patch("eneru.multi_ups.delete_shutdown_marker") as del_marker:
-            coord._handle_local_shutdown("UPS1")
+            outcome = coord._handle_local_shutdown("UPS1")
 
         run_cmd.assert_called_once()
         write_marker.assert_called_once()
         del_marker.assert_not_called()
+        assert outcome == "succeeded"
         assert not any(
             "still up" in c.args[0].lower()
             for c in coord._notification_worker.send.call_args_list
@@ -513,11 +667,12 @@ class TestMultiUPSCoordinator:
                    return_value=(124, "", "Command timed out")) as run_cmd, \
              patch("eneru.multi_ups.write_shutdown_marker") as write_marker, \
              patch("eneru.multi_ups.delete_shutdown_marker") as del_marker:
-            coord._handle_local_shutdown("UPS1")
+            outcome = coord._handle_local_shutdown("UPS1")
 
         run_cmd.assert_called_once()
         write_marker.assert_called_once()
         del_marker.assert_not_called()          # marker survives the timeout
+        assert outcome == "timed-out"
         assert any(
             "timed out" in c.args[0]
             for c in coord._log.call_args_list
@@ -601,11 +756,13 @@ class TestMultiUPSCoordinator:
                    return_value="container (Docker)"), \
              patch("eneru.multi_ups.run_command") as run_cmd, \
              patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
-            coord._handle_local_shutdown("UPS1", loopback_results=results)
+            outcome = coord._handle_local_shutdown(
+                "UPS1", loopback_results=results)
 
         run_cmd.assert_not_called()
         write_marker.assert_not_called()
         assert not coord._global_shutdown_flag.exists()
+        assert outcome == "failed"
         assert any(
             "Shutdown Sequence Incomplete" in c.args[0]
             for c in coord._notification_worker.send.call_args_list
@@ -677,15 +834,17 @@ class TestMultiUPSCoordinator:
 
         captured = {}
 
-        def fake_handle(label, loopback_results=None):
+        def fake_handle(label, loopback_results=None, progress=None):
             captured["label"] = label
             captured["results"] = loopback_results
+            captured["progress"] = progress
 
         coord._handle_local_shutdown = fake_handle
         coord._on_group_shutdown(group)
 
         assert captured["label"] == group.ups.label
         assert captured["results"] == [loopback_row]
+        assert captured["progress"] is monitor._shutdown_progress
 
     @pytest.mark.unit
     def test_delegated_loopback_dry_run_skips_poweroff_and_marker(self, tmp_path):
@@ -991,6 +1150,23 @@ class TestUPSGroupMonitorCoordinatorMode:
         assert "UPS1-10-0-0-1" in str(monitor._state_file_path)
 
     @pytest.mark.unit
+    def test_startup_event_keeps_legacy_positional_slot(self):
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS1"))],
+            behavior=BehaviorConfig(dry_run=True),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        startup_event = ("DAEMON_START", "cold boot")
+
+        monitor = UPSGroupMonitor(
+            config, False, False, None, None, None, "", None, None, "", False,
+            startup_event, coordinator_handoff=True,
+        )
+
+        assert monitor._coordinator_startup_event == startup_event
+        assert monitor._coordinator_handoff is True
+
+    @pytest.mark.unit
     def test_stop_event_exits_loop(self):
         """Setting stop_event causes the main loop to exit."""
         stop_event = threading.Event()
@@ -1207,6 +1383,9 @@ class TestDrainOnLocalShutdown:
         coord._drain_all_groups(timeout=5)
 
         mock_monitor._execute_shutdown_sequence.assert_called_once()
+        assert mock_monitor._pending_shutdown_reason == (
+            "Coordinator drain before local shutdown"
+        )
 
     @pytest.mark.unit
     def test_drain_skips_current_thread_no_self_join_crash(self, tmp_path):
@@ -1329,6 +1508,12 @@ class TestRuntimeIsLocalEnforcement:
             ups_groups=[UPSGroupConfig(
                 ups=UPSConfig(name="UPS1@local"),
                 is_local=True,
+                virtual_machines=VMConfig(enabled=True),
+                containers=ContainersConfig(enabled=True),
+                filesystems=FilesystemsConfig(
+                    sync_enabled=True,
+                    unmount=UnmountConfig(enabled=True),
+                ),
             )],
             behavior=BehaviorConfig(dry_run=True),
             logging=LoggingConfig(

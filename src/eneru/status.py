@@ -3,11 +3,12 @@
 import threading
 import time
 import shlex
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from eneru.config import Config, UPSGroupConfig
+from eneru.config import Config, UPSGroupConfig, resolve_energy_config
 from eneru.health_model import UPSHealth, assess_health
 from eneru.remote_health import (
     REMOTE_HEALTH_DISABLED,
@@ -133,10 +134,15 @@ def _energy_for_monitor(monitor: Any):
     today/month/year ``power_samples`` queries every time.
     """
     store = getattr(monitor, "_stats_store", None)
-    cfg = getattr(monitor.config, "energy", None)
+    cfg = resolve_energy_config(monitor.config)
     if store is None or cfg is None or not getattr(cfg, "enabled", False):
         return None
-    cache_key = str(getattr(store, "db_path", None) or id(store))
+    cache_key = repr((
+        str(getattr(store, "db_path", None) or id(store)),
+        getattr(cfg, "enabled", False), getattr(cfg, "cost_per_kwh", None),
+        getattr(cfg, "currency", "USD"), getattr(cfg, "cost_format", None),
+        getattr(cfg, "nominal_power", None),
+    ))
     now_mono = time.monotonic()
     with _energy_cache_lock:
         cached = _energy_cache.get(cache_key)
@@ -144,6 +150,11 @@ def _energy_for_monitor(monitor: Any):
             return cached[1]
     block = _energy_block_uncached(store, cfg)
     with _energy_cache_lock:
+        # A reload changes the config part of the key; drop expired entries so
+        # superseded keys don't pile up in a long-running daemon.
+        for key in [k for k, (expires, _) in _energy_cache.items()
+                    if expires <= now_mono]:
+            del _energy_cache[key]
         _energy_cache[cache_key] = (now_mono + _ENERGY_CACHE_TTL_SECONDS, block)
     return block
 
@@ -211,8 +222,8 @@ def power_series(store: Any, start: int, end: int,
     """Per-sample power for the Energy chart: ``[{ts, loadPct, watts, estimated}]``.
 
     ``watts`` is ``ups.realpower`` when reported, else the ``load% * nominal``
-    fallback (``estimated=True``) using the sample's ``ups.power.nominal`` or the
-    configured ``nominal_fallback`` (``energy.nominal_power``), else ``None`` —
+    fallback (``estimated=True``) using the configured ``nominal_fallback``
+    (``energy.nominal_power``), else the sample's reported ratings, else ``None`` —
     the same rule energy.py uses for kWh, so the chart and the kWh figure agree.
     """
     if store is None:
@@ -223,10 +234,17 @@ def power_series(store: Any, start: int, end: int,
         rows = store.power_samples(int(start), int(end))
     except Exception:
         return []
-    for ts, real_power, ups_load, power_nominal in rows:
-        nominal = power_nominal if power_nominal is not None else nominal_fallback
+    for row in rows:
+        if len(row) >= 5:
+            ts, real_power, ups_load, real_power_nominal, power_nominal = row[:5]
+        else:
+            ts, real_power, ups_load, power_nominal = row[:4]
+            real_power_nominal = None
         watts, estimated = energy_mod.power_sample_w(
-            real_power, ups_load, nominal)
+            real_power, ups_load, power_nominal,
+            real_power_nominal=real_power_nominal,
+            nominal_fallback=nominal_fallback,
+        )
         out.append({
             "ts": int(ts),
             "loadPct": ups_load,
@@ -253,6 +271,9 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
         "batteryCharge": snap.battery_charge,
         "runtime": snap.runtime,
         "load": snap.load,
+        "realPower": snap.real_power,
+        "realPowerNominal": snap.real_power_nominal,
+        "powerNominal": snap.power_nominal,
         "powerQuality": {
             "inputVoltage": snap.input_voltage,
             "outputVoltage": snap.output_voltage,
@@ -299,12 +320,14 @@ def collect_status(source: Any) -> Dict[str, Any]:
     # can read the running build AND where it runs — baremetal / container /
     # Kubernetes — without digging into the nested `runtime` object below.
     runtime_label = _runtime_context_label()
+    ups_rows = [monitor_status(m) for m in monitors]
     payload: Dict[str, Any] = {
         "generatedAt": time.time(),
         "version": __version__,
         "runtimeContext": runtime_label,
-        "ups": [monitor_status(m) for m in monitors],
-        "redundancyGroups": redundancy_group_statuses(source, config),
+        "ups": ups_rows,
+        "redundancyGroups": redundancy_group_statuses(
+            source, config, ups_rows=ups_rows),
     }
     # v5.5: include the runtime context + loopback delegate state at the
     # top level so dashboards don't need to call /ready separately.
@@ -360,7 +383,109 @@ def _redundancy_member_health(monitor: Any, group: Any) -> UPSHealth:
         return UPSHealth.UNKNOWN
 
 
-def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dict]:
+def _finite_number(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _redundancy_load(member_rows: List[dict], min_healthy: int,
+                     config: Config) -> Dict[str, Any]:
+    """Return conservative group load against the K smallest member ratings."""
+    expected = len(member_rows)
+    if not expected or min_healthy < 1 or min_healthy > expected:
+        return {"percent": None, "unavailableReason": "invalid group capacity"}
+    loads = [_finite_number(row.get("load")) for row in member_rows]
+    if any(value is None or value < 0 for value in loads):
+        return {"percent": None, "unavailableReason": "member load unavailable"}
+
+    energy_by_name = {
+        group.ups.name: getattr(group, "energy", None) or config.energy
+        for group in config.ups_groups
+    }
+    real_ratings = []
+    for row in member_rows:
+        # Same precedence as energy: configured watts beat the reported rating.
+        energy = energy_by_name.get(row.get("name"), config.energy)
+        rating = _finite_number(getattr(energy, "nominal_power", None))
+        if rating is None or rating <= 0:
+            rating = _finite_number(row.get("realPowerNominal"))
+        real_ratings.append(rating)
+    apparent_ratings = [
+        _finite_number(row.get("powerNominal")) for row in member_rows
+    ]
+    if all(value is not None and value > 0 for value in real_ratings):
+        ratings, unit = real_ratings, "W"
+    elif all(value is not None and value > 0 for value in apparent_ratings):
+        ratings, unit = apparent_ratings, "VA"
+    else:
+        return {
+            "percent": None,
+            "unavailableReason": "compatible member ratings unavailable",
+        }
+    draw = sum(rating * load / 100.0
+               for rating, load in zip(ratings, loads))
+    capacity = sum(sorted(ratings)[:min_healthy])
+    return {
+        "percent": round(draw / capacity * 100.0, 2) if capacity > 0 else None,
+        "draw": round(draw, 2),
+        "capacity": round(capacity, 2),
+        "unit": unit,
+        "basis": f"{min_healthy} smallest member rating"
+        + ("s" if min_healthy != 1 else ""),
+        "unavailableReason": None,
+    }
+
+
+def _aggregate_group_energy(member_rows: List[dict], config: Config) -> Optional[dict]:
+    energies = [row.get("energy") for row in member_rows]
+    available = [energy for energy in energies if isinstance(energy, dict)]
+    if not available:
+        return None
+    currency = config.energy.currency or "USD"
+    block: Dict[str, Any] = {
+        "currency": currency.upper(),
+        "membersReported": len(available),
+        "membersExpected": len(member_rows),
+        "estimated": any(bool(energy.get("estimated")) for energy in available),
+        "partial": len(available) != len(member_rows)
+        or any(bool(energy.get("partial")) for energy in available),
+        "costPartial": False,
+    }
+    from eneru.energy import format_cost
+    for kwh_key, cost_key, formatted_key in (
+        ("todayKwh", "todayCost", "todayCostFormatted"),
+        ("monthKwh", "monthCost", "monthCostFormatted"),
+        ("yearKwh", "yearCost", "yearCostFormatted"),
+    ):
+        kwh_values = [_finite_number(energy.get(kwh_key)) for energy in available]
+        known_kwh = [value for value in kwh_values if value is not None]
+        block[kwh_key] = round(sum(known_kwh), 6) if known_kwh else None
+        if len(known_kwh) != len(member_rows):
+            block["partial"] = True
+        cost_values = [_finite_number(energy.get(cost_key)) for energy in available]
+        known_cost = [value for value in cost_values if value is not None]
+        if known_cost:
+            total = sum(known_cost)
+            block[cost_key] = total
+            block[formatted_key] = format_cost(
+                total, currency, config.energy.cost_format)
+            if len(known_cost) != len(member_rows):
+                # Cost gaps (e.g. a member with cost_per_kwh: null) are not kWh
+                # data gaps; keep them off the energy "partial" badge.
+                block["costPartial"] = True
+    first = available[0]
+    for key in ("todayLabel", "monthLabel", "yearLabel", "todayStart",
+                "monthStart", "yearStart"):
+        if key in first:
+            block[key] = first[key]
+    return block
+
+
+def redundancy_group_statuses(source: Any, config: Optional[Config], *,
+                              ups_rows: Optional[List[dict]] = None) -> List[dict]:
     """Return status rows for redundancy groups configured on a coordinator."""
     if config is None:
         return []
@@ -374,6 +499,8 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
         for manager in getattr(source, "_redundancy_remote_health_managers", []) or []
     }
     evaluators = _redundancy_evaluators_by_group(source)
+    status_by_name = {row.get("name"): row for row in (ups_rows or [])}
+    executors = getattr(source, "_redundancy_executors", {}) or {}
     for group in config.redundancy_groups:
         members = []
         healthy_count = 0
@@ -386,10 +513,18 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
             effective = effective_redundancy_health(group, raw)
             if effective == UPSHealth.HEALTHY:
                 healthy_count += 1
+            status_row = status_by_name.get(ups_name, {})
             members.append({
                 "name": ups_name,
                 "health": raw.value,
                 "effectiveHealth": effective.value,
+                "status": status_row.get("status"),
+                "batteryCharge": status_row.get("batteryCharge"),
+                "runtime": status_row.get("runtime"),
+                "load": status_row.get("load"),
+                "batteryHealth": status_row.get("batteryHealth"),
+                "triggerActive": status_row.get("triggerActive", False),
+                "triggerReason": status_row.get("triggerReason", ""),
             })
         label = f"redundancy:{group.name}"
         manager = live_managers.get(label)
@@ -405,6 +540,12 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
             raw_quorum_lost
             and _redundancy_cold_start_hold(evaluators.get(group.name))
         )
+        member_status_rows = [
+            status_by_name.get(name, {"name": name})
+            for name in group.ups_sources
+        ]
+        executor = executors.get(group.name)
+        tracker = getattr(executor, "_shutdown_progress", None)
         rows.append({
             "groupId": f"redundancy-{sanitize_name(group.name)}",
             "name": group.name,
@@ -416,6 +557,21 @@ def redundancy_group_statuses(source: Any, config: Optional[Config]) -> List[dic
             "members": members,
             "isLocal": group.is_local,
             "remoteHealth": remote_health,
+            "telemetry": {
+                "energy": _aggregate_group_energy(member_status_rows, config),
+                "redundancyLoad": _redundancy_load(
+                    member_status_rows, group.min_healthy, config),
+            },
+            "triggers": {
+                "lowBatteryThreshold": group.triggers.low_battery_threshold,
+                "criticalRuntimeThreshold": (
+                    group.triggers.critical_runtime_threshold),
+                "criticalDepletionRate": group.triggers.depletion.critical_rate,
+                "depletionGracePeriod": group.triggers.depletion.grace_period,
+                "extendedTimeEnabled": group.triggers.extended_time.enabled,
+                "extendedTimeThreshold": group.triggers.extended_time.threshold,
+            },
+            "shutdownProgress": tracker.snapshot() if tracker is not None else None,
         })
     return rows
 

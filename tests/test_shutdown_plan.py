@@ -3,6 +3,8 @@ import pytest
 
 from eneru.config import ConfigLoader
 from eneru.shutdown.plan import build_shutdown_plan, PHASE_ORDER
+from eneru.shutdown.progress import ShutdownProgress
+from eneru.shutdown.remote import RemotePreShutdownResult, RemoteShutdownResult
 
 REF = "examples/config-reference.yaml"
 
@@ -97,8 +99,33 @@ def test_coordinator_mode_non_local_skips_handoff(cfg):
     term = plan["phases"][-1]
     assert term["id"] == "local-poweroff"
     assert not term["enabled"]
-    assert term["skipped"] == "non-local group"
+    assert term["skipped"] == "coordinator keeps host running"
     assert term["steps"] == []
+
+
+@pytest.mark.unit
+def test_coordinator_mode_non_local_handoff_when_trigger_on_any(cfg):
+    plan = build_shutdown_plan(
+        cfg, is_local=False, coordinator_mode=True,
+        coordinator_handoff=True,
+    )
+    term = plan["phases"][-1]
+    assert term["id"] == "local-poweroff"
+    assert term["enabled"]
+    assert term["steps"]
+    assert "coordinator" in plan["note"].lower()
+    assert "only remote-server shutdown runs" not in plan["note"]
+
+
+@pytest.mark.unit
+def test_coordinator_mode_delegated_skips_handoff(cfg):
+    plan = build_shutdown_plan(
+        cfg, is_local=True, delegated=True, coordinator_mode=True,
+        coordinator_handoff=True,
+    )
+    term = plan["phases"][-1]
+    assert not term["enabled"]
+    assert term["skipped"] == "delegated to host"
 
 
 @pytest.mark.unit
@@ -178,3 +205,259 @@ def test_remote_loopback_brackets_and_parallel_group_estimate(cfg):
     assert any("shutdown · runs last" in d for d in details)        # loopback last
     assert remote["mode"] == "parallel"
     assert remote["estimateS"] == 35.0                              # max(10,15)+20
+    loopback_steps = [s for s in remote["steps"] if s["loopback"]]
+    assert [s["role"] for s in loopback_steps] == ["pre-actions", "shutdown"]
+
+    # With commands revealed, the pre-actions row shows the pre-shutdown
+    # commands and the shutdown row shows the poweroff command.
+    lb.pre_shutdown_commands.append(RemoteCommandConfig(action="stop_compose"))
+    lb.shutdown_command = "systemctl poweroff"
+    revealed = _by_id(build_shutdown_plan(
+        cfg, is_local=True, reveal_commands=True))["remote"]
+    pre, post = [s for s in revealed["steps"] if s["loopback"]]
+    assert "systemctl stop x; stop_compose" in pre["detail"]
+    assert "systemctl poweroff" not in pre["detail"]
+    assert "systemctl poweroff" in post["detail"]
+
+
+@pytest.mark.unit
+def test_shutdown_progress_tracks_phases_and_sanitized_remote_results():
+    progress = ShutdownProgress("ups", "rack")
+    assert progress.snapshot()["state"] == "idle"
+
+    progress.start("battery low")
+    progress.phase_start("vms")
+    progress.phase_finish("vms")
+    progress.phase_skip("containers", "disabled")
+    progress.phase_start("unknown-phase")  # ignored defensively
+    generation = progress.remote_start("nas", "10.0.0.2")
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=True, dry_run=True,
+        pre_commands=RemotePreShutdownResult(attempted=2),
+    ), generation)
+    progress.finish()
+
+    snapshot = progress.snapshot()
+    assert snapshot["scope"] == {"kind": "ups", "name": "rack"}
+    assert snapshot["state"] == "succeeded"
+    assert snapshot["reason"] == "battery low"
+    assert next(p for p in snapshot["phases"] if p["id"] == "vms")["state"] == "succeeded"
+    skipped = next(p for p in snapshot["phases"] if p["id"] == "containers")
+    assert skipped["state"] == "skipped" and skipped["startedAt"] is None
+    assert snapshot["remotes"] == [{
+        "server": "nas", "host": "10.0.0.2", "state": "succeeded",
+        "startedAt": snapshot["remotes"][0]["startedAt"],
+        "finishedAt": snapshot["remotes"][0]["finishedAt"],
+        "outcome": "dry-run", "error": "", "preCommandsAttempted": 2,
+        "preCommandsFailed": 0,
+    }]
+
+    # snapshot() returns a detached copy, not the tracker's mutable state.
+    snapshot["state"] = "tampered"
+    assert progress.snapshot()["state"] == "succeeded"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_remote_outcomes_and_timeout_is_terminal():
+    progress = ShutdownProgress("redundancy", "rack-pair")
+    progress.start("quorum lost")
+    generation = progress.remote_start("late", "10.0.0.3")
+    progress.remote_finish(RemoteShutdownResult(
+        server="late", host="10.0.0.3", completed=False,
+        timed_out=True, error="deadline"), generation)
+    # A late worker cannot turn the orchestrator's timeout into success.
+    progress.remote_finish(RemoteShutdownResult(
+        server="late", host="10.0.0.3", shutdown_sent=True, exit_code=0,
+        response="slow but done"), generation)
+    failed_generation = progress.remote_start("failed", "10.0.0.4")
+    progress.remote_finish(RemoteShutdownResult(
+        server="failed", host="10.0.0.4", error="secret refused stderr"),
+        failed_generation)
+
+    rows = {row["server"]: row for row in progress.snapshot()["remotes"]}
+    assert rows["late"]["state"] == "timed-out"
+    assert rows["late"]["outcome"] == "timeout"
+    assert rows["late"]["error"] == "Remote shutdown timed out; see service logs"
+    # The late worker's real output is still kept for signed-in readers.
+    late_detail = next(row for row in progress.snapshot(include_detail=True)[
+        "remotes"] if row["server"] == "late")["detail"]
+    assert late_detail["exitCode"] == 0
+    assert late_detail["response"] == "slow but done"
+    assert rows["failed"]["state"] == "failed"
+    assert rows["failed"]["outcome"] == "not-sent"
+    assert rows["failed"]["error"] == "Remote shutdown failed; see service logs"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("dry_run", "outcome"), [
+    (False, "command-sent"),
+    (True, "dry-run"),
+])
+def test_shutdown_progress_preserves_sent_outcome_for_partial_failure(
+        dry_run, outcome):
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("outage")
+    generation = progress.remote_start("host", "127.0.0.1")
+    progress.remote_finish(RemoteShutdownResult(
+        server="host", host="127.0.0.1", shutdown_sent=True,
+        dry_run=dry_run, crashed=True,
+    ), generation)
+
+    row = progress.snapshot()["remotes"][0]
+    assert row["state"] == "failed"
+    assert row["outcome"] == outcome
+    assert row["error"] == "Remote shutdown failed; see service logs"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_reports_pre_command_failure():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("outage")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=True,
+        pre_commands=RemotePreShutdownResult(attempted=2, failed=1),
+    ), generation)
+
+    row = progress.snapshot()["remotes"][0]
+    assert row["state"] == "failed"
+    assert row["outcome"] == "command-sent"
+    assert row["preCommandsFailed"] == 1
+
+
+@pytest.mark.unit
+def test_shutdown_progress_rejects_late_result_from_previous_run():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("first outage")
+    old_generation = progress.remote_start("nas", "10.0.0.2")
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", timed_out=True), old_generation)
+
+    progress.start("second outage")
+    new_generation = progress.remote_start("nas", "10.0.0.2")
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=True), old_generation)
+
+    row = progress.snapshot()["remotes"][0]
+    assert new_generation != old_generation
+    assert row["state"] == "running"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_rejects_late_phase_and_finish_updates():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("first outage")
+    old_generation = progress.snapshot()["runId"]
+    progress.start("second outage")
+
+    progress.phase_finish(
+        "local-poweroff", "failed", generation=old_generation)
+    progress.finish("failed", generation=old_generation)
+
+    snapshot = progress.snapshot()
+    poweroff = next(
+        phase for phase in snapshot["phases"]
+        if phase["id"] == "local-poweroff"
+    )
+    assert snapshot["state"] == "running"
+    assert poweroff["state"] == "pending"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_redacts_phase_exception_details():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("outage")
+    progress.phase_finish("vms", "failed", "password=super-secret")
+
+    phase = next(p for p in progress.snapshot()["phases"] if p["id"] == "vms")
+    assert phase["detail"] == "Phase failed; see service logs"
+    assert "super-secret" not in str(progress.snapshot())
+
+
+@pytest.mark.unit
+def test_shutdown_progress_is_failure_isolated(monkeypatch):
+    class BrokenLock:
+        def __enter__(self):
+            raise RuntimeError("lock failed")
+
+        def __exit__(self, *args):
+            return False
+
+    progress = ShutdownProgress("ups", "rack")
+    progress._lock = BrokenLock()
+    result = RemoteShutdownResult(server="nas", host="10.0.0.2")
+
+    progress.start("reason")
+    progress.phase_start("vms")
+    progress.phase_finish("vms")
+    progress.phase_skip("vms", "skip")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    progress.remote_finish(result, generation)
+    progress.finish("failed")
+    assert progress.snapshot()["state"] == "idle"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_remote_detail_only_on_request():
+    from eneru.shutdown.progress import REMOTE_DETAIL_MAX_CHARS
+
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("battery low")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    long_output = "x" * (REMOTE_DETAIL_MAX_CHARS + 50) + "\npassword=hunter2 END"
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=False,
+        error="Permission denied token=abc123", exit_code=255,
+        response=long_output,
+        pre_commands=RemotePreShutdownResult(
+            attempted=1, failed=1, error="stop_compose: secret=s3"),
+    ), generation)
+
+    # Default (anonymous) snapshot never carries raw command output.
+    assert "detail" not in progress.snapshot()["remotes"][0]
+
+    detail = progress.snapshot(include_detail=True)["remotes"][0]["detail"]
+    assert detail["exitCode"] == 255
+    assert detail["error"] == "Permission denied token=<redacted>"
+    assert detail["preCommandsError"] == "stop_compose: secret=<redacted>"
+    # Long output keeps the tail (where errors land), capped and redacted.
+    assert detail["response"].startswith("…(truncated)\n")
+    assert detail["response"].endswith("password=<redacted> END")
+    assert "hunter2" not in detail["response"]
+    assert len(detail["response"]) <= REMOTE_DETAIL_MAX_CHARS + 20
+
+    # A new run drops the previous run's output.
+    progress.start("second outage")
+    progress.remote_start("nas", "10.0.0.2")
+    snapshot = progress.snapshot(include_detail=True)
+    assert snapshot["remotes"][0]["detail"] is None
+
+
+@pytest.mark.unit
+def test_shutdown_progress_remote_detail_ignores_non_int_exit_code():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("battery low")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    result = RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=True)
+    result.exit_code = "0"  # defensive: only real ints are published
+    progress.remote_finish(result, generation)
+    detail = progress.snapshot(include_detail=True)["remotes"][0]["detail"]
+    assert detail == {"exitCode": None, "response": "", "error": "",
+                      "preCommandsError": ""}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("Authorization: Basic Zm9v\nnext", "Authorization: <redacted>\nnext"),
+    ("curl -H 'Bearer xyz'", "curl -H 'Bearer <redacted>"),
+    ("password: hunter2", "password: <redacted>"),
+    ("--password hunter2 --api-key=k", "--password <redacted> --api-key=<redacted>"),
+    ('{"token": "abc", "ok": 1}', '{"token": "<redacted>", "ok": 1}'),
+    ("token=abc", "token=<redacted>"),
+    ("Powering off", "Powering off"),
+])
+def test_remote_detail_redacts_common_secret_shapes(raw, expected):
+    from eneru.shutdown.progress import _detail_text
+
+    assert _detail_text(raw) == expected
