@@ -2170,6 +2170,7 @@ class StatsStore:
             "output_frequency": "output_frequency_avg",
             "real_power": "real_power_avg",
             "power_nominal": "power_nominal_avg",
+            "real_power_nominal": "real_power_nominal_avg",
         }
         return avg_map.get(metric, metric)
 

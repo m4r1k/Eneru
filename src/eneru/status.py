@@ -386,7 +386,8 @@ def _finite_number(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
-def _redundancy_load(member_rows: List[dict], min_healthy: int) -> Dict[str, Any]:
+def _redundancy_load(member_rows: List[dict], min_healthy: int,
+                     config: Config) -> Dict[str, Any]:
     """Return conservative group load against the K smallest member ratings."""
     expected = len(member_rows)
     if not expected or min_healthy < 1 or min_healthy > expected:
@@ -395,9 +396,17 @@ def _redundancy_load(member_rows: List[dict], min_healthy: int) -> Dict[str, Any
     if any(value is None or value < 0 for value in loads):
         return {"percent": None, "unavailableReason": "member load unavailable"}
 
-    real_ratings = [
-        _finite_number(row.get("realPowerNominal")) for row in member_rows
-    ]
+    energy_by_name = {
+        group.ups.name: getattr(group, "energy", None) or config.energy
+        for group in config.ups_groups
+    }
+    real_ratings = []
+    for row in member_rows:
+        rating = _finite_number(row.get("realPowerNominal"))
+        if rating is None or rating <= 0:
+            energy = energy_by_name.get(row.get("name"), config.energy)
+            rating = _finite_number(getattr(energy, "nominal_power", None))
+        real_ratings.append(rating)
     apparent_ratings = [
         _finite_number(row.get("powerNominal")) for row in member_rows
     ]
@@ -429,8 +438,9 @@ def _aggregate_group_energy(member_rows: List[dict], config: Config) -> Optional
     available = [energy for energy in energies if isinstance(energy, dict)]
     if not available:
         return None
+    currency = config.energy.currency or "USD"
     block: Dict[str, Any] = {
-        "currency": config.energy.currency.upper(),
+        "currency": currency.upper(),
         "membersReported": len(available),
         "membersExpected": len(member_rows),
         "estimated": any(bool(energy.get("estimated")) for energy in available),
@@ -454,7 +464,7 @@ def _aggregate_group_energy(member_rows: List[dict], config: Config) -> Optional
             total = sum(known_cost)
             block[cost_key] = total
             block[formatted_key] = format_cost(
-                total, config.energy.currency, config.energy.cost_format)
+                total, currency, config.energy.cost_format)
             if len(known_cost) != len(member_rows):
                 block["partial"] = True
     first = available[0]
@@ -541,7 +551,7 @@ def redundancy_group_statuses(source: Any, config: Optional[Config], *,
             "telemetry": {
                 "energy": _aggregate_group_energy(member_status_rows, config),
                 "redundancyLoad": _redundancy_load(
-                    member_status_rows, group.min_healthy),
+                    member_status_rows, group.min_healthy, config),
             },
             "triggers": {
                 "lowBatteryThreshold": group.triggers.low_battery_threshold,

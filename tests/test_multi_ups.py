@@ -423,7 +423,7 @@ class TestMultiUPSCoordinator:
         coord._handle_local_shutdown("UPS2")
 
         # The body's "triggered by" line fires once; the second call hit the
-        # guard (proceed=False) and returned before logging anything.
+        # admission guard and returned before logging anything.
         triggered = [m for m in logs if "Local shutdown triggered by" in m]
         assert triggered == ["🚨  Local shutdown triggered by UPS1"]
 
@@ -1082,6 +1082,23 @@ class TestUPSGroupMonitorCoordinatorMode:
         assert "UPS1-10-0-0-1" in str(monitor._state_file_path)
 
     @pytest.mark.unit
+    def test_startup_event_keeps_legacy_positional_slot(self):
+        config = Config(
+            ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS1"))],
+            behavior=BehaviorConfig(dry_run=True),
+            local_shutdown=LocalShutdownConfig(enabled=False),
+        )
+        startup_event = ("DAEMON_START", "cold boot")
+
+        monitor = UPSGroupMonitor(
+            config, False, False, None, None, None, "", None, None, "", False,
+            startup_event, coordinator_handoff=True,
+        )
+
+        assert monitor._coordinator_startup_event == startup_event
+        assert monitor._coordinator_handoff is True
+
+    @pytest.mark.unit
     def test_stop_event_exits_loop(self):
         """Setting stop_event causes the main loop to exit."""
         stop_event = threading.Event()
@@ -1298,6 +1315,9 @@ class TestDrainOnLocalShutdown:
         coord._drain_all_groups(timeout=5)
 
         mock_monitor._execute_shutdown_sequence.assert_called_once()
+        assert mock_monitor._pending_shutdown_reason == (
+            "Coordinator drain before local shutdown"
+        )
 
     @pytest.mark.unit
     def test_drain_skips_current_thread_no_self_join_crash(self, tmp_path):

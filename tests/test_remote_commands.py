@@ -1239,14 +1239,24 @@ class TestLoopbackShutdownOrdering:
             ],
         )
         remote_monitor.config.ups_groups[0].remote_servers = [loopback]
+        remote_monitor._shutdown_progress.start("test outage")
+        phase_a_snapshots = []
+
+        def fail_pre_actions(*_args, **_kwargs):
+            phase_a_snapshots.append(
+                remote_monitor._shutdown_progress.snapshot())
+            raise AttributeError("simulated crash")
 
         # Phase A raises mid-run; Phase C still has to send shutdown.
         with patch.object(remote_monitor, "_execute_remote_pre_shutdown",
-                          side_effect=AttributeError("simulated crash")), \
+                          side_effect=fail_pre_actions), \
              patch.object(remote_monitor, "_run_remote_command",
                           return_value=(True, "")) as mock_run:
             results = remote_monitor._shutdown_remote_servers()
 
+        live_row = phase_a_snapshots[0]["remotes"][0]
+        assert live_row["state"] == "running"
+        assert live_row["finishedAt"] is None
         # Phase C ran — the shutdown_command was issued.
         assert mock_run.call_count == 1
         assert mock_run.call_args.args[1] == "shutdown -h now"
@@ -1255,6 +1265,37 @@ class TestLoopbackShutdownOrdering:
         assert lb_result.crashed is True
         assert "simulated crash" in lb_result.pre_commands.error
         assert lb_result.shutdown_sent is True
+        final_row = remote_monitor._shutdown_progress.snapshot()["remotes"][0]
+        assert final_row["startedAt"] == live_row["startedAt"]
+        assert final_row["state"] == "failed"
+        assert final_row["outcome"] == "command-sent"
+
+    @pytest.mark.unit
+    def test_peer_orchestration_exception_finishes_loopback_progress(
+        self, remote_monitor
+    ):
+        loopback = RemoteServerConfig(
+            name="host-loopback", enabled=True, host="127.0.0.1",
+            user="root", is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+        )
+        nas = RemoteServerConfig(
+            name="NAS", enabled=True, host="10.0.0.10", user="root",
+            shutdown_command="poweroff",
+        )
+        remote_monitor.config.ups_groups[0].remote_servers = [loopback, nas]
+        remote_monitor._shutdown_progress.start("test outage")
+
+        with patch.object(
+                remote_monitor, "_shutdown_servers_parallel",
+                side_effect=RuntimeError("thread setup failed")):
+            with pytest.raises(RuntimeError, match="thread setup failed"):
+                remote_monitor._shutdown_remote_servers()
+
+        row = remote_monitor._shutdown_progress.snapshot()["remotes"][0]
+        assert row["state"] == "failed"
+        assert row["outcome"] == "not-sent"
+        assert row["finishedAt"] is not None
 
     @pytest.mark.unit
     def test_loopback_phase_c_exception_does_not_skip_other_loopbacks(

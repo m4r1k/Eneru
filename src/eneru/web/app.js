@@ -779,14 +779,14 @@ function renderOverviewSummary(rows) {
   if (!hero || !summary) return;
   hero.replaceChildren();
   summary.replaceChildren();
-  if (!rows.length) {
-    hero.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
-    return;
-  }
   // The global UPS selector scopes the Overview too: a single pick drives the
   // hero + KPIs to that UPS; "All UPS" shows the whole fleet (worst status,
   // lowest health, total energy). The fleet strip above always lists every UPS.
   const view = rowsForScope(rows, currentScope());
+  if (!view.length) {
+    hero.appendChild(el("p", { class: "chart-note", text: "No UPS data yet." }));
+    return;
+  }
 
   if (view.length > 1) {
     hero.appendChild(fleetOverview(view));

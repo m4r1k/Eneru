@@ -2420,6 +2420,7 @@ class TestCLIShutdownGroupRehearsal:
             ]):
                 main()
         mock_monitor._execute_shutdown_sequence.assert_called_once()
+        assert mock_monitor._pending_shutdown_reason == "manual rehearsal via CLI"
         # Whatever Config the monitor was instantiated with must have
         # dry_run flipped on; otherwise the rehearsal would be live.
         drill_config = mock_monitor_cls.call_args.args[0]

@@ -126,7 +126,10 @@ class ShutdownProgress:
                 if getattr(result, "timed_out", False):
                     state, outcome = "timed-out", "timeout"
                 elif getattr(result, "shutdown_sent", False):
-                    state = "succeeded"
+                    state = (
+                        "succeeded" if getattr(result, "success", False)
+                        else "failed"
+                    )
                     outcome = (
                         "dry-run" if getattr(result, "dry_run", False)
                         else "command-sent"

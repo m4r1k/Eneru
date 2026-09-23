@@ -192,6 +192,7 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         steps=[{"label": "Final sync before halt"}] if final_on else []))
 
     # 7) Terminal step — coordinator handoff, or the local host poweroff.
+    handoff_on = False
     if coordinator_mode:
         # The coordinator performs the single host poweroff — but that is a
         # LOCAL-ownership action. A non-local (monitoring-only) group must NOT
@@ -229,7 +230,7 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         note = ("Container loopback mode: VM / container / filesystem / poweroff "
                 "actions run on the host via the host-loopback SSH target (see "
                 "Remote servers), not in-process.")
-    elif not is_local:
+    elif not is_local and not (coordinator_mode and handoff_on):
         note = ("Non-local UPS group: only remote-server shutdown runs; local "
                 "VM / container / filesystem / poweroff phases belong to the host "
                 "that owns this UPS.")

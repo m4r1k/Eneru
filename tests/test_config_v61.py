@@ -184,7 +184,8 @@ class TestUnknownKeys:
     def test_per_ups_energy_rejects_global_policy_keys(self, key):
         _, errs = _validate(
             f"ups:\n  - name: U1@h\n    energy:\n      {key}: x\n")
-        assert any(f"ups 'U1@h' energy.{key}" in e for e in errs), errs
+        matching = [e for e in errs if f"ups[0].energy.{key}" in e]
+        assert len(matching) == 1, errs
 
     @pytest.mark.unit
     def test_per_ups_energy_requires_mapping(self):
@@ -424,6 +425,32 @@ class TestCrossFieldValidation:
             "energy:\n  nominal_power: 600\n"
             f"ups:\n  - name: U1@h\n    energy:\n      {field}: {val}\n")
         assert any("energy (UPS 'U1@h')" in e and needle in e for e in errs), errs
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field,needle", [
+        ("cost_per_kwh", "non-negative number"),
+        ("nominal_power", "positive number"),
+    ])
+    def test_global_energy_oversized_integer_is_validation_error(self, field, needle):
+        huge = "1" + "0" * 400
+        _, errs = _validate(
+            f"ups:\n  name: U@h\nenergy:\n  {field}: {huge}\n")
+        assert any(f"energy.{field}" in e and needle in e for e in errs), errs
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("field,needle", [
+        ("cost_per_kwh", "non-negative number"),
+        ("nominal_power", "positive number"),
+    ])
+    def test_per_ups_energy_oversized_integer_is_validation_error(self, field, needle):
+        huge = "1" + "0" * 400
+        _, errs = _validate(
+            "energy:\n  nominal_power: 600\n"
+            f"ups:\n  - name: U1@h\n    energy:\n      {field}: {huge}\n")
+        assert any(
+            f"energy (UPS 'U1@h').{field}" in e and needle in e
+            for e in errs
+        ), errs
 
     # ---- v6.1 string/enum schedule field validation (finding 9) ----
 

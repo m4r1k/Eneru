@@ -411,8 +411,13 @@ class TestShutdownPlanEndpoint:
         assert status == 200
         assert payload["progress"]["state"] == "running"
         assert payload["progress"]["reason"] == "battery low"
-        assert "phase-secret" not in str(payload)
-        assert "remote-secret" not in str(payload)
+        phases = {row["id"]: row for row in payload["progress"]["phases"]}
+        assert phases["vms"]["state"] == "failed"
+        assert phases["vms"]["detail"] == "Phase failed; see service logs"
+        remote = payload["progress"]["remotes"][0]
+        assert remote["state"] == "failed"
+        assert remote["outcome"] == "not-sent"
+        assert remote["error"] == "Remote shutdown failed; see service logs"
         h.path = "/api/v1/ups/nope/shutdown-progress"
         assert h._route()[0] == 404
 

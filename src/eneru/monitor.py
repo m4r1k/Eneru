@@ -161,8 +161,8 @@ class UPSGroupMonitor(
                  logger: Optional[UPSLogger] = None,
                   state_file_suffix: str = "",
                   in_redundancy_group: bool = False,
-                  coordinator_handoff: Optional[bool] = None,
-                  coordinator_startup_event: Optional[Tuple[str, str]] = None):
+                  coordinator_startup_event: Optional[Tuple[str, str]] = None,
+                  *, coordinator_handoff: Optional[bool] = None):
         self.config = config
         self.state = MonitorState()
         self._shutdown_progress = ShutdownProgress("ups", config.ups.name)
@@ -3306,6 +3306,10 @@ class UPSGroupMonitor(
                         )
                     else:
                         self._failsafe_initiated = True
+                        self._pending_shutdown_reason = (
+                            "FAILSAFE (FSB): connection lost or data persistently "
+                            "stale while On Battery"
+                        )
                         # cubic P1: protect the failsafe shutdown from a signal
                         # landing between admission and _execute_shutdown_sequence
                         # (see _trigger_shutdown). Cleared in the sequence's finally.

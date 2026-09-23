@@ -629,6 +629,10 @@ class TestFailsafe:
 
         mock_exec.assert_called_once()
         assert monitor.state.connection_state == "FAILED"
+        assert monitor._pending_shutdown_reason == (
+            "FAILSAFE (FSB): connection lost or data persistently stale while "
+            "On Battery"
+        )
 
     @pytest.mark.unit
     def test_single_hard_error_while_ob_is_debounced(self, tmp_path):

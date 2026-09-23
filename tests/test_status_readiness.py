@@ -34,8 +34,10 @@ from eneru.status import (
     live_remote_health,
     query_events,
     query_history,
+    _aggregate_group_energy,
     redundancy_group_statuses,
 )
+from eneru.config import EnergyConfig
 
 
 def _make_source(*, config, snapshot):
@@ -503,6 +505,88 @@ class TestRedundancyGroupStatus:
         assert energy["estimated"] is True
         assert energy["partial"] is True
         assert row["shutdownProgress"]["reason"] == "quorum lost"
+
+    @pytest.mark.unit
+    def test_redundancy_load_uses_inherited_and_per_ups_configured_watts(self):
+        group = RedundancyGroupConfig(
+            name="rack", ups_sources=["UPS-A@host", "UPS-B@host"],
+            min_healthy=1,
+        )
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS-A@host")),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B@host"),
+                    energy=EnergyConfig(nominal_power=1000),
+                ),
+            ],
+            redundancy_groups=[group],
+            energy=EnergyConfig(nominal_power=600),
+        )
+        source = MagicMock()
+        source._monitors = []
+        source._redundancy_remote_health_managers = []
+        source._redundancy_executors = {}
+        ups_rows = [
+            {"name": "UPS-A@host", "load": 50, "powerNominal": 1200},
+            {"name": "UPS-B@host", "load": 50, "powerNominal": 1500},
+        ]
+
+        load = redundancy_group_statuses(
+            source, config, ups_rows=ups_rows)[0]["telemetry"]["redundancyLoad"]
+
+        assert load == {
+            "percent": 133.33, "draw": 800.0, "capacity": 600.0,
+            "unit": "W", "basis": "1 smallest member rating",
+            "unavailableReason": None,
+        }
+
+    @pytest.mark.unit
+    def test_redundancy_load_never_mixes_watts_and_va(self):
+        group = RedundancyGroupConfig(
+            name="rack", ups_sources=["UPS-A@host", "UPS-B@host"],
+            min_healthy=1,
+        )
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(ups=UPSConfig(name="UPS-A@host")),
+                UPSGroupConfig(
+                    ups=UPSConfig(name="UPS-B@host"),
+                    energy=EnergyConfig(nominal_power=None),
+                ),
+            ],
+            redundancy_groups=[group],
+            energy=EnergyConfig(nominal_power=600),
+        )
+        source = MagicMock()
+        source._monitors = []
+        source._redundancy_remote_health_managers = []
+        source._redundancy_executors = {}
+        ups_rows = [
+            {"name": "UPS-A@host", "load": 50, "powerNominal": 1200},
+            {"name": "UPS-B@host", "load": 50, "powerNominal": 1500},
+        ]
+
+        load = redundancy_group_statuses(
+            source, config, ups_rows=ups_rows)[0]["telemetry"]["redundancyLoad"]
+
+        assert load == {
+            "percent": 112.5, "draw": 1350.0, "capacity": 1200.0,
+            "unit": "VA", "basis": "1 smallest member rating",
+            "unavailableReason": None,
+        }
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("currency", [None, ""])
+    def test_aggregate_group_energy_empty_currency_defaults_to_usd(self, currency):
+        config = Config()
+        config.energy.currency = currency
+
+        energy = _aggregate_group_energy(
+            [{"energy": {"todayKwh": 2.0, "todayCost": 1.5}}], config)
+
+        assert energy["currency"] == "USD"
+        assert energy["todayCostFormatted"] == "$1.50"
 
 
 class TestReadinessContainerWithLoopback:

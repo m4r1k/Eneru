@@ -418,13 +418,22 @@ cleanup_test63() {
 }
 trap cleanup_test63 EXIT
 
+PLAN_SEEN=false
 for _ in $(seq 1 40); do
-  curl -fsS http://127.0.0.1:9193/health >/dev/null 2>&1 && break
+  if curl -fsS \
+      http://127.0.0.1:9193/api/v1/redundancy-groups/rack-1-dual-psu/shutdown-plan \
+      > /tmp/test63-plan.json 2>/dev/null; then
+    PLAN_SEEN=true
+    break
+  fi
   sleep 0.5
 done
-curl -fsS \
-  http://127.0.0.1:9193/api/v1/redundancy-groups/rack-1-dual-psu/shutdown-plan \
-  > /tmp/test63-plan.json
+if [ "$PLAN_SEEN" != true ]; then
+  echo "FAIL: redundancy shutdown plan did not respond within 20 seconds"
+  cat /tmp/test63-plan.json 2>/dev/null || true
+  tail -60 /tmp/test63.log
+  exit 1
+fi
 python3 - /tmp/test63-plan.json <<'PY'
 import json
 import sys

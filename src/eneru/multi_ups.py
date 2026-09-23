@@ -736,7 +736,6 @@ class MultiUPSCoordinator:
         # not to re-arm the guard mid-sequence (M1), which would otherwise let an
         # unrelated group's recovery clear the guard while the drain/flush/
         # run_command below run outside the lock and admit a SECOND poweroff.
-        proceed = False
         with self._local_shutdown_lock:
             if self._local_shutdown_initiated:
                 if self._local_shutdown_in_flight:
@@ -746,14 +745,9 @@ class MultiUPSCoordinator:
                             (progress, generation))
                     return "pending"
                 return self._local_shutdown_outcome
-            else:
-                self._local_shutdown_initiated = True
-                self._local_shutdown_in_flight = True
-                self._local_shutdown_outcome = "succeeded"
-                proceed = True
-
-        if not proceed:
-            return "succeeded"
+            self._local_shutdown_initiated = True
+            self._local_shutdown_in_flight = True
+            self._local_shutdown_outcome = "succeeded"
 
         outcome = "succeeded"
         try:
@@ -1048,6 +1042,9 @@ class MultiUPSCoordinator:
             if not already_shutting_down:
                 self._log(f"  ➡️  Triggering shutdown for {monitor._log_prefix.strip()}")
                 try:
+                    monitor._pending_shutdown_reason = (
+                        "Coordinator drain before local shutdown"
+                    )
                     monitor._execute_shutdown_sequence()
                 except Exception as e:
                     self._log(f"  ⚠️  Error during drain shutdown: {e}")

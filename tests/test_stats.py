@@ -2097,6 +2097,22 @@ class TestQueryRange:
         results = store.query_range("battery_charge", base, base + 7 * 86400)
         assert len(results) >= 1
 
+    @pytest.mark.unit
+    def test_query_range_maps_real_power_nominal_at_aggregate_tier(self, store):
+        base = 7_100_000
+        sample = dict(SAMPLE_UPS_DATA, **{"ups.realpower.nominal": "900"})
+        store.buffer_sample(sample, ts=base)
+        store.buffer_sample(sample, ts=base + 1)
+        store.flush()
+        store.aggregate()
+
+        results = store.query_range(
+            "real_power_nominal", base - BUCKET_5MIN, base + BUCKET_5MIN,
+            prefer_tier="agg_5min",
+        )
+
+        assert results == [((base // BUCKET_5MIN) * BUCKET_5MIN, 900.0)]
+
 
 # ===========================================================================
 # events

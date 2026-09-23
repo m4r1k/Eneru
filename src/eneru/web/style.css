@@ -596,6 +596,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .sd-noop .ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
 .sd-progress { margin: 0.7rem 0; padding: 0.55rem 0.75rem;
   border: 1px solid currentColor; border-radius: var(--r-sm); font-size: 0.85rem; }
+.sd-progress.s-ok { color: var(--ok); }
+.sd-progress.s-warn { color: var(--warn); }
+.sd-progress.s-crit { color: var(--crit); }
+.sd-progress.s-muted { color: var(--muted); }
 .sd-flow { display: flex; flex-direction: column; margin-top: 0.5rem; }
 .sd-node { position: relative; border: 1px solid var(--line-strong);
   border-radius: var(--r-md); background: var(--panel); padding: 0.85rem 1rem;

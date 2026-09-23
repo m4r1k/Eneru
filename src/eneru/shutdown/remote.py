@@ -96,7 +96,7 @@ class RemoteShutdownResult:
 
     @property
     def success(self) -> bool:
-        """Return True only when the final shutdown command was accepted.
+        """Return True only when the complete remote sequence succeeded.
 
         L6 (evaluated, intentional): for a loopback, ``crashed`` (a Phase-A
         pre-action crash) and ``shutdown_sent`` (the Phase-C poweroff succeeded)
@@ -112,6 +112,9 @@ class RemoteShutdownResult:
             and not self.timed_out
             and not self.crashed
             and not self.error
+            and self.pre_commands.failed == 0
+            and not self.pre_commands.timed_out
+            and not self.pre_commands.error
         )
 
 
@@ -275,12 +278,14 @@ class RemoteShutdownMixin:
         # post-phase write back into the same record (pre_commands +
         # shutdown_sent live on the same object).
         loopback_results: Dict[int, RemoteShutdownResult] = {}
+        loopback_generations: Dict[int, Optional[int]] = {}
         for lb in loopbacks:
             loopback_results[id(lb)] = RemoteShutdownResult(
                 server=lb.name or lb.host,
                 host=lb.host,
                 pre_commands=RemotePreShutdownResult(),
             )
+            loopback_generations[id(lb)] = self._track_remote_start(lb)
 
         # M2 NOTE: an earlier rc10 iteration ran a fresh, blocking
         # run_loopback_identity_probe() here before the destructive phases. It
@@ -338,15 +343,28 @@ class RemoteShutdownMixin:
                     result.crashed = True
 
         # Phase B: non-loopback remotes (existing parallel phased path).
-        for key in sorted_regular_keys:
-            phase_idx += 1
-            phase_servers = regular_phases[key]
-            names = ", ".join(s.name or s.host for s in phase_servers)
-            if num_phases > 1:
-                self._log_message(
-                    f"  📋  Phase {phase_idx}/{num_phases} (order={key}): {names}"
-                )
-            regular_results.extend(self._shutdown_servers_parallel(phase_servers))
+        try:
+            for key in sorted_regular_keys:
+                phase_idx += 1
+                phase_servers = regular_phases[key]
+                names = ", ".join(s.name or s.host for s in phase_servers)
+                if num_phases > 1:
+                    self._log_message(
+                        f"  📋  Phase {phase_idx}/{num_phases} (order={key}): {names}"
+                    )
+                regular_results.extend(
+                    self._shutdown_servers_parallel(phase_servers))
+        except Exception as exc:
+            # Loopback rows start before Phase A. If peer orchestration itself
+            # crashes, close those rows before propagating the phase failure.
+            for lb in loopbacks:
+                result = loopback_results[id(lb)]
+                result.completed = False
+                result.error = str(exc)
+                result.crashed = True
+                self._track_remote_finish(
+                    result, loopback_generations[id(lb)])
+            raise
 
         # Phase C: loopback poweroff — host goes down LAST.
         if has_loopback_post:
@@ -361,7 +379,6 @@ class RemoteShutdownMixin:
                 # loopback's poweroff must not skip the others (rare,
                 # but possible in K8s multi-pod with several loopbacks).
                 display = lb.name or lb.host
-                generation = self._track_remote_start(lb)
                 try:
                     self._shutdown_loopback_command(lb, loopback_results[id(lb)])
                 except Exception as exc:
@@ -373,7 +390,7 @@ class RemoteShutdownMixin:
                     result.crashed = True
                 finally:
                     self._track_remote_finish(
-                        loopback_results[id(lb)], generation)
+                        loopback_results[id(lb)], loopback_generations[id(lb)])
 
         results: List[RemoteShutdownResult] = (
             list(loopback_results.values()) + regular_results

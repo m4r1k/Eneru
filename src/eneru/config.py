@@ -934,7 +934,11 @@ class ConfigLoader:
         """Return True for int/float, excluding bool, inside optional bounds."""
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return False
-        if not math.isfinite(value):
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            return False
+        if not finite:
             return False
         if minimum is not None and value < minimum:
             return False
@@ -2286,10 +2290,6 @@ class ConfigLoader:
                         messages.extend(cls._unknown_key_errors(
                             f"ups '{name}' self_test",
                             entry["self_test"], _st_keys))
-                    if isinstance(entry.get("energy"), dict):
-                        messages.extend(cls._unknown_key_errors(
-                            f"ups '{name}' energy", entry["energy"],
-                            {"cost_per_kwh", "nominal_power"}))
             logging_raw = raw_data.get("logging", {})
             messages.extend(cls._unknown_key_errors(
                 "logging",
@@ -3509,17 +3509,15 @@ class ConfigLoader:
                 continue
             cpk = energy.cost_per_kwh
             if cpk is not None:
-                if (isinstance(cpk, bool)
-                        or not isinstance(cpk, (int, float))
-                        or not math.isfinite(cpk) or cpk < 0):
+                if not ConfigLoader._is_number_nonbool_in_range(
+                        cpk, minimum=0):
                     messages.append(
                         f"ERROR: {label_prefix}.cost_per_kwh must be a "
                         f"non-negative number or unset, got {cpk!r}")
             npw = energy.nominal_power
             if npw is not None:
-                if (isinstance(npw, bool)
-                        or not isinstance(npw, (int, float))
-                        or not math.isfinite(npw) or npw <= 0):
+                if (not ConfigLoader._is_number_nonbool_in_range(npw)
+                        or npw <= 0):
                     messages.append(
                         f"ERROR: {label_prefix}.nominal_power must be a positive "
                         f"number or unset, got {npw!r}")

@@ -558,6 +558,57 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
 
 @pytest.mark.unit
 @pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_empty_redundancy_overview_renders_no_data(minimal_config):
+    """A group with no current members must render the normal empty state."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    scope_start = js.index("function rowsForScope")
+    scope_helper = js[scope_start:js.index("function scopedRows", scope_start)]
+    render_start = js.index("function renderOverviewSummary")
+    render = js[render_start:js.index("function monitoringBadge", render_start)]
+    script = textwrap.dedent("""
+        const SCOPE_ALL = "__all__";
+        const SCOPE_UPS = "ups:";
+        const SCOPE_GROUP = "redundancy:";
+        const lastGroups = [{name: "empty", upsSources: []}];
+        const nodes = {
+          "overview-hero": {
+            childNodes: [],
+            replaceChildren(...children) { this.childNodes = children; },
+            appendChild(node) { this.childNodes.push(node); },
+          },
+          "overview-summary": {
+            childNodes: [],
+            replaceChildren(...children) { this.childNodes = children; },
+            appendChild(node) { this.childNodes.push(node); },
+          },
+        };
+        const document = {getElementById: id => nodes[id]};
+        function currentScope() { return "redundancy:empty"; }
+        function el(tag, attrs) { return {tag, attrs: attrs || {}}; }
+        function heroCard() { throw new Error("heroCard must not render"); }
+        function fleetOverview() { throw new Error("fleetOverview must not render"); }
+        function kpiCard() { throw new Error("kpiCard must not render"); }
+    """) + scope_helper + render + textwrap.dedent("""
+        renderOverviewSummary([{name: "rack"}, {name: "lab"}]);
+        process.stdout.write(JSON.stringify({
+          hero: nodes["overview-hero"].childNodes,
+          summaryCount: nodes["overview-summary"].childNodes.length,
+        }));
+    """)
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    assert json.loads(result.stdout) == {
+        "hero": [{
+            "tag": "p",
+            "attrs": {"class": "chart-note", "text": "No UPS data yet."},
+        }],
+        "summaryCount": 0,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_dashboard_fleet_overview_marks_blank_telemetry_unknown(minimal_config):
     """Empty monitoring values must render as unknown, never as bare units."""
     js = _handler(minimal_config, path="/app.js")._serve_static(
@@ -619,22 +670,24 @@ def test_dashboard_fleet_chart_source_is_explicit_and_persistent(minimal_config)
         const SCOPE_GROUP = "redundancy:";
         const lastGroups = [{name: "rack-pair", upsSources: ["rack", "desk"]}];
     """) + scope_helper + helper + textwrap.dedent("""
-        const rows = [{name: "rack"}, {name: "desk"}];
+        const rows = [{name: "rack"}, {name: "desk"}, {name: "lab"}];
         process.stdout.write(JSON.stringify({
-          fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "desk"),
+          fleetKeepsPrior: chartSourceName(SCOPE_ALL, rows, "lab"),
           fleetDefaultsFirst: chartSourceName(SCOPE_ALL, rows, "missing"),
           scopedFollowsView: chartSourceName("ups:desk", rows, "rack"),
           groupKeepsMember: chartSourceName("redundancy:rack-pair", rows, "desk"),
+          groupRejectsNonmember: chartSourceName("redundancy:rack-pair", rows, "lab"),
           emptyHasNoSource: chartSourceName(SCOPE_ALL, [], "rack"),
         }));
     """)
     result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     assert json.loads(result.stdout) == {
-        "fleetKeepsPrior": "desk",
+        "fleetKeepsPrior": "lab",
         "fleetDefaultsFirst": "rack",
         "scopedFollowsView": "desk",
         "groupKeepsMember": "desk",
+        "groupRejectsNonmember": "rack",
         "emptyHasNoSource": "",
     }
 
@@ -657,25 +710,33 @@ def test_dashboard_control_tab_honors_dashboard_view(minimal_config):
         const SCOPE_ALL = "__all__";
         const SCOPE_UPS = "ups:";
         const SCOPE_GROUP = "redundancy:";
-        const lastGroups = [{name: "rack-pair", upsSources: ["rack", "desk"]}];
+        const lastGroups = [
+          {name: "rack-pair", upsSources: ["rack", "desk"]},
+          {name: "empty", upsSources: []},
+        ];
     """) + helper + textwrap.dedent("""
-        const rows = [{name: "rack"}, {name: "desk"}];
+        const rows = [{name: "rack"}, {name: "desk"}, {name: "lab"}];
+        const redundancy = rowsForScope(rows, "redundancy:rack-pair");
         process.stdout.write(JSON.stringify({
           fleet: rowsForScope(rows, SCOPE_ALL).map(row => row.name),
           rack: rowsForScope(rows, "ups:rack").map(row => row.name),
           desk: rowsForScope(rows, "ups:desk").map(row => row.name),
-          redundancy: rowsForScope(rows, "redundancy:rack-pair").map(row => row.name),
+          redundancy: redundancy.map(row => row.name),
+          redundancyRejectsNonmember: !redundancy.some(row => row.name === "lab"),
+          emptyRedundancy: rowsForScope(rows, "redundancy:empty").map(row => row.name),
           staleFallsBackSafely: rowsForScope(rows, "missing").map(row => row.name),
         }));
     """)
     result = subprocess.run([NODE, "-"], input=script, text=True,
                             capture_output=True, check=True)
     assert json.loads(result.stdout) == {
-        "fleet": ["rack", "desk"],
+        "fleet": ["rack", "desk", "lab"],
         "rack": ["rack"],
         "desk": ["desk"],
         "redundancy": ["rack", "desk"],
-        "staleFallsBackSafely": ["rack", "desk"],
+        "redundancyRejectsNonmember": True,
+        "emptyRedundancy": [],
+        "staleFallsBackSafely": ["rack", "desk", "lab"],
     }
 
 
@@ -1044,6 +1105,9 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert 'setInterval(refreshShutdownProgress, 1000)' in js
     assert '"/api/v1/redundancy-groups/"' in js
     assert ".sd-state-running" in css and ".sd-progress" in css
+    for state, color in (("ok", "ok"), ("warn", "warn"),
+                         ("crit", "crit"), ("muted", "muted")):
+        assert f".sd-progress.s-{state} {{ color: var(--{color}); }}" in css
     # Shutdown plan is reachable per-UPS (remote-only/multi-UPS) + shows the
     # redundancy-group quorum trigger.
     assert 'id="shutdown-ups"' in html

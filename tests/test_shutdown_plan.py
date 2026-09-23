@@ -113,6 +113,8 @@ def test_coordinator_mode_non_local_handoff_when_trigger_on_any(cfg):
     assert term["id"] == "local-poweroff"
     assert term["enabled"]
     assert term["steps"]
+    assert "coordinator" in plan["note"].lower()
+    assert "only remote-server shutdown runs" not in plan["note"]
 
 
 @pytest.mark.unit
@@ -220,7 +222,7 @@ def test_shutdown_progress_tracks_phases_and_sanitized_remote_results():
     generation = progress.remote_start("nas", "10.0.0.2")
     progress.remote_finish(RemoteShutdownResult(
         server="nas", host="10.0.0.2", shutdown_sent=True, dry_run=True,
-        pre_commands=RemotePreShutdownResult(attempted=2, failed=1),
+        pre_commands=RemotePreShutdownResult(attempted=2),
     ), generation)
     progress.finish()
 
@@ -236,7 +238,7 @@ def test_shutdown_progress_tracks_phases_and_sanitized_remote_results():
         "startedAt": snapshot["remotes"][0]["startedAt"],
         "finishedAt": snapshot["remotes"][0]["finishedAt"],
         "outcome": "dry-run", "error": "", "preCommandsAttempted": 2,
-        "preCommandsFailed": 1,
+        "preCommandsFailed": 0,
     }]
 
     # snapshot() returns a detached copy, not the tracker's mutable state.
@@ -267,6 +269,43 @@ def test_shutdown_progress_remote_outcomes_and_timeout_is_terminal():
     assert rows["failed"]["state"] == "failed"
     assert rows["failed"]["outcome"] == "not-sent"
     assert rows["failed"]["error"] == "Remote shutdown failed; see service logs"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("dry_run", "outcome"), [
+    (False, "command-sent"),
+    (True, "dry-run"),
+])
+def test_shutdown_progress_preserves_sent_outcome_for_partial_failure(
+        dry_run, outcome):
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("outage")
+    generation = progress.remote_start("host", "127.0.0.1")
+    progress.remote_finish(RemoteShutdownResult(
+        server="host", host="127.0.0.1", shutdown_sent=True,
+        dry_run=dry_run, crashed=True,
+    ), generation)
+
+    row = progress.snapshot()["remotes"][0]
+    assert row["state"] == "failed"
+    assert row["outcome"] == outcome
+    assert row["error"] == "Remote shutdown failed; see service logs"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_reports_pre_command_failure():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("outage")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=True,
+        pre_commands=RemotePreShutdownResult(attempted=2, failed=1),
+    ), generation)
+
+    row = progress.snapshot()["remotes"][0]
+    assert row["state"] == "failed"
+    assert row["outcome"] == "command-sent"
+    assert row["preCommandsFailed"] == 1
 
 
 @pytest.mark.unit
