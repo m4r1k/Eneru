@@ -32,6 +32,11 @@ classifiers = [
 ]
 dependencies = [
     "PyYAML>=5.4.1",
+    # Comment-preserving round-trip editing for `eneru config` (6.2.0).
+    # 0.16.6 is the oldest distro build we support (RHEL 9). Capped because
+    # config_doc.py relies on ruamel's comment-slot internals; test each new
+    # minor before raising the bound.
+    "ruamel.yaml>=0.16.6,<0.20",
 ]
 
 [project.optional-dependencies]

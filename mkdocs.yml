@@ -38,6 +38,7 @@ nav:
       - Architecture: architecture.md
   - Configuration:
       - Configuration reference: configuration.md
+      - Config editor and checker: config-editor.md
       - Shutdown triggers: triggers.md
       - Redundancy groups: redundancy-groups.md
       - Notifications: notifications.md

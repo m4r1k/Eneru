@@ -37,6 +37,9 @@ sudo apt install eneru
 
 ```bash
 sudo dnf install -y epel-release
+# RHEL 9 only: enable CodeReady Builder (python3-ruamel-yaml); EPEL needs it too
+sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb   # Rocky/Alma
+# RHEL:  sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
 sudo dnf install eneru
 ```
@@ -55,7 +58,16 @@ The PyPI install is useful for development or user-managed services. Native pack
 
 ## Create the first config
 
-Edit `/etc/ups-monitor/config.yaml`:
+The quickest path is the guided editor. It asks for the UPS, its NUT login,
+your remote servers and notifications, explains every option, tests the
+connections, and shows what happens on power loss before saving:
+
+```bash
+sudo eneru config
+```
+
+See [Config editor and checker](config-editor.md). To write the file by hand
+instead, edit `/etc/ups-monitor/config.yaml`:
 
 ```yaml
 ups:
@@ -86,6 +98,12 @@ eneru validate --config /etc/ups-monitor/config.yaml
 ```
 
 Validation prints the UPS groups, enabled resources, remote shutdown phases, notification status, and configuration errors. Do not start the service until validation passes.
+
+Then run the live inspection. It logs in to NUT, SSHes to each remote server and checks every shutdown tool and sudo rule, all read-only:
+
+```bash
+sudo eneru config check --config /etc/ups-monitor/config.yaml
+```
 
 ## Test in dry-run mode
 

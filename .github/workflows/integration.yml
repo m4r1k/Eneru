@@ -100,7 +100,10 @@ jobs:
         run: pip install ".[notifications]"
 
       - name: Verify installation
-        run: eneru version
+        run: |
+          eneru version
+          # ruamel.yaml is a hard pip dependency since 6.2 (`eneru config`).
+          python3 -c "import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
 
       - name: Validate example configs
         run: |
@@ -151,6 +154,7 @@ jobs:
           apt-get update
           apt-get install -y python3 python3-yaml
           dpkg-deb -f eneru_*.deb Depends | grep -q "python3-paho-mqtt"
+          dpkg-deb -f eneru_*.deb Depends | grep -q "python3-ruamel.yaml"
           # --force-depends lets us install even though nut-client isn't
           # in the test container; subsequent `apt-get install -f` then
           # resolves any dependencies it can. Real install failures must
@@ -167,6 +171,14 @@ jobs:
           python3 /opt/ups-monitor/eneru.py version
           python3 -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
+          # 6.2 config editor: the distro ruamel.yaml must satisfy the
+          # round-trip module, and `config check` must run from the package
+          # layout. The container has no nut-client, so the check reports an
+          # ERROR (exit 1) by design; assert it produced a full report.
+          python3 -c "import sys; sys.path.insert(0, '/opt/ups-monitor'); import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
+          out="$(python3 /opt/ups-monitor/eneru.py config check --offline --config /etc/ups-monitor/config.yaml || true)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q "^Summary:"
 
       - name: Validate example configs
         run: |
@@ -187,11 +199,11 @@ jobs:
           - version: '9'
             image: registry.access.redhat.com/ubi9/ubi
             name: RHEL 9 (Plow)
-            python_pkg: python3 python3-pyyaml
+            python_pkg: python3 python3-pyyaml python3-ruamel-yaml
           - version: '10'
             image: registry.access.redhat.com/ubi10/ubi
             name: RHEL 10 (Coughlan)
-            python_pkg: python3 python3-pyyaml
+            python_pkg: python3 python3-pyyaml python3-ruamel-yaml
     container:
       image: ${{ matrix.image }}
     steps:
@@ -221,6 +233,9 @@ jobs:
             echo "       Move it back to recommends: in nfpm.yaml."
             exit 1
           fi
+          # The config editor's ruamel.yaml IS a hard dep (RHEL 9 CRB /
+          # RHEL 10 AppStream).
+          rpm -qpR "$RPM" | grep -q "^python3-ruamel-yaml"
 
           # RHEL 9/10: system python3 == 3.9+.
           dnf install -y ${{ matrix.python_pkg }}
@@ -256,6 +271,10 @@ jobs:
           "$PYTHON_BIN" /opt/ups-monitor/eneru.py version
           "$PYTHON_BIN" -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           "$PYTHON_BIN" /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
+          "$PYTHON_BIN" -c "import sys; sys.path.insert(0, '/opt/ups-monitor'); import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
+          out="$("$PYTHON_BIN" /opt/ups-monitor/eneru.py config check --offline --config /etc/ups-monitor/config.yaml || true)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q "^Summary:"
 
       - name: Validate example configs
         run: |
@@ -316,7 +335,10 @@ jobs:
           python3 -m pip install ".[notifications]"
 
       - name: Verify installation
-        run: eneru version
+        run: |
+          eneru version
+          # ruamel.yaml is a hard pip dependency since 6.2 (`eneru config`).
+          python3 -c "import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
 
       - name: Validate example configs
         run: |

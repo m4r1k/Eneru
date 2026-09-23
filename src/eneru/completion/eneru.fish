@@ -124,10 +124,30 @@ function __eneru_using_self_test_run
     return 1
 end
 
+function __eneru_using_config_check
+    set -l cmd (commandline -opc)
+    set -l saw_config 0
+    for word in $cmd[2..-1]
+        switch $word
+            case '-*'
+                continue
+            case config
+                set saw_config 1
+            case check
+                test $saw_config -eq 1; and return 0
+                return 1
+            case '*'
+                test $saw_config -eq 1; and return 1
+        end
+    end
+    return 1
+end
+
 # Subcommands.
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'run' -d 'Start the monitoring daemon'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'shutdown' -d 'Manual shutdown drills'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'remote' -d 'Inspect configured remote shutdown targets'
+complete -c eneru -n '__eneru_no_subcommand' -f -a 'config' -d 'Guided or advanced config editor'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'validate' -d 'Validate configuration and show overview'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'monitor' -d 'Launch real-time TUI dashboard'
 complete -c eneru -n '__eneru_no_subcommand' -f -a 'tui' -d 'Alias for monitor'
@@ -183,6 +203,14 @@ complete -c eneru -n '__eneru_using_shutdown_group' -l group -r -d 'UPS group la
 complete -c eneru -n '__eneru_using_shutdown_group' -l dry-run -d 'Log every phase without executing'
 complete -c eneru -n '__eneru_using_shutdown_group' -l i-really-want-to-proceed-with-group-shutdown -d 'Confirm real group shutdown'
 complete -c eneru -n '__eneru_using_shutdown_group' -l log-file -r -d 'Append rehearsal log to file'
+
+# `config` (editor) and `config check`.
+complete -c eneru -n '__eneru_using config; and not __eneru_using_config_check' -f -a 'check' -d 'Inspect a config: validation plus live NUT/SSH/sudo probes'
+complete -c eneru -n '__eneru_using config' -s c -l config -r -d 'Config file to edit, create or inspect'
+complete -c eneru -n '__eneru_using config; and not __eneru_using_config_check' -l basic -d 'Start in guided mode'
+complete -c eneru -n '__eneru_using config; and not __eneru_using_config_check' -l advanced -d 'Start in advanced mode'
+complete -c eneru -n '__eneru_using_config_check' -l offline -d 'Skip live NUT/SSH probes'
+complete -c eneru -n '__eneru_using_config_check' -s q -l quiet -d 'Show only problems and notes'
 
 # `remote` subcommands.
 complete -c eneru -n '__eneru_using remote' -f -a 'list' -d 'List configured remote shutdown targets'

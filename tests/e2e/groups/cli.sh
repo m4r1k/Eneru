@@ -388,5 +388,195 @@ cleanup_test58
 trap - EXIT
 )
 
+# ======================================================================
+# Test 65: config check live-probes NUT, SSH, sudo and every command
+# ======================================================================
+# v6.2 `eneru config check`: the building inspector walks the real NUT server
+# and SSH target read-only. It must log in to NUT, SSH in, prove sudo with
+# `sudo -n -l` WITHOUT running the shutdown command, find binaries through
+# Eneru's augmented remote PATH, flag missing tools in red, and never execute
+# a custom command or the final shutdown command.
+(
+echo ""
+echo ">>> Running: Test 65: config check live-probes NUT, SSH, sudo and commands"
+
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-path-augmented /var/run/shutdown-triggered
+
+cat >/tmp/config-e2e-config-check.yaml <<'YAML'
+ups:
+  name: "TestUPS@localhost:3493"
+nut_control:
+  username: "admin"
+  password: "testpass"
+behavior:
+  dry_run: true
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Probe Target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    use_sudo: true
+    shutdown_command: "shutdown -h now"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+    pre_shutdown_commands:
+      - action: "sync"
+      - action: "stop_containers"
+      - command: "eneru-path-probe"
+  - name: "Missing Tool"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo -n synoshutdown -s"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+YAML
+
+set +e
+eneru config check --config /tmp/config-e2e-config-check.yaml >/tmp/test65.log 2>&1
+rc=$?
+set -e
+cat /tmp/test65.log
+if [ "$rc" -ne 1 ]; then
+  echo "FAIL: config check should exit 1 on the intentional errors (got $rc)"; exit 1
+fi
+expect() {
+  if ! grep -qF -- "$1" /tmp/test65.log; then
+    echo "FAIL: expected in config check output: $1"; exit 1
+  fi
+}
+expect "NUT server localhost:3493 lists UPS 'TestUPS'"
+expect "NUT login as 'admin' works"
+expect "Probe Target: SSH as testuser@localhost works"
+expect "Probe Target: 'shutdown' is installed"
+expect "Probe Target: sudo allows 'shutdown -h now' without a password"
+expect "Probe Target: 'eneru-path-probe' is installed"
+expect "Probe Target: failed: listing containers works"
+expect "Missing Tool: 'synoshutdown' is NOT installed"
+expect "What happens on power loss"
+# Read-only guarantees: nothing custom ran, nothing was powered off.
+if docker exec eneru-e2e-ssh test -e /tmp/eneru-path-augmented; then
+  echo "FAIL: config check EXECUTED a custom pre-shutdown command"; exit 1
+fi
+if docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered; then
+  echo "FAIL: config check EXECUTED the shutdown command"; exit 1
+fi
+
+# Argument-pinned sudoers rule (the documented Synology pattern): sudo -n -l
+# must be asked about the EXACT command, so the matching one passes and a
+# different argument list is flagged -- still without executing anything.
+docker exec eneru-e2e-ssh sh -c '
+  id pinned >/dev/null 2>&1 || adduser -D -s /bin/bash pinned
+  echo "pinned:$(head -c 12 /dev/urandom | od -An -tx1 | tr -d " \n")" | chpasswd >/dev/null
+  mkdir -p /home/pinned/.ssh
+  cp /home/testuser/.ssh/authorized_keys /home/pinned/.ssh/authorized_keys
+  chown -R pinned:pinned /home/pinned/.ssh
+  chmod 700 /home/pinned/.ssh; chmod 600 /home/pinned/.ssh/authorized_keys
+  grep -q "^pinned " /etc/sudoers || echo "pinned ALL=(ALL) NOPASSWD: /usr/local/bin/shutdown -h now" >> /etc/sudoers
+'
+cat >/tmp/config-e2e-config-check-pinned.yaml <<'YAML'
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: true
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Pinned OK"
+    enabled: true
+    host: "localhost"
+    user: "pinned"
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options: ["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]
+  - name: "Pinned Wrong Args"
+    enabled: true
+    host: "localhost"
+    user: "pinned"
+    shutdown_command: "sudo shutdown -r now"
+    ssh_options: ["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]
+YAML
+set +e
+eneru config check --config /tmp/config-e2e-config-check-pinned.yaml >/tmp/test65p.log 2>&1
+set -e
+cat /tmp/test65p.log
+grep -qF "Pinned OK: sudo allows 'shutdown -h now' without a password" /tmp/test65p.log || {
+  echo "FAIL: arg-pinned sudoers rule not recognised"; exit 1; }
+grep -qF "Pinned Wrong Args: sudo refuses it without a password" /tmp/test65p.log || {
+  echo "FAIL: mismatching arguments not flagged"; exit 1; }
+if docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered; then
+  echo "FAIL: config check EXECUTED the pinned shutdown command"; exit 1
+fi
+
+# A wrong NUT device name is pinpointed with the names that do exist.
+sed -i 's/TestUPS@localhost:3493/upsmon@localhost:3493/' /tmp/config-e2e-config-check.yaml
+set +e
+eneru config check --config /tmp/config-e2e-config-check.yaml >/tmp/test65b.log 2>&1
+set -e
+if ! grep -q "UPS 'upsmon' does not exist on localhost:3493 (available: .*TestUPS" /tmp/test65b.log; then
+  cat /tmp/test65b.log
+  echo "FAIL: wrong UPS name was not reported with the available names"; exit 1
+fi
+
+# The shipped E2E config is clean offline (static layer only).
+eneru config check --offline --quiet --config "$E2E_DIR/config-e2e.yaml"
+echo "PASS: config check probed NUT/SSH/sudo read-only and flagged real problems"
+)
+
+# ======================================================================
+# Test 66: config editor TUI edits in place and creates new files
+# ======================================================================
+# Drives the curses editor through a pty. Editing must change only the
+# touched value (operator comments survive, a .bak keeps the old file);
+# creating must write a 0600 file with safe defaults and an explanation
+# above every key, and the result must validate and pass config check.
+(
+echo ""
+echo ">>> Running: Test 66: config editor TUI edits in place and creates new files"
+
+cp "$E2E_DIR/config-e2e.yaml" /tmp/config-e2e-tui.yaml
+# Stage 2 (Safety) -> Enter toggles dry_run -> Save (y confirms if asked) -> Quit
+python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q' -- \
+  eneru config --basic --config /tmp/config-e2e-tui.yaml >/tmp/test66a.log
+if ! grep -qE '^  dry_run: true +# Real execution for E2E tests' /tmp/config-e2e-tui.yaml; then
+  grep -n dry_run /tmp/config-e2e-tui.yaml || true
+  echo "FAIL: TUI did not toggle dry_run in place with its comment intact"; exit 1
+fi
+if [ "$(diff "$E2E_DIR/config-e2e.yaml" /tmp/config-e2e-tui.yaml | grep -c '^[<>]')" -ne 2 ]; then
+  diff "$E2E_DIR/config-e2e.yaml" /tmp/config-e2e-tui.yaml || true
+  echo "FAIL: TUI changed more than the one edited line"; exit 1
+fi
+cmp -s "$E2E_DIR/config-e2e.yaml" /tmp/config-e2e-tui.yaml.bak || {
+  echo "FAIL: .bak does not hold the previous version"; exit 1; }
+eneru validate --config /tmp/config-e2e-tui.yaml
+
+rm -f /tmp/config-e2e-tui-new.yaml
+# New file -> edit UPS name (Ctrl-U clears) -> Save -> Quit
+python3 "$E2E_DIR/config-tui-driver.py" '\r|\x15TestUPS@localhost:3493\r|S|y|q' -- \
+  eneru config --basic --config /tmp/config-e2e-tui-new.yaml >/tmp/test66b.log
+test -f /tmp/config-e2e-tui-new.yaml || { echo "FAIL: new file not created"; exit 1; }
+if [ "$(stat -c %a /tmp/config-e2e-tui-new.yaml)" != "600" ]; then
+  echo "FAIL: new config must be mode 0600 (it can hold secrets)"; exit 1
+fi
+cat /tmp/config-e2e-tui-new.yaml
+grep -q '^  name: TestUPS@localhost:3493' /tmp/config-e2e-tui-new.yaml
+grep -q '^  dry_run: true' /tmp/config-e2e-tui-new.yaml
+grep -q '^  # NUT identifier NAME@HOST' /tmp/config-e2e-tui-new.yaml
+eneru validate --config /tmp/config-e2e-tui-new.yaml
+set +e
+eneru config check --config /tmp/config-e2e-tui-new.yaml >/tmp/test66c.log 2>&1
+set -e
+cat /tmp/test66c.log
+grep -qF "NUT server localhost:3493 lists UPS 'TestUPS'" /tmp/test66c.log
+echo "PASS: config editor edits in place and creates explained 0600 configs"
+)
+
 echo ""
 echo "=== Group 'cli' completed successfully ==="

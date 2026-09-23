@@ -188,6 +188,15 @@ jobs:
             grep -q '"reason": "sequence_complete"' tests/e2e/groups/loopback.sh
           fi
 
+      - name: Verify v6.2 config editor E2E coverage is wired
+        if: matrix.group == 'cli'
+        run: |
+          grep -q "Test 65: config check live-probes NUT, SSH, sudo and commands" tests/e2e/groups/cli.sh
+          grep -q "Test 66: config editor TUI edits in place and creates new files" tests/e2e/groups/cli.sh
+          grep -q "EXECUTED the shutdown command" tests/e2e/groups/cli.sh
+          grep -q "arg-pinned sudoers rule not recognised" tests/e2e/groups/cli.sh
+          test -f tests/e2e/config-tui-driver.py
+
       - name: Verify redundancy progress E2E coverage is wired
         if: matrix.group == 'redundancy-quorum'
         run: |

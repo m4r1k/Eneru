@@ -14,7 +14,7 @@ _eneru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run shutdown remote validate monitor tui test-notifications self-test completion version"
+    local subcommands="run shutdown remote config validate monitor tui test-notifications self-test completion version"
     local global_opts="-h --help"
     local config_opts="-c --config"
     local monitor_opts="--once --interval --graph --time --events-only -v --verbose --length"
@@ -138,6 +138,20 @@ _eneru() {
                     mapfile -t COMPREPLY < <(compgen -W "run status $global_opts" -- "$cur")
                     ;;
             esac
+            ;;
+        config)
+            local config_leaf=""
+            for ((i=2; i < COMP_CWORD; i++)); do
+                case "${COMP_WORDS[i]}" in
+                    -*) continue ;;
+                    check) config_leaf="check"; break ;;
+                esac
+            done
+            if [[ "$config_leaf" == "check" ]]; then
+                mapfile -t COMPREPLY < <(compgen -W "$config_opts --offline -q --quiet $global_opts" -- "$cur")
+            else
+                mapfile -t COMPREPLY < <(compgen -W "check $config_opts --basic --advanced $global_opts" -- "$cur")
+            fi
             ;;
         validate|test-notifications)
             COMPREPLY=( $(compgen -W "$config_opts $global_opts" -- "$cur") )

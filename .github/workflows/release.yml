@@ -530,6 +530,9 @@ jobs:
               <pre>
           # RHEL 9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
+          # RHEL 9: enable CodeReady Builder (python3-ruamel-yaml).
+          # Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+          # RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 
           # Add repository
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
@@ -610,6 +613,9 @@ jobs:
           ```bash
           # RHEL 9: Enable EPEL first (required for apprise dependency)
           sudo dnf install -y epel-release
+          # RHEL 9: enable CodeReady Builder (python3-ruamel-yaml).
+          # Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+          # RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 
           # Add repository
           sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo

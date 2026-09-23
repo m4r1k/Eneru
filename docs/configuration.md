@@ -176,6 +176,8 @@ eneru validate --config /etc/ups-monitor/config.yaml
 
 Validation catches YAML errors, invalid enum values, local-resource ownership mistakes, duplicate remote-server ownership, bad redundancy-group references, and unsafe notification suppression.
 
+For a deeper, live inspection, run `eneru config check`. It also logs in to NUT, SSHes to every remote server, proves sudo permissions with `sudo -n -l` without running anything, and prints what happens on power loss. To build or change a config step by step with every option explained, use `eneru config`. See [Config editor and checker](config-editor.md).
+
 ## Top-level sections
 
 | Section | Scope | Purpose |
@@ -602,6 +604,8 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | Command | Purpose |
 |---------|---------|
 | `run` | Start the monitoring daemon |
+| `config` | Guided (basic) or full (advanced) config editor; see [Config editor and checker](config-editor.md) |
+| `config check` | Validation plus live, read-only NUT/SSH/sudo/command probes and the power-loss preview |
 | `validate` | Validate config and print the shutdown plan |
 | `monitor` | Open the TUI dashboard |
 | `tui` | Alias for `monitor` |
@@ -617,7 +621,10 @@ Common flags:
 
 | Command | Flag | Purpose |
 |---------|------|---------|
-| `run`, `validate`, `monitor`, `test-notifications` | `-c`, `--config` | Config path |
+| `run`, `config`, `config check`, `validate`, `monitor`, `test-notifications` | `-c`, `--config` | Config path |
+| `config` | `--basic`, `--advanced` | Start the editor in that mode |
+| `config check` | `--offline` | Skip live probes (no NUT/SSH connections) |
+| `config check` | `-q`, `--quiet` | Show only problems and notes |
 | `run` | `--dry-run` | Override config and do not execute shutdown actions |
 | `run` | `--api` | Enable the embedded read-only API for this run |
 | `run` | `--api-bind ADDRESS` | API listen address for this run; implies `--api` |

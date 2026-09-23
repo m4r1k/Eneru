@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`eneru config check` inspects a config before an outage does.** Think of a
+  building inspector who tries every key in every door but never flips the
+  main breaker. On top of `eneru validate`, it reports:
+  - The startup warnings that are easy to miss in the log: dry-run left on, a
+    local UPS with `local_shutdown` off, `trigger_on: any` without a local UPS,
+    a plain-HTTP LAN API, MQTT without TLS, and missing tools or Python
+    packages.
+  - A shutdown sequence longer than `critical_runtime_threshold`.
+  - Live, read-only probes (skip them with `--offline`): the NUT name,
+    variables, login and self-test command, one SSH session per remote server,
+    `command -v` for every tool each step needs, harmless listings (`docker
+    ps`, `virsh list`, `qm list`, ...), and `sudo -n -l <binary>` to prove
+    NOPASSWD sudo (arguments included, so argument-pinned sudoers rules
+    match) without running anything.
+  - Shutdown and custom commands are never executed, only located.
+  - The report ends with a "what happens on power loss" timeline and exits 1
+    on errors. See `docs/config-editor.md`.
+- **`eneru config`: a guided (basic) and full (advanced) config editor.** A
+  curses TUI in the dashboard's colors, organised in stages: UPS and NUT
+  login, safety and triggers, this host, remote servers, redundancy groups,
+  notifications, features, then review.
+  - Every option shows its default and a plain-language explanation.
+  - Each stage is validated as you go, with errors in red, and `T` live-tests
+    the UPS or server under the cursor.
+  - Edits are made in place with `ruamel.yaml`, so operator comments, quoting,
+    indentation, line endings, owner and mode survive, and a private `.bak`
+    keeps the previous version. Values YAML 1.1 would read differently (`on`,
+    `12:30`, `0644`) are quoted so the daemon reads exactly what was typed.
+  - New keys get an explanatory comment. New files are mode 0600 and start
+    with `dry_run: true`.
+  - `ruamel.yaml` is a new dependency: `python3-ruamel.yaml` (deb) and
+    `python3-ruamel-yaml` (rpm; RHEL 9 needs CRB, which EPEL already requires).
+
 ### Removed
 
 - **RHEL 8 RPM packages are no longer built (breaking).** Starting with 6.2.0,

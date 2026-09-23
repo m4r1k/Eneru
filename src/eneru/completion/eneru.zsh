@@ -15,6 +15,7 @@ _eneru() {
         'run:Start the monitoring daemon'
         'shutdown:Manual shutdown drills'
         'remote:Inspect configured remote shutdown targets'
+        'config:Guided or advanced config editor (config check inspects)'
         'validate:Validate configuration and show overview'
         'monitor:Launch real-time TUI dashboard'
         'tui:Alias for monitor -- launch real-time TUI dashboard'
@@ -104,6 +105,20 @@ _eneru() {
                             _values 'self-test command' run status
                             ;;
                     esac
+                    ;;
+                config)
+                    if [[ "$line[2]" == "check" ]]; then
+                        _arguments \
+                            '(-c --config)'{-c,--config}'[config file to inspect]:config file:_files' \
+                            '--offline[skip live NUT/SSH probes]' \
+                            '(-q --quiet)'{-q,--quiet}'[show only problems and notes]'
+                    else
+                        _arguments \
+                            '(-c --config)'{-c,--config}'[config file to edit or create]:config file:_files' \
+                            '(--advanced)--basic[start in guided mode]' \
+                            '(--basic)--advanced[start in advanced mode]' \
+                            '1:config command:(check)'
+                    fi
                     ;;
                 validate|test-notifications)
                     _arguments \
