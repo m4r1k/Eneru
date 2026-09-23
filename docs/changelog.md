@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc3] - 2026-09-23
+
 ### Added
 
 - **Redundancy groups are first-class dashboard scopes.** The global View
