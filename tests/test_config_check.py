@@ -516,12 +516,22 @@ class TestCommandChecks:
         _, notes = cc.command_checks("poweroff", False, final=True, user="root")
         assert notes == []
 
-    def test_custom_command_use_sudo_does_not_apply(self):
+    def test_custom_command_use_sudo_applies(self):
+        # 6.2: use_sudo prefixes custom commands too, like the runtime.
         checks, notes = cc.command_checks("systemctl stop foo", True)
-        assert self.kinds(checks) == [("exists", "systemctl")]
-        assert "does not apply" in notes[0]
+        assert self.kinds(checks) == [("exists", "systemctl"), ("sudo", "systemctl")]
+        assert checks[-1].script == "sudo -n -l systemctl stop foo"
+        assert notes == []
         checks, notes = cc.command_checks("sudo -n systemctl stop foo", True)
         assert self.kinds(checks) == [("exists", "systemctl"), ("sudo", "systemctl")]
+        assert notes == []
+        checks, notes = cc.command_checks("systemctl stop foo", False)
+        assert self.kinds(checks) == [("exists", "systemctl")]
+
+    def test_pipeline_under_sudo_notes_first_command_only(self):
+        _, notes = cc.command_checks("systemctl stop x | tee /root/log", True)
+        assert "only its first command runs under sudo" in notes[0]
+        _, notes = cc.command_checks("systemctl stop x | tee log", False)
         assert notes == []
 
     def test_unparseable(self):
@@ -661,7 +671,7 @@ class TestProbeRemote:
             return 0, "\n".join(lines), ""
         out, _ = self.run_probe(env, srv, script_out=script_out)
         text = joined(out)
-        assert "does not apply" in text
+        assert "sudo refuses it without a password: sudo allows 'systemctl stop x'" in text
         assert "'synoshutdown' is NOT installed" in text
         assert "sudo allows 'synoshutdown'" not in text  # muted
         assert "failed: listing running VMs works (error: failed to connect)" in text
@@ -1054,7 +1064,7 @@ class TestSudoArgs:
     def test_custom_explicit_sudo_passes_args(self):
         checks, notes = cc.command_checks("sudo -n systemctl stop app", True)
         assert checks[-1].script == "sudo -n -l systemctl stop app"
-        assert not [n for n in notes if "does not apply" in n]
+        assert not [n for n in notes if "first command" in n]
 
 
 class TestUnmountChecks:

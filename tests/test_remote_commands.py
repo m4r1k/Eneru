@@ -357,6 +357,30 @@ class TestRemotePreShutdownExecution:
         assert mock_run.call_args[0][1] == "sudo shutdown -h now"
 
     @pytest.mark.unit
+    def test_custom_command_use_sudo_prefix_is_idempotent(self, remote_monitor):
+        """6.2: use_sudo also runs custom pre-shutdown commands via sudo -n,
+        leaving commands that already start with sudo untouched."""
+        server = RemoteServerConfig(
+            name="NAS", enabled=True, host="10.0.0.2", user="admin",
+            use_sudo=True, command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="systemctl stop app"),
+                RemoteCommandConfig(command="sudo -n systemctl stop db"),
+            ],
+        )
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+        sent = [c[0][1] for c in mock_run.call_args_list]
+        assert sent == ["sudo -n systemctl stop app", "sudo -n systemctl stop db"]
+
+        server.use_sudo = False
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+        assert mock_run.call_args_list[0][0][1] == "systemctl stop app"
+
+    @pytest.mark.unit
     def test_execute_pre_shutdown_with_custom_command(self, remote_monitor):
         """Test executing pre-shutdown with custom command."""
         server = RemoteServerConfig(

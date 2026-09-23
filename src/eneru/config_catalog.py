@@ -355,8 +355,9 @@ PRE_SHUTDOWN_SECTION = Section(
                "command.", None, nullable=True,
                choices=tuple(sorted(REMOTE_ACTIONS)), tier=BASIC),
         Option("command", "str",
-               "Custom shell command run verbatim as the SSH user (use_sudo "
-               "does NOT apply; prefix `sudo -n` yourself).", None,
+               "Custom shell command run on the server. With use_sudo it runs "
+               "as `sudo -n <command>` (only the first command of a pipeline).",
+               None,
                nullable=True, tier=BASIC,
                example="systemctl stop my-service"),
         Option("timeout", "int",
@@ -389,9 +390,9 @@ REMOTE_SERVER_SECTION = Section(
                "keys for the user running Eneru.", None, nullable=True,
                tier=BASIC, example="/root/.ssh/id_ed25519"),
         Option("use_sudo", "bool",
-               "On: prefix the built-in actions and the shutdown command with "
-               "`sudo -n` (non-interactive sudo). Needs a NOPASSWD sudoers "
-               "rule; the checker verifies it with `sudo -n -l`.",
+               "On: run the built-in actions, custom commands and the shutdown "
+               "command through `sudo -n` (non-interactive sudo). Needs NOPASSWD "
+               "sudoers rules; the checker verifies them with `sudo -n -l`.",
                _d(_RS, "use_sudo"), tier=BASIC),
         Option("shutdown_command", "str",
                "Final command that powers the machine off. Pick a preset "

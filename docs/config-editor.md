@@ -56,7 +56,7 @@ job or an Ansible handler.
 | Remote server | One harmless SSH login (`remote_health.probe_command`, default `true`), then the host-identity probe for loopback entries |
 | Predefined actions | `command -v` for every tool, plus a read-only listing: `docker ps -q` / `podman ps -q`, `docker compose version` and the compose file's presence, `virsh list`, `qm list`, `pct list`, `xe vm-list`, `vim-cmd vmsvc/getallvms`, `loginctl list-users`, and whether each unmount target is mounted |
 | Shutdown command | `command -v <binary>`; if it runs through sudo, `sudo -n -l <binary> <args>` |
-| Custom commands | `command -v <binary>` only; with an explicit `sudo`, also `sudo -n -l <binary> <args>` |
+| Custom commands | `command -v <binary>` only; with `use_sudo` or an explicit `sudo`, also `sudo -n -l <binary> <args>` |
 | This host | `virsh list`, `<runtime> ps`, `<runtime> compose version`, compose files exist, unmount targets are mounted |
 
 `sudo -n -l <binary> <args>` asks sudo whether the SSH user may run that
@@ -74,10 +74,11 @@ augmentation the real shutdown uses (`/usr/sbin`, `/sbin`,
 a tool the shutdown will find.
 
 !!! note "`use_sudo` and custom commands"
-    `use_sudo: true` prefixes the **predefined actions** and the **final
-    shutdown command** with `sudo -n`. A custom `pre_shutdown_commands[].command`
-    runs verbatim as the SSH user. The checker warns when you enabled
-    `use_sudo` but a custom command doesn't spell out `sudo` itself.
+    `use_sudo: true` runs the **predefined actions**, **custom
+    `pre_shutdown_commands`** and the **final shutdown command** through
+    `sudo -n` (a command that already starts with `sudo` is left as written).
+    Only the first command of a pipeline or list is prefixed. The checker
+    notes when a custom command chains more commands under sudo.
 
 ### The power-loss preview
 

@@ -578,5 +578,61 @@ grep -qF "NUT server localhost:3493 lists UPS 'TestUPS'" /tmp/test66c.log
 echo "PASS: config editor edits in place and creates explained 0600 configs"
 )
 
+# ======================================================================
+# Test 67: use_sudo also runs custom pre-shutdown commands through sudo
+# ======================================================================
+# 6.2 behavior change: `use_sudo: true` now prefixes custom
+# pre_shutdown_commands with `sudo -n` (like the predefined actions and the
+# final shutdown command). A custom `touch /root/...` can only succeed as
+# root, so the marker proves the sudo prefix; with use_sudo off it must fail.
+(
+echo ""
+echo ">>> Running: Test 67: use_sudo runs custom pre-shutdown commands via sudo"
+
+docker exec eneru-e2e-ssh rm -f /root/eneru-custom-sudo /root/eneru-custom-nosudo
+write_cfg() {
+  cat >"$1" <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Sudo Target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    use_sudo: $2
+    shutdown_command: "true"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+    pre_shutdown_commands:
+      - command: "touch /root/$3"
+YAML
+}
+write_cfg /tmp/config-e2e-custom-sudo.yaml true eneru-custom-sudo
+eneru shutdown remote --config /tmp/config-e2e-custom-sudo.yaml \
+  --server "Sudo Target" --i-really-want-to-proceed-with-remote-shutdown \
+  >/tmp/test67a.log 2>&1 || true
+cat /tmp/test67a.log
+docker exec eneru-e2e-ssh test -e /root/eneru-custom-sudo || {
+  echo "FAIL: use_sudo did not run the custom command through sudo"; exit 1; }
+
+write_cfg /tmp/config-e2e-custom-nosudo.yaml false eneru-custom-nosudo
+eneru shutdown remote --config /tmp/config-e2e-custom-nosudo.yaml \
+  --server "Sudo Target" --i-really-want-to-proceed-with-remote-shutdown \
+  >/tmp/test67b.log 2>&1 || true
+cat /tmp/test67b.log
+if docker exec eneru-e2e-ssh test -e /root/eneru-custom-nosudo; then
+  echo "FAIL: without use_sudo the custom command must run as the SSH user"; exit 1
+fi
+docker exec eneru-e2e-ssh rm -f /root/eneru-custom-sudo
+echo "PASS: use_sudo applies to custom pre-shutdown commands"
+)
+
 echo ""
 echo "=== Group 'cli' completed successfully ==="

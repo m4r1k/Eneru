@@ -915,7 +915,13 @@ class RemoteShutdownMixin:
 
             # Handle custom command
             elif cmd_config.command:
-                command = cmd_config.command
+                # use_sudo covers custom commands too (6.2): with a non-root
+                # SSH user they almost always need root, and the operator
+                # already declared the server as "sudo -n" in one place.
+                # Idempotent: an explicit `sudo ...` is left as written. Only
+                # the first command of a pipeline/list is prefixed, exactly
+                # like the final shutdown_command.
+                command = self._with_sudo(cmd_config.command, server.use_sudo)
                 # Truncate long commands for display
                 if len(command) > 50:
                     description = command[:47] + "..."

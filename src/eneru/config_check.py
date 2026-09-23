@@ -935,23 +935,24 @@ def command_checks(command: str, use_sudo: bool, *,
     are never executed: Eneru only proves the binary is on the PATH and, when
     sudo is involved, that sudo would allow it without a password.
 
-    ``use_sudo`` mirrors the runtime exactly: it prefixes ONLY the final
-    shutdown command (and the built-in actions), never a custom
-    pre_shutdown command, which runs verbatim.
+    ``use_sudo`` mirrors the runtime exactly: it prefixes the final
+    shutdown command and custom pre_shutdown commands with ``sudo -n``
+    unless they already start with sudo (only the first command of a
+    pipeline/list is prefixed).
     """
     notes: List[str] = []
     effective = command
     stripped = (command or "").lstrip()
-    if final and use_sudo and not stripped.startswith("sudo "):
+    if use_sudo and not stripped.startswith("sudo "):
         effective = f"sudo -n {command}"
     binary, via_sudo, args = command_binary(effective)
     if not binary:
         notes.append(f"could not parse '{command}'; nothing was checked")
         return [], notes
-    if not final and use_sudo and not via_sudo:
+    if via_sudo and re.search(r"[;&|]", command or ""):
         notes.append(
-            f"use_sudo does not apply to custom command '{command}': it runs "
-            "as the SSH user. Prefix it with 'sudo -n' if it needs root.")
+            f"'{command}': only its first command runs under sudo; wrap the "
+            "rest yourself (e.g. sudo -n sh -c '...') if it needs root too.")
     checks = [_exists(binary, hint=(
         "Not found on the remote PATH (Eneru adds /usr/sbin, /sbin, "
         "/usr/local/sbin and Synology's /usr/syno/sbin)."))]
@@ -1077,7 +1078,7 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
 
     checks, notes = remote_checks(config, server)
     for note in notes:
-        warn = ("most systems refuse" in note or "does not apply" in note
+        warn = ("most systems refuse" in note or "first command runs under sudo" in note
                 or "no `mounts` listed" in note)
         add(LEVEL_WARN if warn else LEVEL_INFO, note)
     if not checks:

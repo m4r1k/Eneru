@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ruamel.yaml` is a new dependency: `python3-ruamel.yaml` (deb) and
     `python3-ruamel-yaml` (rpm; RHEL 9 needs CRB, which EPEL already requires).
 
+### Changed
+
+- **`use_sudo` now covers custom pre-shutdown commands.** Before, it prefixed
+  only the predefined actions and the final shutdown command, while a custom
+  `pre_shutdown_commands[].command` ran as the plain SSH user and usually
+  failed for lack of root. Now every command on a `use_sudo: true` server
+  runs through `sudo -n`, unless it already starts with `sudo`. Only the
+  first command of a pipeline or list is prefixed. If your sudoers only
+  allows the shutdown tools, add NOPASSWD rules for those custom commands:
+  `eneru config check` shows which ones sudo would refuse.
+
 ### Removed
 
 - **RHEL 8 RPM packages are no longer built (breaking).** Starting with 6.2.0,
