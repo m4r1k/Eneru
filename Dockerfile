@@ -39,6 +39,8 @@ RUN apt-get update \
 WORKDIR /build
 COPY . .
 
+# ruamel.yaml (the `eneru config` editor) comes in as a core dependency, so
+# the image always ships it even though deb/rpm only Recommend it.
 # Resolve and download every wheel (incl. notifications + mqtt extras)
 # into /wheels. The runtime stage installs from this offline cache, so
 # pip never hits PyPI at runtime-stage time — reproducible across

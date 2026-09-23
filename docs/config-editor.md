@@ -167,15 +167,17 @@ reload) or a restart.
 
 ## Requirements
 
-The editor uses `ruamel.yaml`:
+The editor uses `ruamel.yaml`. It is a *recommended* package on deb and
+rpm: the daemon and `eneru config check` never need it, so installing Eneru
+never fails because of it. Without it, `eneru config` prints the command to
+install it.
 
-- **deb** (Debian 12/13, Ubuntu 22.04+): `python3-ruamel.yaml`, installed
-  automatically.
-- **rpm**: `python3-ruamel-yaml`, installed automatically. On RHEL 9 it
-  lives in CodeReady Builder (CRB), which EPEL on RHEL 9 already requires:
-  `sudo dnf config-manager --set-enabled crb` (Rocky/Alma) or
+- **deb** (Debian 12/13, Ubuntu 22.04+): `python3-ruamel.yaml`, pulled in
+  automatically (apt installs Recommends by default).
+- **rpm**: `python3-ruamel-yaml`, pulled in automatically when its repo is
+  enabled. RHEL 10 ships it in AppStream. On RHEL 9 it lives in CodeReady
+  Builder (CRB): `sudo dnf config-manager --set-enabled crb` (Rocky/Alma) or
   `sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms`
-  (RHEL). RHEL 10 ships it in AppStream.
-- **pip / container image**: installed as a dependency.
-
-`eneru config check` needs nothing extra.
+  (RHEL), then `sudo dnf install python3-ruamel-yaml`.
+- **pip / container image**: always installed (a core dependency, bundled in
+  the image).

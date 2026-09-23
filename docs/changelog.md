@@ -43,8 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `12:30`, `0644`) are quoted so the daemon reads exactly what was typed.
   - New keys get an explanatory comment. New files are mode 0600 and start
     with `dry_run: true`.
-  - `ruamel.yaml` is a new dependency: `python3-ruamel.yaml` (deb) and
-    `python3-ruamel-yaml` (rpm; RHEL 9 needs CRB, which EPEL already requires).
+  - `ruamel.yaml` is new: a core dependency for pip and the container image,
+    and a *recommended* package on deb (`python3-ruamel.yaml`) and rpm
+    (`python3-ruamel-yaml`; RHEL 9 has it in CRB), so installing Eneru never
+    fails over the editor.
 
 ### Changed
 

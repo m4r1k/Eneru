@@ -39,21 +39,19 @@ overrides:
     depends:
       - python3
       - python3-yaml
-      - python3-ruamel.yaml
       - python3-paho-mqtt
       - python3-bcrypt
       - nut-client
     recommends:
       - apprise
       - openssh-client
+      # SOFT: only the `eneru config` editor needs it (the daemon and
+      # `eneru config check` don't). apt installs Recommends by default.
+      - python3-ruamel.yaml
   rpm:
     depends:
       - python3
       - python3-pyyaml
-      # `eneru config` edits configs in place without losing comments.
-      # RHEL 10 ships it in AppStream; RHEL 9 in CodeReady Builder (CRB),
-      # which EPEL on RHEL 9 already requires enabling.
-      - python3-ruamel-yaml
       - nut-client
     # python3-paho-mqtt is a SOFT dep on RPM. RHEL 10 doesn't ship it
     # at all (not in BaseOS / AppStream / CRB / EPEL 10), so making it
@@ -74,6 +72,11 @@ overrides:
       - openssh-clients
       - python3-paho-mqtt
       - python3-bcrypt
+      # SOFT: only the `eneru config` editor needs it, and a missing module
+      # degrades to an install hint. RHEL 10 ships it in AppStream, RHEL 9 in
+      # CodeReady Builder (CRB); dnf pulls weak deps when the repo is enabled
+      # and silently skips them otherwise, so the daemon always installs.
+      - python3-ruamel-yaml
 
 # Files to include in the package
 contents:

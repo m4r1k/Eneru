@@ -154,7 +154,11 @@ jobs:
           apt-get update
           apt-get install -y python3 python3-yaml
           dpkg-deb -f eneru_*.deb Depends | grep -q "python3-paho-mqtt"
-          dpkg-deb -f eneru_*.deb Depends | grep -q "python3-ruamel.yaml"
+          # ruamel.yaml is a SOFT dep (editor only): Recommends, never Depends.
+          dpkg-deb -f eneru_*.deb Recommends | grep -q "python3-ruamel.yaml"
+          if dpkg-deb -f eneru_*.deb Depends | grep -q "ruamel"; then
+            echo "ERROR: python3-ruamel.yaml regressed to a hard deb dep"; exit 1
+          fi
           # --force-depends lets us install even though nut-client isn't
           # in the test container; subsequent `apt-get install -f` then
           # resolves any dependencies it can. Real install failures must
@@ -171,14 +175,21 @@ jobs:
           python3 /opt/ups-monitor/eneru.py version
           python3 -c "import paho.mqtt.client; print('paho-mqtt import OK')"
           python3 /opt/ups-monitor/eneru.py validate --config /etc/ups-monitor/config.yaml
-          # 6.2 config editor: the distro ruamel.yaml must satisfy the
-          # round-trip module, and `config check` must run from the package
-          # layout. The container has no nut-client, so the check reports an
-          # ERROR (exit 1) by design; assert it produced a full report.
-          python3 -c "import sys; sys.path.insert(0, '/opt/ups-monitor'); import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
+          # 6.2 config tools. ruamel.yaml is only Recommended and this job
+          # installs with --no-install-recommends, so first prove the daemon
+          # side degrades cleanly without it: `config check` must still run
+          # from the package layout (no nut-client here, so it reports an
+          # ERROR and exits 1 by design; assert a full report).
+          if python3 -c "import ruamel.yaml" 2>/dev/null; then
+            echo "NOTE: ruamel.yaml already present; soft-dep path not exercised"
+          fi
           out="$(python3 /opt/ups-monitor/eneru.py config check --offline --config /etc/ups-monitor/config.yaml || true)"
           printf '%s\n' "$out"
           printf '%s\n' "$out" | grep -q "^Summary:"
+          # Then the Recommends the operator normally gets: the distro
+          # ruamel.yaml must satisfy the editor.
+          apt-get install -y python3-ruamel.yaml
+          python3 -c "import sys; sys.path.insert(0, '/opt/ups-monitor'); import eneru.config_doc, eneru.config_tui; print('config editor imports OK')"
 
       - name: Validate example configs
         run: |
@@ -233,9 +244,13 @@ jobs:
             echo "       Move it back to recommends: in nfpm.yaml."
             exit 1
           fi
-          # The config editor's ruamel.yaml IS a hard dep (RHEL 9 CRB /
-          # RHEL 10 AppStream).
-          rpm -qpR "$RPM" | grep -q "^python3-ruamel-yaml"
+          # The config editor's ruamel.yaml is a SOFT dep (RHEL 9 needs CRB):
+          # never a hard Requires, always a Recommends.
+          if rpm -qpR "$RPM" | grep -q "ruamel"; then
+            echo "ERROR: python3-ruamel-yaml regressed to a hard rpm dep."
+            exit 1
+          fi
+          rpm -qp --recommends "$RPM" | grep -q "^python3-ruamel-yaml"
 
           # RHEL 9/10: system python3 == 3.9+.
           dnf install -y ${{ matrix.python_pkg }}
@@ -376,6 +391,9 @@ jobs:
           # blocks on the initial NUT connection, and there's no NUT server in
           # this job) — that runs in E2E Test 46 against the real NUT dummy.
           docker run --rm --entrypoint python eneru:ci -c "import importlib.resources as r; assert (r.files('eneru.web')/'index.html').read_text().find('<title>Eneru</title>') >= 0; print('dashboard asset present in image')"
+          # The image bundles ruamel.yaml, so the config editor always works
+          # in a container (soft dep only on deb/rpm).
+          docker run --rm --entrypoint python eneru:ci -c "import ruamel.yaml, eneru.config_doc, eneru.config_tui; print('config editor available in image')"
 
       - name: Verify OCI image with Podman
         env:
@@ -410,7 +428,7 @@ jobs:
         run: |
           docker run --rm eneru:ci-arm64 version
           docker run --rm eneru:ci-arm64 validate --config /etc/ups-monitor/config.yaml
-          docker run --rm --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml; print('ARM64 dependencies import correctly')"
+          docker run --rm --entrypoint python eneru:ci-arm64 -c "import bcrypt, yaml, ruamel.yaml; print('ARM64 dependencies import correctly')"
           ARCH=$(docker image inspect --format '{{ .Architecture }}' eneru:ci-arm64)
           test "$ARCH" = "arm64"
           ACTUAL=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' eneru:ci-arm64)
