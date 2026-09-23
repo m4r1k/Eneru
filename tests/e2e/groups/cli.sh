@@ -68,8 +68,17 @@ ups:
       enabled: true
 YAML
 
-# validate should report ERROR for non-local group with containers
-OUTPUT=$(eneru validate --config /tmp/config-bad-ownership.yaml 2>&1) || true
+# validate should report ERROR for non-local group with containers, and
+# exit non-zero (an ERROR line with exit 0 would let CI gates pass).
+set +e
+OUTPUT=$(eneru validate --config /tmp/config-bad-ownership.yaml 2>&1)
+RC=$?
+set -e
+if [ "$RC" -eq 0 ]; then
+  echo "FAIL: validate exited 0 on an ownership violation"
+  echo "$OUTPUT"
+  exit 1
+fi
 
 if echo "$OUTPUT" | grep -q "ERROR.*containers"; then
   echo "PASS: Ownership violation correctly detected"
@@ -89,10 +98,26 @@ echo ">>> Running: Test 12: CLI safety - bare eneru shows help"
 
 echo "=== Test 12: CLI Safety ==="
 
-OUTPUT=$(eneru 2>&1) || true
+# Bare `eneru` prints argparse help and exits 0 (cli.py main); it must
+# never start the daemon.
+set +e
+OUTPUT=$(eneru 2>&1)
 EXIT_CODE=$?
+set -e
+if [ "$EXIT_CODE" -ne 0 ]; then
+  echo "FAIL: bare 'eneru' exited $EXIT_CODE (expected 0)"
+  echo "$OUTPUT"
+  exit 1
+fi
+if echo "$OUTPUT" | grep -q "starting"; then
+  echo "FAIL: bare 'eneru' started the daemon"
+  echo "$OUTPUT"
+  exit 1
+fi
 
-if echo "$OUTPUT" | grep -q "run\|validate\|monitor"; then
+if echo "$OUTPUT" | grep -q "^usage:" \
+   && echo "$OUTPUT" | grep -qw "run" \
+   && echo "$OUTPUT" | grep -qw "validate"; then
   echo "PASS: Bare 'eneru' shows help with subcommands"
 else
   echo "FAIL: Bare 'eneru' did not show help"
@@ -112,7 +137,11 @@ echo "=== Test 13: TUI --once ==="
 
 OUTPUT=$(eneru monitor --config $E2E_DIR/config-e2e-dry-run.yaml --once 2>&1)
 
-if echo "$OUTPUT" | grep -q "TestUPS@localhost\|Eneru v"; then
+# The "Eneru v" banner prints unconditionally, so require the per-UPS block
+# (header line starting with the UPS name + its Resources summary; tui.py
+# run_once) instead.
+if echo "$OUTPUT" | grep -q "^TestUPS@localhost:3493" \
+   && echo "$OUTPUT" | grep -q "^  Resources:"; then
   echo "PASS: TUI --once outputs UPS status"
 else
   echo "FAIL: TUI --once did not produce expected output"
@@ -235,8 +264,14 @@ AUTH_DB="$(mktemp -d)/auth.db"
 OUT="$(eneru user create alice --generate --auth-db "$AUTH_DB")"
 case "$OUT" in *"Created user 'alice'"*) ;; *) echo "FAIL: user create"; exit 1;; esac
 
-OUT="$(printf 'hunter2pw' | eneru user create bob --password-stdin --auth-db "$AUTH_DB")"
+OUT="$(printf 'hunter2pw-long' | eneru user create bob --password-stdin --auth-db "$AUTH_DB")"
 case "$OUT" in *"Created user 'bob'"*) ;; *) echo "FAIL: user create stdin"; exit 1;; esac
+
+# F-111: an operator-chosen password under 12 characters is refused
+if printf 'short-pw' | eneru user create carol --password-stdin --auth-db "$AUTH_DB" >/dev/null 2>&1; then
+  echo "FAIL: short password was accepted"; exit 1
+fi
+echo "PASS: short password rejected"
 
 # duplicate is rejected (non-zero exit)
 if eneru user create alice --generate --auth-db "$AUTH_DB" >/dev/null 2>&1; then
@@ -252,7 +287,7 @@ case "$SHOW" in *"Username:"*) ;; *) echo "FAIL: user show"; exit 1;; esac
 case "$SHOW" in *'$2b$'*) echo "FAIL: user show leaked a hash"; exit 1;; esac
 
 # passwd reset
-OUT="$(printf 'newpw12345' | eneru user passwd bob --password-stdin --auth-db "$AUTH_DB")"
+OUT="$(printf 'newpw-1234567' | eneru user passwd bob --password-stdin --auth-db "$AUTH_DB")"
 case "$OUT" in *"Updated password for 'bob'"*) ;; *) echo "FAIL: user passwd"; exit 1;; esac
 
 # apikey create prints the key once, list never shows it, revoke removes it
@@ -400,7 +435,8 @@ trap - EXIT
 echo ""
 echo ">>> Running: Test 65: config check live-probes NUT, SSH, sudo and commands"
 
-docker exec eneru-e2e-ssh rm -f /tmp/eneru-path-augmented /var/run/shutdown-triggered
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-path-augmented /var/run/shutdown-triggered \
+  /tmp/shutdown-invoked /tmp/eneru-pinned-custom
 
 cat >/tmp/config-e2e-config-check.yaml <<'YAML'
 ups:
@@ -466,7 +502,12 @@ expect "What happens on power loss"
 if docker exec eneru-e2e-ssh test -e /tmp/eneru-path-augmented; then
   echo "FAIL: config check EXECUTED a custom pre-shutdown command"; exit 1
 fi
-if docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered; then
+# /var/run/shutdown-triggered is root-only; a regression that ran a
+# non-sudo `shutdown` as testuser would fail that write silently. The fake
+# shutdown also touches world-writable /tmp/shutdown-invoked (ssh-target
+# Dockerfile), which catches ANY invocation.
+if docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered \
+   || docker exec eneru-e2e-ssh test -e /tmp/shutdown-invoked; then
   echo "FAIL: config check EXECUTED the shutdown command"; exit 1
 fi
 
@@ -502,6 +543,17 @@ remote_servers:
     user: "pinned"
     shutdown_command: "sudo shutdown -r now"
     ssh_options: ["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]
+  # 6.2: use_sudo covers custom commands, so config check must say which
+  # custom command sudo would refuse (the pinned rule only allows shutdown).
+  - name: "Pinned Custom"
+    enabled: true
+    host: "localhost"
+    user: "pinned"
+    shutdown_command: "sudo shutdown -h now"
+    ssh_options: ["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]
+    pre_shutdown_commands:
+      - command: "touch /tmp/eneru-pinned-custom"
+        use_sudo: true
 YAML
 set +e
 eneru config check --config /tmp/config-e2e-config-check-pinned.yaml >/tmp/test65p.log 2>&1
@@ -511,8 +563,15 @@ grep -qF "Pinned OK: sudo allows 'shutdown -h now' without a password" /tmp/test
   echo "FAIL: arg-pinned sudoers rule not recognised"; exit 1; }
 grep -qF "Pinned Wrong Args: sudo refuses it without a password" /tmp/test65p.log || {
   echo "FAIL: mismatching arguments not flagged"; exit 1; }
-if docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered; then
+# config_check.py probe_remote: "<name>: sudo refuses it without a password: <label>"
+grep -qF "Pinned Custom: sudo refuses it without a password: sudo allows 'touch /tmp/eneru-pinned-custom' without a password" /tmp/test65p.log || {
+  echo "FAIL: custom command that sudo refuses was not flagged"; exit 1; }
+if docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered \
+   || docker exec eneru-e2e-ssh test -e /tmp/shutdown-invoked; then
   echo "FAIL: config check EXECUTED the pinned shutdown command"; exit 1
+fi
+if docker exec eneru-e2e-ssh test -e /tmp/eneru-pinned-custom; then
+  echo "FAIL: config check EXECUTED the pinned custom command"; exit 1
 fi
 
 # A wrong NUT device name is pinpointed with the names that do exist.
@@ -621,6 +680,10 @@ eneru shutdown remote --config /tmp/config-e2e-custom-sudo.yaml \
 cat /tmp/test67a.log
 docker exec eneru-e2e-ssh test -e /root/eneru-custom-sudo || {
   echo "FAIL: use_sudo did not run the custom command through sudo"; exit 1; }
+# The step line (shutdown/remote.py "[idx/count] <command> (timeout: ...)")
+# shows the exact command sent.
+grep -qF "[1/1] sudo -n touch /root/eneru-custom-sudo (timeout" /tmp/test67a.log || {
+  echo "FAIL: use_sudo step was not sent as 'sudo -n touch ...'"; exit 1; }
 
 write_cfg /tmp/config-e2e-custom-nosudo.yaml false eneru-custom-nosudo
 eneru shutdown remote --config /tmp/config-e2e-custom-nosudo.yaml \
@@ -630,8 +693,70 @@ cat /tmp/test67b.log
 if docker exec eneru-e2e-ssh test -e /root/eneru-custom-nosudo; then
   echo "FAIL: without use_sudo the custom command must run as the SSH user"; exit 1
 fi
+# A missing marker alone would also hold if the step never ran (SSH down,
+# steps skipped). Prove it was sent WITHOUT sudo and actually failed.
+grep -qF "[1/1] touch /root/eneru-custom-nosudo (timeout" /tmp/test67b.log || {
+  echo "FAIL: the no-sudo step was not sent as a plain 'touch ...'"; exit 1; }
+grep -qF "[1/1] touch /root/eneru-custom-nosudo failed:" /tmp/test67b.log || {
+  echo "FAIL: the no-sudo step did not report its permission failure"; exit 1; }
 docker exec eneru-e2e-ssh rm -f /root/eneru-custom-sudo
 echo "PASS: use_sudo applies to custom pre-shutdown commands"
+)
+
+# ======================================================================
+# Test 69: remote shutdown with split ssh_options (-i/-p)
+# ======================================================================
+# F-095 (6.2.0 release review): the shutdown path used to split
+# `ssh_options: ["-i", KEY, "-p", PORT]` differently from the health probe,
+# so the key path became the hostname and every real shutdown failed while
+# health and `config check` stayed green. One builder now serves all three;
+# prove the real drill reaches the target with the documented split form.
+(
+echo ""
+echo ">>> Running: Test 69: remote shutdown with split ssh_options (-i/-p)"
+
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts
+cat >/tmp/config-e2e-split-opts.yaml <<'YAML'
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Split Opts"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "true"
+    ssh_options:
+      - "-i"
+      - "/tmp/e2e-ssh-key"
+      - "-p"
+      - "2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+    pre_shutdown_commands:
+      - command: "touch /tmp/eneru-split-opts"
+YAML
+
+eneru shutdown remote --config /tmp/config-e2e-split-opts.yaml \
+  --server "Split Opts" --i-really-want-to-proceed-with-remote-shutdown \
+  >/tmp/test69a.log 2>&1 || true
+cat /tmp/test69a.log
+if ! docker exec eneru-e2e-ssh test -e /tmp/eneru-split-opts; then
+  echo "FAIL: split -i/-p ssh_options did not reach the target on the shutdown path"
+  exit 1
+fi
+
+set +e
+eneru config check --config /tmp/config-e2e-split-opts.yaml >/tmp/test69b.log 2>&1
+set -e
+cat /tmp/test69b.log
+grep -qF "Split Opts: SSH as testuser@localhost works" /tmp/test69b.log || {
+  echo "FAIL: config check did not reach the split-options target"; exit 1; }
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts
+echo "PASS: split ssh_options work identically for shutdown and config check"
 )
 
 echo ""

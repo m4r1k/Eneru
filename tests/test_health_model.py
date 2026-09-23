@@ -534,3 +534,35 @@ class TestUPSHealthEnum:
     def test_membership_is_complete(self):
         members = {h.value for h in UPSHealth}
         assert members == {"healthy", "degraded", "critical", "unknown"}
+
+
+class TestStalenessWindowEdges:
+    """F-154: each visibility window is inclusive at its exact edge."""
+
+    @pytest.mark.unit
+    def test_exactly_stale_threshold_is_still_healthy(self):
+        snap = _snap(last_update_time=NOW - 5)            # 5 * check_interval
+        assert assess_health(snap, None, 1, now=NOW) == UPSHealth.HEALTHY
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("age,expected", [
+        (65, UPSHealth.DEGRADED),                        # 5 s stale + 60 s grace
+        (66, UPSHealth.UNKNOWN),
+    ])
+    def test_in_flight_grace_ends_at_threshold_plus_grace(self, age, expected):
+        snap = _snap(last_update_time=NOW - age)
+        assert assess_health(
+            snap, None, 1, connection_grace_enabled=True,
+            connection_grace_duration=60, now=NOW,
+        ) == expected
+
+    @pytest.mark.unit
+    def test_pre_grace_stale_retry_window_is_inclusive(self):
+        from eneru.health_model import RETRY_WAIT_SECONDS
+        window = 3 * RETRY_WAIT_SECONDS + 1              # tolerance 3, interval 1
+        assert window > 5                                # past the stale threshold
+        inside = _snap(last_update_time=NOW - window, stale_data_count=1)
+        past = _snap(last_update_time=NOW - window - 1, stale_data_count=1)
+        kw = dict(max_stale_data_tolerance=3, now=NOW)
+        assert assess_health(inside, None, 1, **kw) == UPSHealth.DEGRADED
+        assert assess_health(past, None, 1, **kw) == UPSHealth.UNKNOWN

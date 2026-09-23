@@ -217,7 +217,10 @@ run_loopback_case() {
     sync \
     unmount_filesystems
   do
-    if ! grep -q "$action" "/tmp/e2e-loopback-${label}.log"; then
+    # Anchor on the step line ("[i/n] <action> (timeout: Ns)", shutdown/
+    # remote.py): a bare substring let "stop_containers" match
+    # "stop_containers_rootless" and "sync" match unrelated lines.
+    if ! grep -Eq "\] ${action} \(timeout" "/tmp/e2e-loopback-${label}.log"; then
       echo "FAIL: loopback ${label} did not dry-run delegated action '${action}'"
       cat "/tmp/e2e-loopback-${label}.log"
       exit 1
@@ -228,6 +231,70 @@ run_loopback_case() {
   docker rm -f "$name" >/dev/null 2>&1 || true
   apply_scenario online-charging
   echo "  PASS: ${label} loopback case complete"
+}
+
+# Test 47b: `eneru config check` inside the container fills a loopback's
+# missing expected_host_identity from the container's own copy of the
+# identity file (6.2.0-rc6 fix), the same way the daemon does at startup.
+# Like checking a key against its own lock: the container reads its
+# bind-mounted copy of the file, SSH reads the host's, and they must match.
+# Uses a dedicated identity file (not /etc/machine-id) so no other case
+# is affected.
+config_check_identity_autofill_case() {
+  local config="/tmp/e2e-loopback-idcheck.yaml"
+  local idfile="/tmp/e2e-loopback-host-id"
+  local log="/tmp/e2e-loopback-idcheck.log"
+  local identity="e2e-autofill-$(date +%s)"
+  printf '%s\n' "$identity" >"$idfile"
+  chmod 0644 "$idfile"
+  docker exec eneru-e2e-ssh sh -c "printf '%s\n' '$identity' > /etc/eneru-e2e-host-id"
+  cat >"$config" <<'YAML'
+ups:
+  - name: "TestUPS@nut-server"
+    is_local: true
+    remote_servers:
+      - name: host-loopback
+        enabled: true
+        host: ssh-target
+        user: root
+        ssh_key_path: /var/lib/eneru/ssh/id_loopback
+        ssh_options:
+          - "StrictHostKeyChecking=no"
+          - "UserKnownHostsFile=/dev/null"
+        is_host_loopback: true
+        # No expected_host_identity: config check must auto-fill it.
+        host_identity_command: "cat /etc/eneru-e2e-host-id"
+        shutdown_command: "shutdown -h now"
+        shutdown_order: 999
+behavior:
+  dry_run: true
+local_shutdown:
+  enabled: true
+logging:
+  file: null
+  state_file: "/var/run/eneru/ups-monitor.state"
+  battery_history_file: "/var/run/eneru/ups-battery-history"
+  shutdown_flag_file: "/var/run/eneru/ups-shutdown-scheduled"
+YAML
+  echo "  Test 47b: in-container config check auto-fills expected_host_identity"
+  # One-shot container; exit code is not asserted (other probes, such as
+  # the local runtime, may legitimately report errors here).
+  set +e
+  timeout 120s docker run --rm --network "$NETWORK" \
+    -v "$config":/etc/ups-monitor/config.yaml:ro \
+    -v /tmp/e2e-loopback-key:/var/lib/eneru/ssh/id_loopback:ro \
+    -v "$idfile":/etc/eneru-e2e-host-id:ro \
+    eneru:e2e \
+    config check --config /etc/ups-monitor/config.yaml >"$log" 2>&1
+  set -e
+  cat "$log"
+  docker exec eneru-e2e-ssh rm -f /etc/eneru-e2e-host-id
+  # config_check.py probe_remote: "<name>: host identity matches (...)"
+  if ! grep -qF "host-loopback: host identity matches (loopback reaches THIS host)" "$log"; then
+    echo "FAIL: config check did not auto-fill expected_host_identity for the loopback"
+    exit 1
+  fi
+  echo "  PASS: config check auto-filled expected_host_identity and matched the host"
 }
 
 negative_missing_machine_id() {
@@ -675,6 +742,13 @@ YAML
     docker exec -it "$name" eneru config --basic >/tmp/test68b.log || true
   sudo cmp -s "$dir/ro-before.yaml" "$dir/config.yaml" || {
     echo "FAIL: a :ro config mount was modified"; exit 1; }
+  # An unchanged file alone would also hold if the editor never opened
+  # (failed exec, curses crash). The header must say the file is read-only
+  # (config_tui.py _draw_header).
+  grep -qF "[read-only]" /tmp/test68b.log || {
+    echo "--- editor output (escape codes stripped) ---"
+    sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' /tmp/test68b.log | tr -s ' ' | tail -40
+    echo "FAIL: the editor did not open the :ro config as read-only"; exit 1; }
   docker rm -f "$name" >/dev/null
   echo "PASS: in-container editor saves writable mounts in place and respects :ro"
 }
@@ -686,6 +760,7 @@ echo ">>> Prepared accept-new remote SSH key (read-only) + writable state dir at
 
 echo ">>> Running: Test 47: E2E Loopback Root"
 run_loopback_case root root false 19191
+config_check_identity_autofill_case
 echo ">>> Running: Test 48: E2E Loopback Sudo"
 run_loopback_case sudo testuser true 19192
 echo ">>> Running: Test 49: E2E Loopback missing machine-id readiness"
@@ -700,3 +775,6 @@ delegated_completion_marker_case
 container_config_edit_case
 
 echo "PASS: E2E loopback root/sudo, delivery marker, accept-new SSH trust, and negative readiness checks passed"
+
+echo ""
+echo "=== Group 'loopback' completed successfully ==="

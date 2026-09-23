@@ -152,6 +152,26 @@ restart_redundancy_nut_server() {
   dbg "restart_redundancy_nut_server: UPS1+UPS2 reset to online (scenarios confirmed live)"
 }
 
+# stop_redundancy_nut_driver <UPS1|UPS2>
+#
+#   Kill ONE member's dummy-ups driver so upsd serves stale data for it
+#   while the other member keeps reporting. Same [d] bracket trick as
+#   stop_redundancy_nut_drivers below. Recover with
+#   restart_redundancy_nut_server.
+stop_redundancy_nut_driver() {
+  local ups="$1"
+  dbg "stop_redundancy_nut_driver: pkill ${ups} dummy-ups in container"
+  (
+    cd "$E2E_DIR"
+    timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
+      "pkill -f '[d]ummy-ups.*-a ${ups}' || true"
+  )
+  ( cd "$E2E_DIR" \
+      && timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
+           "ps -ef | grep -E '[d]ummy-ups.*-a ${ups}' || echo '    (no ${ups} driver process)'" ) \
+      2>&1 | sed 's/^/    /' || true
+}
+
 stop_redundancy_nut_drivers() {
   dbg "stop_redundancy_nut_drivers: pkill UPS1+UPS2 dummy-ups in container"
   (
