@@ -598,7 +598,16 @@ def static_findings(config: Config, raw: Optional[dict]) -> List[Finding]:
             cli._prepare_runtime_config(config, strict_key_check=False)
         except SystemExit:
             pass
-    out.extend(_findings_from_printed(buf.getvalue(), "runtime"))
+    prep = _findings_from_printed(buf.getvalue(), "runtime")
+    for f in prep:
+        # The check prepares non-strictly (so it can keep inspecting), but
+        # `eneru run` is strict: a missing/unreadable default loopback key is
+        # FATAL there. Report it as the startup blocker it is.
+        if "SSH key for the host-loopback delegate" in f.message:
+            f.level = LEVEL_ERROR
+            f.hint = ((f.hint + " ").lstrip() +
+                      "`eneru run` refuses to start until this is fixed.")
+    out.extend(prep)
     out.extend(_validation_findings(config, raw))
     out.extend(_loopback_contract_findings(config))
     out.extend(_privilege_findings(config))

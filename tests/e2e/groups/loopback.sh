@@ -597,12 +597,16 @@ container_config_edit_case() {
   mkdir -p "$dir/state"
   cat >"$dir/config.yaml" <<'YAML'
 # Operator comment that must survive the edit
+# Remote-only (list form, is_local: false): a legacy single-UPS config is
+# always local, which in a container requires the loopback delegate.
 ups:
-  name: "TestUPS@nut-server"
+  - name: "TestUPS@nut-server"
+    is_local: false
 behavior:
   dry_run: false   # flipped by the editor
 local_shutdown:
   enabled: false
+  trigger_on: none
 remote_health:
   enabled: false
 YAML
@@ -618,6 +622,10 @@ YAML
     -v "$dir/state":/var/lib/eneru \
     eneru:e2e run --config /etc/ups-monitor/config.yaml >/dev/null
   sleep 3
+  if [ "$(docker inspect -f '{{.State.Running}}' "$name")" != "true" ]; then
+    docker logs "$name" 2>&1 | tail -30
+    echo "FAIL: the eneru container is not running"; exit 1
+  fi
 
   # Stage 2 (Safety) -> Enter toggles dry_run -> Save (y if asked) -> Quit
   python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q' -- \
@@ -625,6 +633,9 @@ YAML
 
   sudo cat "$dir/config.yaml"
   sudo grep -qE '^  dry_run: true +# flipped by the editor' "$dir/config.yaml" || {
+    echo "--- editor output (escape codes stripped) ---"
+    sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' /tmp/test68a.log | tr -s ' ' | tail -40
+    docker logs "$name" 2>&1 | tail -20
     echo "FAIL: in-container save did not reach the host file"; exit 1; }
   sudo grep -q '^# Operator comment that must survive the edit' "$dir/config.yaml" || {
     echo "FAIL: operator comment lost"; exit 1; }
@@ -652,6 +663,10 @@ YAML
     -v "$dir/state":/var/lib/eneru \
     eneru:e2e run --config /etc/ups-monitor/config.yaml >/dev/null
   sleep 3
+  if [ "$(docker inspect -f '{{.State.Running}}' "$name")" != "true" ]; then
+    docker logs "$name" 2>&1 | tail -30
+    echo "FAIL: the read-only eneru container is not running"; exit 1
+  fi
   python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q|y' -- \
     docker exec -it "$name" eneru config --basic >/tmp/test68b.log || true
   sudo cmp -s "$dir/ro-before.yaml" "$dir/config.yaml" || {

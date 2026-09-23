@@ -1367,3 +1367,19 @@ class TestQuoteAwareCommands:
         assert cc.first_command_tokens("a b && c") == (["a", "b"], True)
         assert cc.first_command_tokens("a 'b|c'") == (["a", "b|c"], False)
         assert cc.first_command_tokens("echo 'open") == (None, False)
+
+
+class TestLoopbackKeyIsFatal:
+    def test_missing_default_loopback_key_is_an_error_like_eneru_run(self, env):
+        # A legacy single-UPS config is always local; in a container without
+        # the default loopback key `eneru run` exits, so the check must say
+        # ERROR (it used to downgrade the synthesis message to WARN).
+        env.runtime = "container (Docker)"
+        env.euid = 10001
+        config = build({"ups": {"name": "ups@h"}})
+        with patch("eneru.cli.Path.exists", return_value=False), \
+                patch("eneru.cli.os.access", return_value=False):
+            out = cc.static_findings(config, {"ups": {"name": "ups@h"}})
+        hits = [f for f in out if "SSH key for the host-loopback delegate" in f.message]
+        assert hits and all(f.level == "error" for f in hits)
+        assert "refuses to start" in hits[0].hint
