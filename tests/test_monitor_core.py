@@ -9,7 +9,7 @@ import pytest
 import time
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, PropertyMock, patch, call
 from collections import deque
 
 from eneru import (
@@ -2742,6 +2742,73 @@ class TestExecuteShutdownSequence:
         )
         assert progress["state"] == handoff_state
         assert handoff["state"] == handoff_state
+
+    @staticmethod
+    def _handoff_phase(progress):
+        return next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+
+    @pytest.mark.unit
+    def test_coordinator_mode_without_callback_fails_progress(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        monitor._shutdown_callback = None
+
+        monitor._execute_shutdown_sequence()
+
+        progress = monitor._shutdown_progress.snapshot()
+        handoff = self._handoff_phase(progress)
+        assert progress["state"] == "failed"
+        assert handoff["state"] == "failed"
+        assert handoff["detail"] == "Phase failed; see service logs"
+
+    @pytest.mark.unit
+    def test_coordinator_mode_delegated_skips_handoff(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        monitor._coordinator_handoff = True
+        monitor._shutdown_callback = MagicMock(return_value="succeeded")
+
+        with patch.object(type(monitor), "_uses_loopback_delegate",
+                          new_callable=PropertyMock, return_value=True):
+            monitor._execute_shutdown_sequence()
+
+        progress = monitor._shutdown_progress.snapshot()
+        handoff = self._handoff_phase(progress)
+        assert handoff["state"] == "skipped"
+        assert handoff["detail"] == "delegated to host"
+        assert progress["state"] == "succeeded"
+        monitor._shutdown_callback.assert_called_once()
+
+    @pytest.mark.unit
+    def test_coordinator_callback_exception_fails_progress(self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        monitor._coordinator_handoff = True
+        monitor._shutdown_callback = MagicMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError):
+            monitor._execute_shutdown_sequence()
+
+        progress = monitor._shutdown_progress.snapshot()
+        assert progress["state"] == "failed"
+        assert self._handoff_phase(progress)["state"] == "failed"
+        assert monitor._shutdown_sequence_in_flight is False
+
+    @pytest.mark.unit
+    def test_coordinator_pending_handoff_leaves_progress_running(
+            self, tmp_path):
+        monitor = self._stub_phases(make_monitor(tmp_path))
+        monitor._coordinator_mode = True
+        monitor._coordinator_handoff = True
+        monitor._shutdown_callback = lambda _group: "pending"
+
+        monitor._execute_shutdown_sequence()
+
+        # The coordinator owns completion; the monitor must not finish early.
+        assert monitor._shutdown_progress.snapshot()["state"] == "running"
 
     @pytest.mark.unit
     def test_remote_failure_marks_overall_progress_failed(self, tmp_path):

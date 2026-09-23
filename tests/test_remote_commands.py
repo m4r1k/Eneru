@@ -1856,3 +1856,19 @@ class TestParallelShutdownResilience:
             str(c) for c in remote_monitor.logger.log.call_args_list)
         assert "1 crashed" in log_text          # phase summary line
         assert "kaboom" in log_text             # the thread-crash trace line
+
+
+class TestRemoteProgressTracking:
+    """Progress tracking is optional: executors without a tracker no-op."""
+
+    @pytest.mark.unit
+    def test_tracking_without_tracker_is_noop(self):
+        from eneru.config import RemoteServerConfig
+        from eneru.shutdown.remote import RemoteShutdownMixin, RemoteShutdownResult
+
+        mixin = RemoteShutdownMixin()
+        server = RemoteServerConfig(name="nas", host="10.0.0.2", user="root")
+
+        assert mixin._track_remote_start(server) is None
+        mixin._track_remote_finish(
+            RemoteShutdownResult(server="nas", host="10.0.0.2"), None)

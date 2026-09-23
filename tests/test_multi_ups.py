@@ -472,6 +472,74 @@ class TestMultiUPSCoordinator:
         assert waiter_snapshot["state"] == expected
         assert waiter_poweroff["state"] == expected
 
+    def _join_waiter_during_poweroff(self, coord, waiter, poweroff_effect):
+        """Run UPS1's poweroff with UPS2's waiter joining mid-flight."""
+        started = threading.Event()
+        release = threading.Event()
+        owner_errors = []
+
+        def blocked_poweroff(_command):
+            started.set()
+            release.wait(timeout=2)
+            return poweroff_effect()
+
+        def owner_body():
+            try:
+                coord._handle_local_shutdown("UPS1")
+            except Exception as exc:  # captured for the assertion
+                owner_errors.append(exc)
+
+        with patch("eneru.multi_ups.run_command", side_effect=blocked_poweroff), \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            owner = threading.Thread(target=owner_body)
+            owner.start()
+            assert started.wait(timeout=2)
+            assert coord._handle_local_shutdown(
+                "UPS2", progress=waiter) == "pending"
+            release.set()
+            owner.join(timeout=2)
+        assert not owner.is_alive()
+        return owner_errors
+
+    @pytest.mark.unit
+    def test_concurrent_handoff_reports_waiter_failed_phase(self, tmp_path):
+        """A clean poweroff doesn't hide a failed phase in the waiter's run."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+        waiter = ShutdownProgress("ups", "UPS2")
+        waiter.start("shared outage")
+        waiter.phase_finish("vms", "failed")
+        waiter.phase_finish("local-poweroff")
+
+        errors = self._join_waiter_during_poweroff(
+            coord, waiter, lambda: (0, "", ""))
+
+        assert errors == []
+        assert waiter.snapshot()["state"] == "failed"
+
+    @pytest.mark.unit
+    def test_concurrent_handoff_owner_exception_fails_waiter(self, tmp_path):
+        coord = self._make_local_shutdown_coord(tmp_path)
+        waiter = ShutdownProgress("ups", "UPS2")
+        waiter.start("shared outage")
+        waiter.phase_finish("local-poweroff")
+
+        def boom():
+            raise RuntimeError("poweroff exploded")
+
+        errors = self._join_waiter_during_poweroff(coord, waiter, boom)
+
+        assert [str(exc) for exc in errors] == ["poweroff exploded"]
+        assert coord._local_shutdown_outcome == "failed"
+        assert coord._local_shutdown_in_flight is False
+        snapshot = waiter.snapshot()
+        poweroff = next(
+            phase for phase in snapshot["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert snapshot["state"] == "failed"
+        assert poweroff["state"] == "failed"
+
     @pytest.mark.unit
     def test_concurrent_handoff_does_not_rewrite_newer_progress_run(
             self, tmp_path):

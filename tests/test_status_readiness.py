@@ -542,6 +542,24 @@ class TestRedundancyGroupStatus:
         }
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(("rows", "min_healthy", "reason"), [
+        ([], 1, "invalid group capacity"),
+        ([{"name": "A", "load": 10}], 0, "invalid group capacity"),
+        ([{"name": "A", "load": 10}], 2, "invalid group capacity"),
+        ([{"name": "A", "load": None}], 1, "member load unavailable"),
+        ([{"name": "A", "load": 10, "powerNominal": 0}], 1,
+         "compatible member ratings unavailable"),
+    ])
+    def test_redundancy_load_unavailable_reasons(self, rows, min_healthy,
+                                                 reason):
+        from eneru.status import _redundancy_load
+
+        config = Config(energy=EnergyConfig(nominal_power=None))
+        assert _redundancy_load(rows, min_healthy, config) == {
+            "percent": None, "unavailableReason": reason,
+        }
+
+    @pytest.mark.unit
     def test_redundancy_load_never_mixes_watts_and_va(self):
         group = RedundancyGroupConfig(
             name="rack", ups_sources=["UPS-A@host", "UPS-B@host"],

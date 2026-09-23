@@ -449,11 +449,19 @@ class TestShutdownPlanEndpoint:
         tracker = ShutdownProgress("redundancy", "rack-a")
         tracker.start("quorum lost")
         source._redundancy_executors["rack-a"] = SimpleNamespace(
-            _shutdown_progress=tracker)
+            _shutdown_progress=tracker, config=cfg,
+            _uses_loopback_delegate=True)
         h.path = "/api/v1/redundancy-groups/rack-a/shutdown-progress"
         status, _, payload = h._route()
         assert status == 200
         assert payload["progress"]["reason"] == "quorum lost"
+        # A live executor supplies its own config and delegation state.
+        h.path = "/api/v1/redundancy-groups/rack-a/shutdown-plan"
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["plan"]["delegated"] is True
+        h.path = "/api/v1/redundancy-groups/rack-a/unknown"
+        assert h._route()[0] == 404
         h.path = "/api/v1/redundancy-groups/missing/shutdown-plan"
         assert h._route()[0] == 404
 

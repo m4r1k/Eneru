@@ -1460,6 +1460,29 @@ class TestLocalShutdownCallback:
             "succeeded" if handoff_state == "pending" else handoff_state)
 
     @pytest.mark.unit
+    def test_callback_exception_marks_redundancy_progress_failed(
+            self, tmp_path: Path) -> None:
+        group = _redundancy_group(name="rack-local", is_local=True)
+        ex = RedundancyGroupExecutor(
+            group,
+            base_config=_base_config(tmp_path=tmp_path),
+            local_shutdown_callback=MagicMock(side_effect=RuntimeError("boom")),
+        )
+        logs = []
+        ex._log_message = logs.append
+
+        ex.shutdown(reason="quorum lost")
+
+        progress = ex._shutdown_progress.snapshot()
+        handoff = next(
+            phase for phase in progress["phases"]
+            if phase["id"] == "local-poweroff"
+        )
+        assert progress["state"] == "failed"
+        assert handoff["state"] == "failed"
+        assert any("shutdown error: boom" in line for line in logs)
+
+    @pytest.mark.unit
     def test_callback_fires_on_is_local_quorum_loss(
         self, tmp_path: Path,
     ) -> None:
