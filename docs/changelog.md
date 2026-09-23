@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc5] - 2026-09-23
+
 ### Added
 
 - **`eneru config check` inspects a config before an outage does.** Think of a
