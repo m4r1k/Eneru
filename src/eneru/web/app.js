@@ -1080,10 +1080,14 @@ function openDetail(name) {
   // Pull focus into the dialog so Tab stays among its controls and assistive
   // tech announces it; the close button is the first focusable element.
   document.getElementById("detail-close").focus();
-  // Trap Tab within the dialog and close on Esc so keyboard/AT users can't tab
-  // out to the page behind it and can always dismiss it. (a11y #10)
+  trapModalFocus(modal, closeDetail);
+}
+
+// Trap Tab within a dialog and close on Esc so keyboard/AT users can't tab out
+// to the page behind it and can always dismiss it. (a11y #10)
+function trapModalFocus(modal, close) {
   const onKey = (ev) => {
-    if (ev.key === "Escape") { ev.preventDefault(); closeDetail(); return; }
+    if (ev.key === "Escape") { ev.preventDefault(); close(); return; }
     if (ev.key !== "Tab") return;
     const f = Array.from(modal.querySelectorAll(
       'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
@@ -3839,6 +3843,7 @@ function shutdownTriggerNodes(target, plan) {
       icon("info"),
       el("span", { text: "Triggers when group “" + g.name + "” drops below "
         + g.minHealthy + " of " + (g.upsSources || []).length + " healthy" + coord }),
+      el("span", { class: "badge sd-trigger-live", "data-group": g.name }),
     ]));
   }
   return [el("div", { class: "sd-trigger" }, [icon("info"),
@@ -3870,23 +3875,155 @@ function progressStateLabel(state) {
   return String(state || "pending").replace(/-/g, " ");
 }
 
-function applyShutdownProgress(section, progress) {
+// Refresh each trigger line's "now H of N healthy" badge from the latest
+// group status, so the operator sees how close the trigger is right now.
+function updateTriggerLive(section) {
+  section.querySelectorAll(".sd-trigger-live").forEach((badge) => {
+    const g = lastGroups.find((item) => item.name === badge.getAttribute("data-group"));
+    if (!g) { badge.hidden = true; return; }
+    const total = (g.upsSources || []).length;
+    const healthy = groupHealthyCount(g, lastUpsRows);
+    const cls = groupQuorumLost(g, lastUpsRows) ? "crit"
+      : (healthy <= g.minHealthy ? "warn" : "ok");
+    badge.className = "badge sd-trigger-live " + cls;
+    badge.textContent = "now " + healthy + " of " + total + " healthy";
+    badge.hidden = false;
+  });
+}
+
+function fmtClock(epoch) {
+  return epoch ? new Date(epoch * 1000).toLocaleTimeString() : "—";
+}
+
+// "started 12:03:04 · finished 12:03:09 · pre-commands 3 run, 1 failed"
+function remoteProgressMeta(remote) {
+  const parts = [];
+  if (remote.startedAt) parts.push("started " + fmtClock(remote.startedAt));
+  if (remote.finishedAt) parts.push("finished " + fmtClock(remote.finishedAt));
+  const run = remote.preCommandsAttempted || 0;
+  const failed = remote.preCommandsFailed || 0;
+  if (run || failed) {
+    parts.push("pre-commands " + run + " run"
+      + (failed ? ", " + failed + " failed" : ", all ok"));
+  }
+  return parts.join(" · ");
+}
+
+function remoteOutputBlock(title, text) {
+  return el("div", { class: "detail-section" }, [
+    el("h4", { text: title }),
+    el("pre", { class: "remote-output", text: text }),
+  ]);
+}
+
+let remoteReturnFocus = null;
+let remoteReturnKey = null;
+
+// Pop-up with one remote's full result: timings, pre-commands, exit code and
+// the server's (redacted) response. Raw output is only sent to signed-in users.
+function openRemoteDetail(remote, detailAvailable) {
+  const modal = document.getElementById("remote-modal");
+  const body = document.getElementById("remote-body");
+  document.getElementById("remote-title").textContent =
+    "Remote shutdown · " + (remote.server || remote.host);
+  const detail = remote.detail || null;
+  const run = remote.preCommandsAttempted || 0;
+  const failed = remote.preCommandsFailed || 0;
+  const rows = [
+    detailRow("Host", remote.host),
+    detailRow("State", progressStateLabel(remote.state)),
+    detailRow("Outcome", remote.outcome ? progressStateLabel(remote.outcome) : null),
+    detailRow("Started", remote.startedAt ? fmtClock(remote.startedAt) : null),
+    detailRow("Finished", remote.finishedAt ? fmtClock(remote.finishedAt) : null),
+    detailRow("Pre-commands", (run || failed) ? run + " run, " + failed + " failed" : "none"),
+  ];
+  if (detail) {
+    rows.push(detailRow("Exit code",
+      detail.exitCode === null || detail.exitCode === undefined
+        ? "not available" : String(detail.exitCode)));
+  }
+  const children = [detailSection("Result", rows)];
+  if (detail) {
+    children.push(remoteOutputBlock("Server response",
+      detail.response || "(no output)"));
+    if (detail.error && detail.error !== detail.response) {
+      children.push(remoteOutputBlock("Error", detail.error));
+    }
+    if (detail.preCommandsError) {
+      children.push(remoteOutputBlock("Pre-shutdown commands", detail.preCommandsError));
+    }
+  } else {
+    let note = "No response recorded yet.";
+    if (!detailAvailable) {
+      note = authEnabled
+        ? "Sign in to see the server's response and exit code."
+        : "The server's response and exit code are shown only to signed-in "
+          + "users. Enable API authentication to see them.";
+    }
+    if (remote.error) children.push(el("p", { class: "chart-note", text: remote.error }));
+    children.push(el("p", { class: "chart-note", text: note }));
+    if (!detailAvailable && authEnabled) {
+      const signIn = el("button", { type: "button", text: "Sign in" });
+      signIn.addEventListener("click", () => { closeRemoteDetail(); openLogin(); });
+      children.push(el("div", { class: "modal-actions" }, [signIn]));
+    }
+  }
+  body.replaceChildren(...children);
+  remoteReturnKey = { server: remote.server, host: remote.host };
+  remoteReturnFocus = document.activeElement;
+  modal.hidden = false;
+  // Errors usually land at the end of long output; open each block at its tail.
+  body.querySelectorAll(".remote-output").forEach((pre) => { pre.scrollTop = pre.scrollHeight; });
+  document.getElementById("remote-close").focus();
+  trapModalFocus(modal, closeRemoteDetail);
+}
+
+function closeRemoteDetail() {
+  const modal = document.getElementById("remote-modal");
+  if (modal._trap) { modal.removeEventListener("keydown", modal._trap); modal._trap = null; }
+  modal.hidden = true;
+  // A full plan re-render can replace the badge while the dialog is open;
+  // fall back to the current badge for the same remote.
+  let target = remoteReturnFocus;
+  if ((!target || !target.isConnected) && remoteReturnKey) {
+    const step = Array.from(document.querySelectorAll(
+      '.sd-step[data-remote-role="shutdown"]')).find((item) =>
+      item.getAttribute("data-remote-host") === remoteReturnKey.host
+      && item.getAttribute("data-remote-server") === remoteReturnKey.server);
+    target = step && step.querySelector("button.sd-progress-badge");
+  }
+  if (target && typeof target.focus === "function") target.focus();
+  remoteReturnFocus = null;
+  remoteReturnKey = null;
+}
+
+function applyShutdownProgress(section, progress, detailAvailable) {
   if (!section) return;
+  updateTriggerLive(section);
   const summary = section.querySelector(".sd-progress");
   section.querySelectorAll(".sd-node").forEach((node) => {
     node.classList.remove("sd-state-running", "sd-state-succeeded",
       "sd-state-failed", "sd-state-timed-out", "sd-state-skipped");
-    const old = node.querySelector(".sd-progress-badge");
+    const old = node.querySelector(".sd-head .sd-progress-badge");
     if (old) old.remove();
   });
   section.querySelectorAll(".sd-step").forEach((step) => {
     step.classList.remove("sd-state-running", "sd-state-succeeded",
       "sd-state-failed", "sd-state-timed-out");
-    const old = step.querySelector(".sd-progress-badge");
-    if (old) old.remove();
+    step.querySelectorAll(".sd-remote-meta").forEach((node) => node.remove());
   });
+  // Remote result badges are focusable buttons, so they are updated in place
+  // across the 1 s polls (rebuilding them would steal keyboard focus); any
+  // badge not refreshed below is stale and removed at the end.
+  const liveBadges = new Set();
+  const dropStaleBadges = () => {
+    section.querySelectorAll(".sd-step .sd-progress-badge").forEach((badge) => {
+      if (!liveBadges.has(badge)) badge.remove();
+    });
+  };
   if (!progress || !summary || !progress.runId) {
     if (summary) summary.hidden = true;
+    dropStaleBadges();
     return;
   }
 
@@ -3919,11 +4056,24 @@ function applyShutdownProgress(section, progress) {
     if (!step || remote.state === "pending") return;
     step.classList.add("sd-state-" + remote.state);
     const label = remote.outcome || progressStateLabel(remote.state);
-    const badge = el("span", { class: "badge sd-progress-badge "
-      + progressStateClass(remote.state), text: progressStateLabel(label) });
-    if (remote.error) badge.title = remote.error;
-    step.appendChild(badge);
+    // A button: click opens the full result (response + exit code) pop-up.
+    let badge = step.querySelector("button.sd-progress-badge");
+    if (!badge) {
+      badge = el("button", { type: "button",
+        title: "Show the server's response and exit code" });
+      badge.addEventListener("click", () =>
+        openRemoteDetail(badge._remote, !!badge._detailAvailable));
+      step.appendChild(badge);
+    }
+    badge._remote = remote;
+    badge._detailAvailable = !!detailAvailable;
+    badge.className = "badge sd-progress-badge " + progressStateClass(remote.state);
+    badge.textContent = progressStateLabel(label);
+    liveBadges.add(badge);
+    const meta = remoteProgressMeta(remote);
+    if (meta) step.appendChild(el("div", { class: "sd-remote-meta", text: meta }));
   });
+  dropStaleBadges();
 }
 
 // Append one scope's shutdown-plan body (trigger + phase flow) into a container.
@@ -4061,7 +4211,9 @@ async function refreshShutdownProgress() {
   try {
     await Promise.all(sections.map(async (section) => {
       const res = await api(section.getAttribute("data-progress-url"));
-      if (res.ok && res.data) applyShutdownProgress(section, res.data.progress);
+      if (res.ok && res.data) {
+        applyShutdownProgress(section, res.data.progress, res.data.remoteDetailAvailable);
+      }
     }));
   } finally {
     _sdProgressRefreshing = false;
@@ -4100,7 +4252,8 @@ async function renderShutdownPlan() {
     } else {
       appendShutdownPlanBody(section, target, plan);
       applyShutdownProgress(section,
-        progressRes.ok && progressRes.data && progressRes.data.progress);
+        progressRes.ok && progressRes.data && progressRes.data.progress,
+        progressRes.ok && progressRes.data && progressRes.data.remoteDetailAvailable);
     }
     host.appendChild(section);
   }
@@ -4344,6 +4497,10 @@ async function init() {
   document.getElementById("event-delete").addEventListener("click", deleteSelected);
   document.getElementById("event-sort-time").addEventListener("click", toggleEventSort);
   document.getElementById("detail-close").addEventListener("click", closeDetail);
+  document.getElementById("remote-close").addEventListener("click", closeRemoteDetail);
+  document.getElementById("remote-modal").addEventListener("click", (ev) => {
+    if (ev.target.id === "remote-modal") closeRemoteDetail();
+  });
   // Click anywhere on the backdrop (outside the card) closes the detail modal,
   // not just the ✕.
   document.getElementById("detail-modal").addEventListener("click", (ev) => {
@@ -4353,6 +4510,7 @@ async function init() {
   document.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape") return;
     if (!document.getElementById("detail-modal").hidden) closeDetail();
+    if (!document.getElementById("remote-modal").hidden) closeRemoteDetail();
     if (!document.getElementById("login-modal").hidden) closeLogin();
   });
   // Close the event-type dropdown (<details>) when clicking anywhere outside it,

@@ -152,6 +152,7 @@ jobs:
           # user) must stay present, and the scenario file it depends on.
           grep -q "Test 62: self-test observation" tests/e2e/groups/single-ups-auth.sh
           grep -q "^ups.test.result:" tests/e2e/scenarios/self-test-passed.dev
+          grep -q "Test 64: authenticated remote shutdown response and exit code" tests/e2e/groups/single-ups-auth.sh
 
       - name: Verify v6.2 report and self-test E2E coverage is wired
         if: matrix.group == 'stats' || matrix.group == 'single-ups-auth'
@@ -196,6 +197,7 @@ jobs:
           grep -q "/power?from=" tests/e2e/groups/redundancy-quorum.sh
           grep -q 'nominal_power: 800' tests/e2e/config-e2e-redundancy.yaml
           grep -q 'ups.realpower.nominal: 1000' tests/e2e/scenarios/online-charging.dev
+          grep -q 'remoteDetailAvailable' tests/e2e/groups/redundancy-quorum.sh
 
       - name: Collect logs on failure
         if: failure()

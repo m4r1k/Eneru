@@ -1,6 +1,7 @@
 """Tests for remote pre-shutdown command templating and execution."""
 
 import threading
+import time
 
 import pytest
 from unittest.mock import patch, MagicMock, call
@@ -1872,3 +1873,89 @@ class TestRemoteProgressTracking:
         assert mixin._track_remote_start(server) is None
         mixin._track_remote_finish(
             RemoteShutdownResult(server="nas", host="10.0.0.2"), None)
+
+
+class TestRemoteCommandOutputCapture:
+    """The final shutdown command's exit code and output reach the result
+    so authenticated dashboard readers can inspect the server's response."""
+
+    @pytest.fixture
+    def live_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        monitor._send_notification = MagicMock()
+        return monitor
+
+    @staticmethod
+    def _server(**kwargs):
+        from eneru.config import RemoteServerConfig
+
+        defaults = dict(name="nas", host="10.0.0.2", user="root",
+                        enabled=True, shutdown_command="poweroff")
+        defaults.update(kwargs)
+        return RemoteServerConfig(**defaults)
+
+    @pytest.mark.unit
+    def test_run_remote_command_fills_capture(self, live_monitor):
+        capture = {}
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(3, "partial\n", "boom\n")):
+            ok, msg = live_monitor._run_remote_command(
+                self._server(), "poweroff", 10, "shutdown", capture=capture)
+        assert (ok, msg) == (False, "boom")
+        assert capture == {"exit_code": 3, "stdout": "partial\n",
+                           "stderr": "boom\n"}
+
+    @pytest.mark.unit
+    def test_capture_untouched_when_command_never_runs(self, live_monitor):
+        capture = {}
+        with patch("eneru.shutdown.remote.run_command") as runner:
+            ok, _ = live_monitor._run_remote_command(
+                self._server(), "poweroff", 10, "shutdown",
+                deadline=time.monotonic() - 1, capture=capture)
+        runner.assert_not_called()
+        assert ok is False and capture == {}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("rc", "stdout", "stderr", "sent", "response"), [
+        (0, "Powering off\n", "", True, "Powering off"),
+        (1, "", "Permission denied\n", False, "Permission denied"),
+        (2, "out\n", "err\n", False, "out\nerr"),
+    ])
+    def test_regular_remote_records_exit_code_and_response(
+            self, live_monitor, rc, stdout, stderr, sent, response):
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(rc, stdout, stderr)):
+            result = live_monitor._shutdown_remote_server(self._server())
+        assert result.shutdown_sent is sent
+        assert result.exit_code == rc
+        assert result.response == response
+
+    @pytest.mark.unit
+    def test_loopback_poweroff_records_exit_code_and_response(
+            self, live_monitor):
+        from eneru.shutdown.remote import RemoteShutdownResult
+
+        server = self._server(name="host", host="127.0.0.1",
+                              is_host_loopback=True)
+        result = RemoteShutdownResult(server="host", host="127.0.0.1")
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(1, "", "sudo: a password is required\n")):
+            live_monitor._shutdown_loopback_command(server, result)
+        assert result.exit_code == 1
+        assert result.response == "sudo: a password is required"
+
+    @pytest.mark.unit
+    def test_dry_run_leaves_exit_code_unset(self, live_monitor):
+        live_monitor.config.behavior.dry_run = True
+        with patch("eneru.shutdown.remote.run_command") as runner:
+            result = live_monitor._shutdown_remote_server(self._server())
+        runner.assert_not_called()
+        assert result.exit_code is None and result.response == ""

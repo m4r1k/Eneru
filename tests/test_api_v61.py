@@ -427,6 +427,18 @@ class TestShutdownPlanEndpoint:
         assert remote["state"] == "failed"
         assert remote["outcome"] == "not-sent"
         assert remote["error"] == "Remote shutdown failed; see service logs"
+        # Anonymous readers get no raw command output.
+        assert payload["remoteDetailAvailable"] is False
+        assert "detail" not in remote
+
+        # Signed-in readers get the redacted response and exit code.
+        h._authorize = lambda write=False: {"username": "admin"}
+        status, _, payload = h._route()
+        assert status == 200
+        assert payload["remoteDetailAvailable"] is True
+        detail = payload["progress"]["remotes"][0]["detail"]
+        assert detail["error"] == "token=<redacted>"
+        assert detail["exitCode"] is None
         h.path = "/api/v1/ups/nope/shutdown-progress"
         assert h._route()[0] == 404
 

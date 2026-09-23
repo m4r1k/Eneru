@@ -5,7 +5,43 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
+import re
+
+from eneru.logger import redact_sensitive_text
 from eneru.shutdown.plan import PHASE_ORDER
+
+# Remote command output can be long (a chatty shutdown script). Keep the
+# tail, where errors usually land, and cap it so one host can't bloat the API.
+REMOTE_DETAIL_MAX_CHARS = 8000
+
+
+# Script output uses more secret shapes than log lines do. Best-effort: these
+# cover `Authorization: Bearer x`, `password: x`, `--password x` and JSON
+# `"token": "x"` on top of the logger's key=value / URL-userinfo rules.
+_SECRET_KEY = r"(?:password|passwd|secret|token|api[_-]?key)"
+_OUTPUT_SECRET_PATTERNS = (
+    # Whole header value: covers Bearer, Basic, and any other scheme.
+    (re.compile(r"(\bauthorization\s*:\s*)[^\r\n]+", re.IGNORECASE),
+     r"\1<redacted>"),
+    (re.compile(r"(\bbearer\s+)(?!<redacted>)\S+", re.IGNORECASE), r"\1<redacted>"),
+    (re.compile(r'("' + _SECRET_KEY + r'"\s*:\s*")[^"]*', re.IGNORECASE),
+     r"\1<redacted>"),
+    (re.compile(r"(--?" + _SECRET_KEY + r"[=\s]+)\S+", re.IGNORECASE),
+     r"\1<redacted>"),
+    (re.compile(r"(\b" + _SECRET_KEY + r"\s*:\s*)(?!<redacted>)\S+",
+                re.IGNORECASE), r"\1<redacted>"),
+)
+
+
+def _detail_text(value: Any) -> str:
+    """Redact credentials and keep the last REMOTE_DETAIL_MAX_CHARS chars."""
+    text = redact_sensitive_text(str(value or ""))
+    for pattern, replacement in _OUTPUT_SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    text = text.strip()
+    if len(text) > REMOTE_DETAIL_MAX_CHARS:
+        text = "…(truncated)\n" + text[-REMOTE_DETAIL_MAX_CHARS:]
+    return text
 
 
 class ShutdownProgress:
@@ -17,6 +53,9 @@ class ShutdownProgress:
         self._name = name
         self._run_id = 0
         self._data = self._idle_snapshot()
+        # Raw per-remote command output lives outside ``_data`` so the default
+        # (anonymous) snapshot can never include it; see snapshot().
+        self._remote_details: Dict[tuple, Dict[str, Any]] = {}
 
     def _idle_snapshot(self) -> Dict[str, Any]:
         return {
@@ -40,6 +79,7 @@ class ShutdownProgress:
             with self._lock:
                 self._run_id += 1
                 self._data = self._idle_snapshot()
+                self._remote_details = {}
                 self._data.update({
                     "runId": self._run_id,
                     "state": "running",
@@ -117,11 +157,23 @@ class ShutdownProgress:
                 if generation != self._run_id:
                     return
                 row = self._remote_row(result.server, result.host)
+                late = row.get("state") == "timed-out" and not getattr(
+                    result, "timed_out", False)
+                exit_code = getattr(result, "exit_code", None)
+                detail = {
+                    "exitCode": exit_code if isinstance(exit_code, int) else None,
+                    "response": _detail_text(getattr(result, "response", "")),
+                    "error": _detail_text(getattr(result, "error", "")),
+                    "preCommandsError": _detail_text(getattr(
+                        getattr(result, "pre_commands", None), "error", "")),
+                }
+                key = (row["server"], row["host"])
                 # The orchestrator's deadline is authoritative. A worker may
                 # return after its join timed out; do not rewrite that timeout
-                # as success after the shutdown sequence has moved on.
-                if row.get("state") == "timed-out" and not getattr(
-                        result, "timed_out", False):
+                # as success after the shutdown sequence has moved on. Its
+                # output is still kept, since a timeout is when it helps most.
+                if late:
+                    self._remote_details[key] = detail
                     return
                 if getattr(result, "timed_out", False):
                     state, outcome = "timed-out", "timeout"
@@ -136,6 +188,7 @@ class ShutdownProgress:
                     )
                 else:
                     state, outcome = "failed", "not-sent"
+                self._remote_details[key] = detail
                 row.update({
                     "state": state,
                     "finishedAt": time.time(),
@@ -181,10 +234,21 @@ class ShutdownProgress:
         except Exception:
             pass
 
-    def snapshot(self) -> Dict[str, Any]:
-        """Return a detached JSON-safe copy."""
+    def snapshot(self, include_detail: bool = False) -> Dict[str, Any]:
+        """Return a detached JSON-safe copy.
+
+        ``include_detail`` adds each finished remote's redacted command
+        response, exit code, and error text. Callers pass it only for
+        authenticated API readers.
+        """
         try:
             with self._lock:
-                return copy.deepcopy(self._data)
+                data = copy.deepcopy(self._data)
+                if include_detail:
+                    for row in data["remotes"]:
+                        detail = self._remote_details.get(
+                            (row["server"], row["host"]))
+                        row["detail"] = copy.deepcopy(detail)
+                return data
         except Exception:
             return self._idle_snapshot()

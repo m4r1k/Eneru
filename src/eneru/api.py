@@ -1114,7 +1114,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 tracker = getattr(executor, "_shutdown_progress", None)
                 return 200, "application/json", {
                     "group": group_name,
-                    "progress": tracker.snapshot() if tracker is not None else None,
+                    # Raw remote command output (redacted) is for signed-in
+                    # readers only, like config_summary(extended=True).
+                    "progress": (
+                        tracker.snapshot(include_detail=principal is not None)
+                        if tracker is not None else None),
+                    "remoteDetailAvailable": principal is not None,
                 }
             if len(parts) == 6 and parts[5] == "shutdown-plan":
                 from eneru.config import Config, UPSGroupConfig
@@ -1234,7 +1239,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 tracker = getattr(mon, "_shutdown_progress", None)
                 return 200, "application/json", {
                     "ups": ups_name,
-                    "progress": tracker.snapshot() if tracker is not None else None,
+                    # Raw remote command output (redacted) is for signed-in
+                    # readers only, like config_summary(extended=True).
+                    "progress": (
+                        tracker.snapshot(include_detail=principal is not None)
+                        if tracker is not None else None),
+                    "remoteDetailAvailable": principal is not None,
                 }
             if len(parts) == 6 and parts[5] == "battery-health-history":
                 # v6.1 battery-health score TREND for the Battery-tab graph.

@@ -524,7 +524,11 @@ import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
-    progress = json.load(handle)["progress"]
+    payload = json.load(handle)
+progress = payload["progress"]
+# Anonymous readers never receive raw remote command output.
+assert payload["remoteDetailAvailable"] is False
+assert all("detail" not in remote for remote in progress["remotes"])
 assert progress["runId"] > 0
 assert progress["state"] == "succeeded"
 assert progress["finishedAt"] is not None

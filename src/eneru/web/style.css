@@ -636,6 +636,15 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .sd-health-badge, .sd-step .sd-progress-badge { display: inline-block; margin: 0.35rem 0.35rem 0 0; }
 .sd-parallel .sd-step { flex: 1 1 200px; }
 .sd-step-detail { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+button.sd-progress-badge { font-family: inherit; cursor: pointer; border: 0; }
+button.sd-progress-badge:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
+.sd-remote-meta { color: var(--muted); font-size: 0.75rem; margin-top: 0.2rem; }
+.sd-trigger-live { margin-left: 0.5rem; }
+/* Remote command output can be long; keep it scrollable inside the dialog. */
+.remote-output { max-height: 40vh; overflow: auto; white-space: pre-wrap;
+  word-break: break-word; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.5rem 0.6rem; margin: 0.3rem 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; }
 
 /* Energy dual-line chart: load% (kindred accent, translucent) + power (W). */
 /* Data series use a categorical palette (accent blue + violet), NOT the status

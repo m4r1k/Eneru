@@ -285,6 +285,19 @@
     </div>
   </div>
 
+  <!-- Remote shutdown result dialog (server response + exit code) -->
+  <div id="remote-modal" class="modal" hidden>
+    <div class="modal-card detail-card" role="dialog" aria-modal="true" aria-labelledby="remote-title">
+      <div class="modal-head">
+        <h3 id="remote-title">Remote shutdown result</h3>
+        <button type="button" id="remote-close" aria-label="Close">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12 M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div id="remote-body"></div>
+    </div>
+  </div>
+
   <footer><span id="status-line">Loading…</span></footer>
   <script src="/app.js"></script>
 </body>

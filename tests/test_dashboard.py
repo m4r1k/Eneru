@@ -1105,6 +1105,19 @@ def test_dashboard_rc11_surfaces(minimal_config):
     assert 'setInterval(refreshShutdownProgress, 1000)' in js
     assert "document.hidden || activeTab !== \"shutdown\"" in js
     assert '"/api/v1/redundancy-groups/"' in js
+    # #100 follow-ups: live trigger count, remote timings/pre-commands, and a
+    # result pop-up with the server response + exit code (signed-in only).
+    assert "function updateTriggerLive" in js and '"now " + healthy' in js
+    assert "function remoteProgressMeta" in js and ".sd-remote-meta" in css
+    assert "function openRemoteDetail" in js
+    assert "pre.scrollTop = pre.scrollHeight" in js
+    # Badges update in place across 1 s polls so keyboard focus survives.
+    assert "badge._remote = remote" in js and "dropStaleBadges()" in js
+    assert "target.isConnected" in js
+    assert "res.data.remoteDetailAvailable" in js
+    assert "Sign in to see the server's response and exit code." in js
+    assert 'id="remote-modal"' in html and 'id="remote-close"' in html
+    assert ".remote-output" in css and "overflow: auto" in css
     assert ".sd-state-running" in css and ".sd-progress" in css
     for state, color in (("ok", "ok"), ("warn", "warn"),
                          ("crit", "crit"), ("muted", "muted")):

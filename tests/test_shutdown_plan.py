@@ -256,7 +256,8 @@ def test_shutdown_progress_remote_outcomes_and_timeout_is_terminal():
         timed_out=True, error="deadline"), generation)
     # A late worker cannot turn the orchestrator's timeout into success.
     progress.remote_finish(RemoteShutdownResult(
-        server="late", host="10.0.0.3", shutdown_sent=True), generation)
+        server="late", host="10.0.0.3", shutdown_sent=True, exit_code=0,
+        response="slow but done"), generation)
     failed_generation = progress.remote_start("failed", "10.0.0.4")
     progress.remote_finish(RemoteShutdownResult(
         server="failed", host="10.0.0.4", error="secret refused stderr"),
@@ -266,6 +267,11 @@ def test_shutdown_progress_remote_outcomes_and_timeout_is_terminal():
     assert rows["late"]["state"] == "timed-out"
     assert rows["late"]["outcome"] == "timeout"
     assert rows["late"]["error"] == "Remote shutdown timed out; see service logs"
+    # The late worker's real output is still kept for signed-in readers.
+    late_detail = next(row for row in progress.snapshot(include_detail=True)[
+        "remotes"] if row["server"] == "late")["detail"]
+    assert late_detail["exitCode"] == 0
+    assert late_detail["response"] == "slow but done"
     assert rows["failed"]["state"] == "failed"
     assert rows["failed"]["outcome"] == "not-sent"
     assert rows["failed"]["error"] == "Remote shutdown failed; see service logs"
@@ -378,3 +384,69 @@ def test_shutdown_progress_is_failure_isolated(monkeypatch):
     progress.remote_finish(result, generation)
     progress.finish("failed")
     assert progress.snapshot()["state"] == "idle"
+
+
+@pytest.mark.unit
+def test_shutdown_progress_remote_detail_only_on_request():
+    from eneru.shutdown.progress import REMOTE_DETAIL_MAX_CHARS
+
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("battery low")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    long_output = "x" * (REMOTE_DETAIL_MAX_CHARS + 50) + "\npassword=hunter2 END"
+    progress.remote_finish(RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=False,
+        error="Permission denied token=abc123", exit_code=255,
+        response=long_output,
+        pre_commands=RemotePreShutdownResult(
+            attempted=1, failed=1, error="stop_compose: secret=s3"),
+    ), generation)
+
+    # Default (anonymous) snapshot never carries raw command output.
+    assert "detail" not in progress.snapshot()["remotes"][0]
+
+    detail = progress.snapshot(include_detail=True)["remotes"][0]["detail"]
+    assert detail["exitCode"] == 255
+    assert detail["error"] == "Permission denied token=<redacted>"
+    assert detail["preCommandsError"] == "stop_compose: secret=<redacted>"
+    # Long output keeps the tail (where errors land), capped and redacted.
+    assert detail["response"].startswith("…(truncated)\n")
+    assert detail["response"].endswith("password=<redacted> END")
+    assert "hunter2" not in detail["response"]
+    assert len(detail["response"]) <= REMOTE_DETAIL_MAX_CHARS + 20
+
+    # A new run drops the previous run's output.
+    progress.start("second outage")
+    progress.remote_start("nas", "10.0.0.2")
+    snapshot = progress.snapshot(include_detail=True)
+    assert snapshot["remotes"][0]["detail"] is None
+
+
+@pytest.mark.unit
+def test_shutdown_progress_remote_detail_ignores_non_int_exit_code():
+    progress = ShutdownProgress("ups", "rack")
+    progress.start("battery low")
+    generation = progress.remote_start("nas", "10.0.0.2")
+    result = RemoteShutdownResult(
+        server="nas", host="10.0.0.2", shutdown_sent=True)
+    result.exit_code = "0"  # defensive: only real ints are published
+    progress.remote_finish(result, generation)
+    detail = progress.snapshot(include_detail=True)["remotes"][0]["detail"]
+    assert detail == {"exitCode": None, "response": "", "error": "",
+                      "preCommandsError": ""}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("Authorization: Basic Zm9v\nnext", "Authorization: <redacted>\nnext"),
+    ("curl -H 'Bearer xyz'", "curl -H 'Bearer <redacted>"),
+    ("password: hunter2", "password: <redacted>"),
+    ("--password hunter2 --api-key=k", "--password <redacted> --api-key=<redacted>"),
+    ('{"token": "abc", "ok": 1}', '{"token": "<redacted>", "ok": 1}'),
+    ("token=abc", "token=<redacted>"),
+    ("Powering off", "Powering off"),
+])
+def test_remote_detail_redacts_common_secret_shapes(raw, expected):
+    from eneru.shutdown.progress import _detail_text
+
+    assert _detail_text(raw) == expected

@@ -8,7 +8,7 @@ followed by the final shutdown command.
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
@@ -93,6 +93,10 @@ class RemoteShutdownResult:
     error: str = ""
     timed_out: bool = False
     crashed: bool = False
+    # Final shutdown command outcome for the dashboard's detail pop-up.
+    # ``exit_code`` stays None when the command never ran (dry-run, deadline).
+    exit_code: Optional[int] = None
+    response: str = ""
 
     @property
     def success(self) -> bool:
@@ -116,6 +120,15 @@ class RemoteShutdownResult:
             and not self.pre_commands.timed_out
             and not self.pre_commands.error
         )
+
+
+def _record_command_output(result: "RemoteShutdownResult",
+                           capture: Dict[str, Any]) -> None:
+    """Copy the final command's exit code and output onto ``result``."""
+    exit_code = capture.get("exit_code")
+    result.exit_code = exit_code if isinstance(exit_code, int) else None
+    parts = [str(capture.get(key) or "").strip() for key in ("stdout", "stderr")]
+    result.response = "\n".join(part for part in parts if part)
 
 
 def loopback_poweroff_sent(result: "RemoteShutdownResult") -> bool:
@@ -468,13 +481,16 @@ class RemoteShutdownMixin:
             )
             return
 
+        capture: Dict[str, Any] = {}
         success, error_msg = self._run_remote_command(
             server,
             shutdown_command,
             server.command_timeout,
             "shutdown",
             is_final_shutdown=True,
+            capture=capture,
         )
+        _record_command_output(result, capture)
 
         if success:
             result.shutdown_sent = True
@@ -645,12 +661,15 @@ class RemoteShutdownMixin:
         *,
         deadline: Optional[float] = None,
         is_final_shutdown: bool = False,
+        capture: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
         """Run a single command on a remote server via SSH.
 
         ``is_final_shutdown`` marks the ONE poweroff command (not
         pre_shutdown_commands): only then is an exit-255 transport teardown
-        treated as "sent (unconfirmed)" rather than a failure (F-077). On
+        treated as "sent (unconfirmed)" rather than a failure (F-077).
+        ``capture``, when given, receives the raw ``exit_code``/``stdout``/
+        ``stderr`` of the SSH invocation (untouched if it never ran). On
         success the second tuple element is normally "" but carries a
         human-readable note ("SSH transport ended (result unknown)") for that
         unconfirmed case so callers can log it honestly.
@@ -710,6 +729,8 @@ class RemoteShutdownMixin:
                 return False, "remote shutdown deadline exceeded"
             command_timeout = max(1, min(command_timeout, int(remaining)))
         exit_code, stdout, stderr = run_command(ssh_cmd, timeout=command_timeout)
+        if capture is not None:
+            capture.update(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
         if exit_code == 0:
             return True, ""
@@ -1004,6 +1025,7 @@ class RemoteShutdownMixin:
             )
             return result
 
+        capture: Dict[str, Any] = {}
         success, error_msg = self._run_remote_command(
             server,
             shutdown_command,
@@ -1011,7 +1033,9 @@ class RemoteShutdownMixin:
             "shutdown",
             deadline=deadline,
             is_final_shutdown=True,
+            capture=capture,
         )
+        _record_command_output(result, capture)
 
         if success:
             result.shutdown_sent = True

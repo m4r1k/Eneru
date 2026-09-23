@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [6.2.0-rc4] - 2026-09-23
 
+### Added
+
+- **Remote shutdown results open in a pop-up.** On the Shutdown tab, each
+  remote's result badge opens a dialog with its start/finish times,
+  pre-command results, the final command's exit code, and the server's
+  response (scrollable, last 8,000 characters). Raw output is credential-redacted
+  (best effort) and returned only to authenticated API readers; anonymous
+  readers see a sign-in prompt instead.
+- **Live trigger status on the Shutdown tab.** Each redundancy-group trigger
+  line shows how many members are healthy right now ("now 2 of 2 healthy").
+  Each remote also shows its timings and pre-command results under its badge.
+
 ### Changed
 
 - **A configured `nominal_power` now overrides NUT's reported rating.** The

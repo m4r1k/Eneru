@@ -814,5 +814,142 @@ wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
 echo "PASS: passive self-test observation surfaced via API (source=device)"
 )
+# ======================================================================
+# Test 64: signed-in readers see a remote's real exit code and response
+# ======================================================================
+# A real (non-dry-run) shutdown sends a harmless command to the SSH target
+# that prints a marker and exits 3. Anonymous progress reads must stay
+# sanitized; an authenticated read must carry the exit code and output.
+(
+echo ""
+echo ">>> Running: Test 64: authenticated remote shutdown response and exit code"
+
+AUTH_DB="$(mktemp -d)/auth.db"
+printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+  || { echo "FAIL: could not create auth user"; exit 1; }
+RUN_DIR="$(mktemp -d)"
+
+cat > /tmp/config-e2e-remote-detail.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  on_battery_stabilization_delay: 0
+  extended_time:
+    enabled: false
+behavior:
+  dry_run: false
+logging:
+  file: null
+  state_file: "$RUN_DIR/state"
+  battery_history_file: "$RUN_DIR/history"
+  shutdown_flag_file: "$RUN_DIR/shutdown-flag"
+statistics:
+  enabled: true
+  db_directory: "$RUN_DIR/stats"
+virtual_machines:
+  enabled: false
+containers:
+  enabled: false
+filesystems:
+  sync_enabled: false
+  unmount:
+    enabled: false
+remote_servers:
+  - name: "E2E Detail Target"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    connect_timeout: 5
+    command_timeout: 10
+    shutdown_command: "echo eneru-e2e-remote-response; exit 3"
+    ssh_options:
+      - "-o Port=2222"
+      - "-o StrictHostKeyChecking=no"
+      - "-o UserKnownHostsFile=/dev/null"
+      - "-o IdentityFile=/tmp/e2e-ssh-key"
+api:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 9100
+  auth:
+    enabled: true
+    require_for_reads: false
+    db_path: "$AUTH_DB"
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: false
+YAML
+
+apply_scenario online-charging
+timeout 60s eneru run --config /tmp/config-e2e-remote-detail.yaml \
+  > /tmp/test64-daemon.log 2>&1 &
+DAEMON_PID=$!
+trap 'kill "$DAEMON_PID" 2>/dev/null || true; apply_scenario online-charging' EXIT
+
+HEALTHY=false
+for _ in $(seq 1 20); do
+  if curl -fsS http://127.0.0.1:9100/health > /dev/null 2>&1; then
+    HEALTHY=true; break
+  fi
+  sleep 0.5
+done
+if [ "$HEALTHY" != true ]; then
+  echo "FAIL: API never came up"; cat /tmp/test64-daemon.log; exit 1
+fi
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"operator","password":"s3cret-pw"}' \
+  http://127.0.0.1:9100/api/v1/auth/login > /tmp/test64-login.json \
+  || { echo "FAIL: login failed"; cat /tmp/test64-daemon.log; exit 1; }
+TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/test64-login.json'))['token'])")
+
+apply_scenario low-battery
+PROGRESS_URL='http://127.0.0.1:9100/api/v1/ups/TestUPS%40localhost%3A3493/shutdown-progress'
+SEEN=false
+for _ in $(seq 1 40); do
+  if curl -fsS "$PROGRESS_URL" > /tmp/test64-anon.json 2>/dev/null && \
+     curl -fsS -H "Authorization: Bearer $TOKEN" "$PROGRESS_URL" \
+       > /tmp/test64-auth.json 2>/dev/null && \
+     python3 - /tmp/test64-anon.json /tmp/test64-auth.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    anon = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    auth = json.load(handle)
+assert anon["progress"]["state"] in ("failed", "succeeded")
+assert anon["remoteDetailAvailable"] is False
+anon_remote = anon["progress"]["remotes"][0]
+assert "detail" not in anon_remote
+assert anon_remote["error"] == "Remote shutdown failed; see service logs"
+assert auth["remoteDetailAvailable"] is True
+remote = auth["progress"]["remotes"][0]
+assert remote["state"] == "failed" and remote["outcome"] == "not-sent"
+assert remote["detail"]["exitCode"] == 3
+assert "eneru-e2e-remote-response" in remote["detail"]["response"]
+PY
+  then
+    SEEN=true; break
+  fi
+  sleep 0.5
+done
+if [ "$SEEN" != true ]; then
+  echo "FAIL: authenticated remote detail was not published"
+  cat /tmp/test64-anon.json /tmp/test64-auth.json /tmp/test64-daemon.log 2>/dev/null || true
+  exit 1
+fi
+
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+trap - EXIT
+apply_scenario online-charging
+echo "PASS: remote exit code + response are signed-in only"
+)
+
 echo ""
 echo "=== Group 'single-ups-auth' completed successfully ==="
