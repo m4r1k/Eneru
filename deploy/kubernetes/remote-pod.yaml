@@ -10,13 +10,16 @@ spec:
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
+    # Pod Security Admission `restricted` requires an explicit seccomp profile.
+    seccompProfile:
+      type: RuntimeDefault
     runAsUser: 10001
     runAsGroup: 10001
     fsGroup: 10001
   containers:
     - name: eneru
       # ISS-053: pin to a released version, not :latest (see remote-deployment.yaml).
-      image: ghcr.io/m4r1k/eneru:6.1.6
+      image: ghcr.io/m4r1k/eneru:6.2.0
       securityContext:
         readOnlyRootFilesystem: true
         allowPrivilegeEscalation: false

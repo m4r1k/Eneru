@@ -64,6 +64,9 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        # Pod Security Admission `restricted` requires an explicit seccomp profile.
+        seccompProfile:
+          type: RuntimeDefault
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
@@ -73,7 +76,7 @@ spec:
           # imagePullPolicy: Always gives every pod restart a surprise upgrade
           # in production. Bump this tag deliberately when you upgrade; the
           # default IfNotPresent pull policy then applies for a tagged image.
-          image: ghcr.io/m4r1k/eneru:6.1.6
+          image: ghcr.io/m4r1k/eneru:6.2.0
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -148,3 +151,25 @@ spec:
           secret:
             secretName: eneru-ssh-key
             defaultMode: 0400
+---
+# The API is plain HTTP and, with auth off, read-open (status, topology,
+# events). Only let the pods that need it reach port 9191; label your
+# Prometheus (or dashboard proxy) pods `eneru-client: "true"`. Egress is left
+# open: Eneru must reach NUT, SSH targets and notification services.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eneru-api
+spec:
+  podSelector:
+    matchLabels:
+      app: eneru
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              eneru-client: "true"
+      ports:
+        - protocol: TCP
+          port: 9191

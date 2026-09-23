@@ -77,6 +77,13 @@ docker run -d --name eneru \
   --api --api-bind 0.0.0.0 --api-port 9191
 ```
 
+`--api-bind 0.0.0.0` publishes a plain-HTTP API. With authentication off it
+is read-open (status, topology, events); with it on, passwords and tokens
+cross the network unencrypted. Once the port leaves localhost, enable
+[authentication](authentication.md) and put a TLS reverse proxy in front, or
+publish it on `127.0.0.1:9191` only. The Kubernetes sample ships a
+`NetworkPolicy` that limits who can reach it.
+
 Remote-only config shape:
 
 ```yaml
@@ -219,6 +226,12 @@ EOF
 chmod 440 /etc/sudoers.d/eneru-loopback
 ```
 
+Option B keeps the SSH login itself unprivileged, but it is not a
+least-privilege sandbox: `docker`, `podman` and `virsh` without argument
+restrictions are root-equivalent (they can start a privileged container or
+VM), so this key is still effectively host root. Run
+`eneru config check` to see exactly which commands sudo must allow.
+
 Then point the loopback at this user and enable `use_sudo`:
 
 ```yaml
@@ -321,6 +334,15 @@ as in the marker-file example above.)
 | Podman default | `host.containers.internal` or `--network host` | rootless Podman: use `--network host` for simplicity. |
 | Kubernetes pod | Node IP via `hostPath` or `hostNetwork: true` | See K8s section below; not the recommended profile. |
 
+!!! warning "Pin the host key outside `--network host`"
+    The loopback samples turn host-key checking off
+    (`StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`) because
+    `127.0.0.1` with `--network host` can only be this host. A bridge gateway
+    or `host.containers.internal` is a network address that something else on
+    that network could answer. In those modes, drop both options so the
+    default `accept-new` learns the host key once into
+    `/var/lib/eneru/ssh/known_hosts` and refuses a different key later.
+
 The host identity guard catches the dangerous case where this address
 points at the wrong machine — the SSH probe would return a different
 `/etc/machine-id`, the loopback would be marked FAILED, and `/ready`
@@ -395,11 +417,12 @@ Treat it that way:
    container should never modify it.
 4. **Key file mode 0400.** Eneru warns at startup if the loopback's
    key file is world-readable.
-5. **A container escape becomes a host poweroff.** That's the worst
-   case. It is bad, but it is still the action this daemon is designed
-   to take during an outage. Mitigate by treating
-   the Eneru container's lifecycle the same as any other privileged
-   workload on the host.
+5. **The loopback key is host root.** Anyone who can run code in the
+   Eneru container can use the loopback key: with the default root
+   loopback that is root on the host, and with Option B the sudoers rules
+   are root-equivalent too (`docker`, `podman` and `virsh` can start
+   privileged workloads). Treat the Eneru container like any other
+   workload that holds a root credential for the host.
 6. **No `--privileged`, no `--cap-add SYS_ADMIN`, no `--pid=host`.**
    The loopback design exists specifically to avoid these.
 
