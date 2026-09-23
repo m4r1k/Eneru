@@ -235,7 +235,7 @@ run_loopback_case() {
 
 # Test 47b: `eneru config check` inside the container fills a loopback's
 # missing expected_host_identity from the container's own copy of the
-# identity file (6.2.0-rc6 fix), the same way the daemon does at startup.
+# identity file (6.2.0 fix), the same way the daemon does at startup.
 # Like checking a key against its own lock: the container reads its
 # bind-mounted copy of the file, SSH reads the host's, and they must match.
 # Uses a dedicated identity file (not /etc/machine-id) so no other case
