@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0-rc6] - 2026-09-23
+
+### Changed
+
+- **`use_sudo` now covers custom pre-shutdown commands.** Before, it prefixed
+  only the predefined actions and the final shutdown command, while a custom
+  `pre_shutdown_commands[].command` ran as the plain SSH user and usually
+  failed for lack of root. Now every command on a `use_sudo: true` server
+  runs through `sudo -n`, unless it already starts with `sudo`. Only the
+  first command of a pipeline or list is prefixed. If your sudoers only
+  allows the shutdown tools, add NOPASSWD rules for those custom commands:
+  `eneru config check` shows which ones sudo would refuse.
+
+- **Container config is mounted writable so the editor can save it.** The
+  documented Docker/Podman samples drop `:ro` from the config mount, and the
+  host file is owned by the container user (`chown 10001:10001`, mode 0600).
+  `docker exec -it eneru eneru config` then saves in place through the
+  single-file bind mount, keeps the previous version in the state volume
+  (`/srv/eneru/state/config.yaml.bak`), and `docker kill -s HUP eneru`
+  hot-reloads it. A `:ro` mount keeps working for the daemon; the editor
+  opens it read-only and explains the fix. For a first setup, the image
+  runs the editor without Eneru installed on the host: `docker run --rm -it
+  --network host -v /srv/eneru:/srv/eneru:Z ghcr.io/m4r1k/eneru config
+  --config /srv/eneru/config.yaml`. Kubernetes ConfigMaps stay read-only.
+
+### Fixed
+
+- **`eneru config check` no longer reports "host identity unknown" for a
+  correct container loopback.** It now fills `expected_host_identity` from
+  the bind-mounted `/etc/machine-id` exactly as the daemon does at startup.
+- **Editor polish.**
+  - Esc returns to the row you opened.
+  - Switching basic/advanced keeps the key bar visible.
+  - Rows named by a finding get a red `x` or yellow `!` marker.
+  - Review & save lists every change against the file on disk, and the
+    findings panel is larger.
+
 ## [6.2.0-rc5] - 2026-09-23
 
 ### Added
@@ -47,29 +84,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and a *recommended* package on deb (`python3-ruamel.yaml`) and rpm
     (`python3-ruamel-yaml`; RHEL 9 has it in CRB), so installing Eneru never
     fails over the editor.
-
-### Changed
-
-- **`use_sudo` now covers custom pre-shutdown commands.** Before, it prefixed
-  only the predefined actions and the final shutdown command, while a custom
-  `pre_shutdown_commands[].command` ran as the plain SSH user and usually
-  failed for lack of root. Now every command on a `use_sudo: true` server
-  runs through `sudo -n`, unless it already starts with `sudo`. Only the
-  first command of a pipeline or list is prefixed. If your sudoers only
-  allows the shutdown tools, add NOPASSWD rules for those custom commands:
-  `eneru config check` shows which ones sudo would refuse.
-
-- **Container config is mounted writable so the editor can save it.** The
-  documented Docker/Podman samples drop `:ro` from the config mount, and the
-  host file is owned by the container user (`chown 10001:10001`, mode 0600).
-  `docker exec -it eneru eneru config` then saves in place through the
-  single-file bind mount, keeps the previous version in the state volume
-  (`/srv/eneru/state/config.yaml.bak`), and `docker kill -s HUP eneru`
-  hot-reloads it. A `:ro` mount keeps working for the daemon; the editor
-  opens it read-only and explains the fix. For a first setup, the image
-  runs the editor without Eneru installed on the host: `docker run --rm -it
-  --network host -v /srv/eneru:/srv/eneru:Z ghcr.io/m4r1k/eneru config
-  --config /srv/eneru/config.yaml`. Kubernetes ConfigMaps stay read-only.
 
 ### Removed
 
