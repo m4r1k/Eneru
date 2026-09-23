@@ -1358,3 +1358,111 @@ def test_review_scroll_keys_ignored_elsewhere(tmp_path):
     goto(m, "safety")
     press(m, "J", "K")
     assert m.review_scroll == 0
+
+
+# --- operator feedback round: cursor memory, markers, change list ----------
+
+def test_back_returns_to_the_row_that_was_opened(tmp_path):
+    m = _model(tmp_path)
+    goto(m, "safety")
+    select(m, lambda r: r.kind == "section")
+    here = m.cursor
+    press(m, ENTER)
+    assert len(m.pages) == 2 and m.cursor == 0
+    press(m, ESC)
+    assert m.cursor == here
+
+
+def test_mode_switch_keeps_the_key_bar_visible(tmp_path):
+    m = _model(tmp_path)
+    m.message = "old"
+    press(m, "m")
+    assert m.mode == tui.MODE_ADVANCED and m.message == ""
+
+
+def test_row_levels_mark_the_rows_a_finding_names(tmp_path):
+    m = _model(tmp_path)
+    goto(m, "safety")
+    m.findings = [
+        chk.Finding("warning", "safety", "UPS X: runtime trigger fires with "
+                    "critical_runtime_threshold (25s)"),
+        chk.Finding("error", "safety", "ups['x'].triggers.low_battery_threshold "
+                    "must be <= 100"),
+        chk.Finding("ok", "safety", "local_shutdown.enabled fine"),
+        chk.Finding("error", "ups", "triggers.voltage_sensitivity bad"),  # other stage
+    ]
+    rows = m.rows()
+    levels = m.row_levels(rows)
+    by_label = {rows[i].label: lvl for i, lvl in levels.items()}
+    assert by_label == {"critical_runtime_threshold": "warning",
+                        "low_battery_threshold": "error"}
+    m.findings = []
+    assert m.row_levels(rows) == {}
+
+
+def test_row_levels_generic_keys_need_their_section(tmp_path):
+    m = _model(tmp_path)
+    goto(m, "safety")
+    m.findings = [chk.Finding("error", "safety", "something enabled is wrong"),
+                  chk.Finding("warning", "safety", "local_shutdown.enabled is off")]
+    rows = m.rows()
+    marked = [rows[i].path for i in m.row_levels(rows)]
+    assert marked == [("local_shutdown", "enabled")]
+
+
+def test_row_levels_lists_and_items_follow_the_probe_subject(tmp_path):
+    m = _model(tmp_path)
+    goto(m, "remote")
+    m.findings = [chk.Finding("error", "remote", "Synology NAS: SSH failed",
+                              subject="Synology NAS")]
+    rows = m.rows()
+    levels = m.row_levels(rows)
+    assert [rows[i].kind for i in levels] == ["item"]
+    # On a stage that lists groups, the list row carries the mark.
+    m2 = _model(tmp_path, "config-dual-ups.yaml")
+    goto(m2, "remote")
+    rows2 = m2.rows()
+    names = [s.get("name") for g in m2.view["ups"]
+             for s in g.get("remote_servers", [])]
+    m2.findings = [chk.Finding("warning", "remote", f"{names[0]}: slow",
+                               subject="nobody")]
+    assert set(m2.row_levels(rows2).values()) == {"warning"}
+    assert tui.EditorModel._labels("not-a-list") == set()
+
+
+def test_changes_list_against_the_saved_file(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    assert m.changes() == []
+    m.doc.set(("triggers", "low_battery_threshold"), 30)
+    m.doc.set(("nut_control", "password"), "s3cret")
+    m.doc.delete(("ups", "check_interval")) if m.doc.has(("ups", "check_interval")) else None
+    m.revalidate()
+    changes = m.changes()
+    assert any(c.startswith("~ triggers.low_battery_threshold: 20 -> 30")
+               or c.startswith("+ triggers.low_battery_threshold: 30") for c in changes)
+    assert "+ nut_control.password: ********" in changes
+    m.save()
+    assert m.changes() == [] and "Saved 2 change(s)" in m.message
+
+
+def test_config_changes_formats_every_kind():
+    before = {"a": 1, "b": {"c": True}, "gone": None, "l": [1], "e": {},
+              "t": "x"}
+    after = {"a": 2, "b": {"c": False}, "l": [1, 2], "e": {}, "new": [],
+             "t": 1, "k": {"password": ""}}
+    lines = tui.config_changes(before, after)
+    assert "~ a: 1 -> 2" in lines
+    assert "~ b.c: true -> false" in lines
+    assert "- gone (was null)" in lines
+    assert "+ l[1]: 2" in lines
+    assert "+ new: []" in lines
+    assert "~ t: x -> 1" in lines
+    assert "+ k.password: (empty)" in lines
+    assert not [ln for ln in lines if ln.startswith(("~ e", "+ e", "- e"))]
+
+
+def test_new_file_changes_include_the_seeded_defaults(tmp_path):
+    doc = ConfigDocument.load(tmp_path / "fresh.yaml")
+    tui.seed_new_document(doc)
+    m = tui.EditorModel(doc)
+    assert "+ behavior.dry_run: true" in m.changes()

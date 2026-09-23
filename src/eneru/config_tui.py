@@ -19,6 +19,7 @@ Design:
 
 import curses
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -106,6 +107,9 @@ class Page:
     kind: str  # stage | section | list | scalars
     path: Tuple[Any, ...] = ()
     spec: Any = None
+    # Where the cursor was on this page when a child page was opened, so
+    # Esc returns to the same row instead of the top.
+    cursor: int = 0
 
 
 @dataclass
@@ -166,6 +170,60 @@ def parse_input(opt: cat.Option, text: str) -> Tuple[bool, Any, str]:
     return True, value, ""
 
 
+_SECRET_KEYS = ("password", "token", "secret")
+
+
+def _flatten(node: Any, prefix: str = "") -> Dict[str, Any]:
+    """{dotted.path[i]: leaf} for a plain YAML tree (lists by index)."""
+    out: Dict[str, Any] = {}
+    if isinstance(node, dict):
+        if not node and prefix:
+            out[prefix] = {}
+        for k, v in node.items():
+            out.update(_flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(node, list):
+        if not node and prefix:
+            out[prefix] = []
+        for i, v in enumerate(node):
+            out.update(_flatten(v, f"{prefix}[{i}]"))
+    else:
+        out[prefix] = node
+    return out
+
+
+def _show(path: str, value: Any) -> str:
+    if any(word in path.rsplit(".", 1)[-1] for word in _SECRET_KEYS):
+        return "********" if value else "(empty)"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def config_changes(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """Human-readable list of what differs, as the daemon sees it."""
+    old, new = _flatten(before), _flatten(after)
+    lines: List[str] = []
+    for path in sorted(set(old) | set(new)):
+        if path not in old:
+            lines.append(f"+ {path}: {_show(path, new[path])}")
+        elif path not in new:
+            lines.append(f"- {path} (was {_show(path, old[path])})")
+        elif old[path] != new[path] or type(old[path]) is not type(new[path]):
+            lines.append(f"~ {path}: {_show(path, old[path])} -> "
+                         f"{_show(path, new[path])}")
+    return lines
+
+
+# Keys too generic to match on their own in a finding's text.
+_GENERIC_KEYS = frozenset({
+    "enabled", "name", "host", "user", "timeout", "command", "path", "port",
+    "bind", "time", "format", "schedule", "runtime", "options", "mounts",
+    "urls", "title", "password", "username", "interval", "message",
+})
+
+
 # Sentinel: "remove the key so the documented default applies".
 _RESET = object()
 
@@ -218,8 +276,8 @@ class EditorModel:
         stages = self.stages
         self.stage_index = stages.index(current) if current in stages else 0
         self.reset_stage()
-        self.flash(f"{'Basic' if mode == MODE_BASIC else 'Advanced'} mode",
-                   chk.LEVEL_INFO)
+        # The header shows the mode; a flash would hide the key bar.
+        self.message = ""
 
     def stage_findings(self, stage: str) -> List[chk.Finding]:
         sections = STAGES[stage][1]
@@ -271,6 +329,62 @@ class EditorModel:
         self.probe_findings = []
         self.revalidate()
         self.flash(text, chk.LEVEL_OK)
+
+    def changes(self) -> List[str]:
+        """What differs from the file on disk, as the daemon will read it."""
+        return config_changes(self.doc.saved_view(), self.view)
+
+    def row_levels(self, rows: List[Row]) -> Dict[int, str]:
+        """Mark the rows a stage finding is about (error beats warning).
+
+        Findings are prose, so this matches on what they name: a dotted
+        `section.key`, a distinctive key name, a section/list key, or the
+        item a probe was about (remote server name, UPS label).
+        """
+        findings = [f for f in self.stage_findings(self.stage)
+                    if f.level in (chk.LEVEL_ERROR, chk.LEVEL_WARN)]
+        levels: Dict[int, str] = {}
+        if not findings:
+            return levels
+        for idx, row in enumerate(rows):
+            keys = [k for k in row.path if isinstance(k, str)]
+            tests: List[Callable[[chk.Finding], bool]] = []
+            if row.kind == "option" and keys:
+                key = keys[-1]
+                parent = keys[-2] if len(keys) > 1 else ""
+                dotted = f"{parent}.{key}" if parent else key
+                tests.append(lambda f, d=dotted: d in f.message)
+                if key not in _GENERIC_KEYS:
+                    pat = re.compile(rf"(?<![\w.]){re.escape(key)}\b")
+                    tests.append(lambda f, p=pat: bool(p.search(f.message)))
+            elif row.kind in ("section", "list") and keys:
+                pat = re.compile(rf"\b{re.escape(keys[-1])}\b")
+                tests.append(lambda f, p=pat: bool(p.search(f.message)))
+                items = self.vget(row.path)
+                labels = self._labels(items)
+                tests.append(lambda f, ls=labels: f.subject in ls
+                             or any(f.message.startswith(f"{lb}:") for lb in ls))
+            elif row.kind == "item":
+                labels = self._labels([self.vget(row.path)])
+                tests.append(lambda f, ls=labels: f.subject in ls
+                             or any(f.message.startswith(f"{lb}:") for lb in ls))
+            hit = [f.level for f in findings if any(t(f) for t in tests)]
+            if chk.LEVEL_ERROR in hit:
+                levels[idx] = chk.LEVEL_ERROR
+            elif hit:
+                levels[idx] = chk.LEVEL_WARN
+        return levels
+
+    @staticmethod
+    def _labels(items: Any) -> set:
+        labels = set()
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict):
+                for k in ("name", "display_name", "host"):
+                    if item.get(k):
+                        labels.add(str(item[k]))
+        labels.discard("")
+        return labels
 
     # -- page building ------------------------------------------------
 
@@ -524,15 +638,12 @@ class EditorModel:
         if row.kind == "option":
             self.edit_option(row)
         elif row.kind == "section":
-            self.pages.append(Page(row.spec.title, "section", row.path, row.spec))
-            self.cursor = 0
+            self._push(Page(row.spec.title, "section", row.path, row.spec))
         elif row.kind == "list":
-            self.pages.append(Page(row.spec.title, "list", row.path, row.spec))
-            self.cursor = 0
+            self._push(Page(row.spec.title, "list", row.path, row.spec))
         elif row.kind == "item":
             title = self._item_label(row.spec, self.doc.get(row.path), row.path[-1])
-            self.pages.append(Page(title, "section", row.path, row.spec))
-            self.cursor = 0
+            self._push(Page(title, "section", row.path, row.spec))
         elif row.kind == "scalar":
             self.edit_scalar(row)
         elif row.kind == "add":
@@ -540,10 +651,15 @@ class EditorModel:
         elif row.kind == "action":
             self.run_action(row)
 
+    def _push(self, page: Page) -> None:
+        self.pages[-1].cursor = self.cursor
+        self.pages.append(page)
+        self.cursor = 0
+
     def back(self) -> None:
         if len(self.pages) > 1:
             self.pages.pop()
-            self.cursor = 0
+            self.cursor = self.pages[-1].cursor
 
     # -- editing ------------------------------------------------------
 
@@ -585,8 +701,7 @@ class EditorModel:
             self.prompt = Prompt("choice", f"{opt.key}", done, options=choices)
             return
         if opt.kind == "list":
-            self.pages.append(Page(opt.key, "scalars", path, opt))
-            self.cursor = 0
+            self._push(Page(opt.key, "scalars", path, opt))
             return
         if opt.kind == "choice" and opt.choices:
             options = list(opt.choices)
@@ -692,9 +807,8 @@ class EditorModel:
         idx = self.doc.append(row.path, new)
         self._edited(f"added {spec.item.title.lower()}")
         path = row.path + (idx,)
-        self.pages.append(Page(self._item_label(spec.item, self.doc.get(path), idx),
-                               "section", path, spec.item))
-        self.cursor = 0
+        self._push(Page(self._item_label(spec.item, self.doc.get(path), idx),
+                        "section", path, spec.item))
 
     def delete_current(self) -> None:
         row = self.current_row()
@@ -850,6 +964,7 @@ class EditorModel:
         self._write_file()
 
     def _write_file(self) -> None:
+        n_changes = len(self.changes())
         try:
             existed = self.doc.path.exists()
             path = self.doc.save()
@@ -857,8 +972,8 @@ class EditorModel:
             self.flash(f"Save failed: {exc}", chk.LEVEL_ERROR)
             return
         backup = f" (previous version: {path.name}.bak)" if existed else ""
-        self.flash(f"Saved {path}{backup}. Apply with `systemctl reload "
-                   "eneru` or a restart.", chk.LEVEL_OK)
+        self.flash(f"Saved {n_changes} change(s) to {path}{backup}. Apply with "
+                   "`systemctl reload eneru` or a restart.", chk.LEVEL_OK)
 
     def request_quit(self) -> None:
         if not self.doc.modified:
@@ -1144,6 +1259,7 @@ def _draw_rows(win, model: EditorModel, x: int, top: int, bottom: int,
     visible = bottom - top - 2
     start = max(0, model.cursor - visible + 1) if visible > 0 else 0
     label_w = min(36, max(18, width // 3))
+    marks = model.row_levels(rows)
     for n, row in enumerate(rows[start:start + max(visible, 0)]):
         idx = start + n
         y = top + 2 + n
@@ -1157,6 +1273,11 @@ def _draw_rows(win, model: EditorModel, x: int, top: int, bottom: int,
             for k, line in enumerate(wrap(row.label, width - 4)[:2]):
                 safe_addstr(win, y + k, x + 2, line, gray)
             continue
+        mark = marks.get(idx)
+        if mark:
+            safe_addstr(win, y, x, "x" if mark == chk.LEVEL_ERROR else "!",
+                        curses.color_pair(C_STATUS_OB if mark == chk.LEVEL_ERROR
+                                          else C_BADGE_WARN) | curses.A_BOLD)
         label = row.label
         safe_addstr(win, y, x + 2, truncate_to_width(label, label_w
                     if row.kind == "option" else width - 4),
@@ -1180,7 +1301,11 @@ def _draw_review(win, model: EditorModel, x: int, top: int, bottom: int,
         safe_addstr(win, y, x + 2, row.label, attr | curses.A_BOLD)
         y += 1
     y += 1
-    lines = ["What happens on power loss:"] + [f"  {ln}" for ln in model.plan]
+    changes = model.changes()
+    lines = [f"Changes not yet saved ({len(changes)}):" if model.doc.modified
+             else f"Changes since the file was loaded ({len(changes)}):"]
+    lines += [f"  {c}" for c in changes] or ["  (none)"]
+    lines += ["", "What happens on power loss:"] + [f"  {ln}" for ln in model.plan]
     wrapped: List[str] = []
     for ln in lines:
         wrapped.extend(wrap(ln, width - 4))
@@ -1189,7 +1314,10 @@ def _draw_review(win, model: EditorModel, x: int, top: int, bottom: int,
         if y >= bottom:
             break
         bold = curses.A_BOLD if not ln.startswith("  ") else 0
-        safe_addstr(win, y, x + 2, ln, gray | bold)
+        attr = gray | bold
+        if ln.startswith(("  + ", "  - ", "  ~ ")):
+            attr = curses.color_pair(C_GOLD_BG)  # changed options stand out
+        safe_addstr(win, y, x + 2, ln, attr)
         y += 1
 
 
@@ -1316,7 +1444,8 @@ def draw(win, model: EditorModel) -> None:
                     f"need {MIN_W}x{MIN_H}. Q quits.")
         return
     _draw_header(win, model, width)
-    bottom_h = min(12, max(6, height // 3))
+    # The help + findings panel gets ~40% of the screen (at least 8 rows).
+    bottom_h = min(20, max(8, height * 2 // 5))
     main_bottom = height - 1 - bottom_h
     _draw_sidebar(win, model, 1, height - 1)
     x = SIDEBAR_W + 1

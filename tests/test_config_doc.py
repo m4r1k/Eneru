@@ -1006,3 +1006,20 @@ def test_reattach_concatenates_when_no_duplicate_newline(tmp_path):
     parent.ca.items["a"] = [None, None, cd._comment_token("  # x", 0), None]
     doc._reattach_comment(parent, 1, cd._comment_token("# y\n", 0), ("s",))
     assert parent.ca.items["a"][2].value == "  # x# y\n"
+
+
+@pytest.mark.unit
+def test_saved_view_tracks_the_file_on_disk(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    doc = ConfigDocument.load(p)
+    assert doc.saved_view() == {"a": 1}
+    doc.set(("a",), 2)
+    assert doc.saved_view() == {"a": 1}
+    doc.save()
+    assert doc.saved_view() == {"a": 2}
+    assert ConfigDocument.load(tmp_path / "new.yaml").saved_view() == {}
+    doc._original_text = "- a list\n"
+    assert doc.saved_view() == {}
+    doc._original_text = "a: [unclosed\n"
+    assert doc.saved_view() == {}

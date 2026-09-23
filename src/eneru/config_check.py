@@ -1070,6 +1070,13 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
         return out
     add(LEVEL_OK, f"SSH as {server.user}@{server.host} works ({latency} ms)")
     if server.is_host_loopback is True:
+        if not (server.expected_host_identity or "").strip():
+            # Same auto-population the daemon does at startup
+            # (RemoteHealthManager): read the bind-mounted identity file
+            # (default /etc/machine-id) from this container's filesystem.
+            from eneru.remote_health import _read_expected_identity_for_command
+            server.expected_host_identity = _read_expected_identity_for_command(
+                server.host_identity_command)
         id_ok, id_err, _ = run_loopback_identity_probe(server)
         if id_ok:
             add(LEVEL_OK, "host identity matches (loopback reaches THIS host)")

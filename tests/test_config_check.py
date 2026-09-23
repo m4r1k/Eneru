@@ -612,6 +612,33 @@ class TestProbeRemote:
             out = cc.probe_remote(config, srv)
         return out, rp
 
+    def test_loopback_identity_is_auto_populated_like_the_daemon(self, env, tmp_path):
+        # The daemon reads the bind-mounted identity file at startup
+        # (RemoteHealthManager); the checker must do the same before probing,
+        # or a correct /etc/machine-id mount reads as "identity unknown".
+        ident = tmp_path / "machine-id"
+        ident.write_text("abc123\n")
+        srv = server(is_host_loopback=True,
+                     host_identity_command=f"cat {ident}")
+        seen = {}
+
+        def probe(s):
+            seen["expected"] = s.expected_host_identity
+            return True, "", 1
+        with patch("eneru.remote_health.run_remote_probe", return_value=(True, "", 1)), \
+                patch("eneru.remote_health.run_loopback_identity_probe", side_effect=probe), \
+                patch.object(cc, "_run", return_value=(0, "", "")):
+            cc.probe_remote(Config(), srv)
+        assert seen["expected"] == "abc123"
+        # An explicit value is never overwritten.
+        srv2 = server(is_host_loopback=True, expected_host_identity="set",
+                      host_identity_command=f"cat {ident}")
+        with patch("eneru.remote_health.run_remote_probe", return_value=(True, "", 1)), \
+                patch("eneru.remote_health.run_loopback_identity_probe", side_effect=probe), \
+                patch.object(cc, "_run", return_value=(0, "", "")):
+            cc.probe_remote(Config(), srv2)
+        assert seen["expected"] == "set"
+
     def test_disabled(self, env):
         out, rp = self.run_probe(env, server(enabled=False))
         assert out[0].level == "info"

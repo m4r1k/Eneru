@@ -705,6 +705,15 @@ class ConfigDocument:
         text = self.dumps()
         return text.replace("\n", self.newline) if self.newline != "\n" else text
 
+    def saved_view(self) -> Dict[str, Any]:
+        """The last saved (or loaded) file as the daemon reads it; {} if new."""
+        import yaml
+        try:
+            data = yaml.safe_load(self._original_text) if self._original_text else None
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def changed_on_disk(self) -> bool:
         """True when someone else rewrote the file since we loaded/saved it."""
         if not self.existed or not self.path.exists():
