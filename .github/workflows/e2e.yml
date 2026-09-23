@@ -123,6 +123,8 @@ jobs:
           grep -Eq "^[[:space:]]*negative_missing_machine_id[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -Eq "^[[:space:]]*negative_missing_loopback[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -Eq "^[[:space:]]*accept_new_known_hosts_remote[[:space:]]+19194[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*container_config_edit_case[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -q "Test 68: in-container editor saves a writable config mount" tests/e2e/groups/loopback.sh
           grep -q "stop_vms" tests/e2e/groups/loopback.sh
           grep -q "stop_compose" tests/e2e/groups/loopback.sh
           grep -q "stop_containers_rootless" tests/e2e/groups/loopback.sh

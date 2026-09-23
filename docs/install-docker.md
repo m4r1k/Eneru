@@ -63,10 +63,33 @@ write the moment it starts:
 
 ```bash
 sudo mkdir -p /srv/eneru/{state,run,logs}
-sudo chown 10001:10001 /srv/eneru/{state,run,logs}
+sudo chown 10001:10001 /srv/eneru /srv/eneru/{state,run,logs}
 ```
 
-Drop a minimal config at `/srv/eneru/config.yaml`:
+**No config yet?** The image ships the guided editor, so you don't need
+Eneru installed on the host. It asks for the UPS, its NUT login, remote
+servers and notifications, explains every option, tests the connections,
+and writes `/srv/eneru/config.yaml` (owned by uid 10001, mode 0600):
+
+```bash
+docker run --rm -it --network host \
+    -v /srv/eneru:/srv/eneru:Z \
+    ghcr.io/m4r1k/eneru:latest \
+    config --config /srv/eneru/config.yaml
+```
+
+Use this one-off command only for the first setup. The `:Z` relabels
+`/srv/eneru` for this short-lived container; once the daemon is running,
+edit with `docker exec` instead (see [Edit the config later](#edit-the-config-later)).
+
+Or drop a minimal config at `/srv/eneru/config.yaml` by hand, then hand it
+to the container user:
+
+```bash
+sudo chown 10001:10001 /srv/eneru/config.yaml
+sudo chmod 0600 /srv/eneru/config.yaml
+```
+
 
 ```yaml
 ups:
@@ -97,7 +120,7 @@ docker run -d --name eneru \
     --restart unless-stopped \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
-    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
+    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
     -v /srv/eneru/run:/var/run/eneru:Z \
@@ -108,7 +131,8 @@ docker run -d --name eneru \
 On RHEL/Alma/Rocky the `:Z` SELinux relabel is required for the four
 **eneru-owned** mount sources (`/srv/eneru/...`). Use `:Z` (colon) for
 writable mounts and `:ro,Z` (comma, with Z as the second option) for
-read-only ones. A bare `,Z` on a writable mount is parsed by Docker as
+read-only ones (the config is writable so the editor can save it). A bare
+`,Z` on a writable mount is parsed by Docker as
 part of the destination path, and the mount silently lands at the
 wrong place.
 
@@ -129,11 +153,33 @@ services:
     network_mode: host
     volumes:
       - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — shared host file (see install-comparison.md)
-      - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
+      - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z
       - /srv/eneru/ssh:/var/lib/eneru/ssh:Z
       - /srv/eneru/state:/var/lib/eneru:Z
       - /srv/eneru/run:/var/run/eneru:Z
       - /srv/eneru/logs:/var/log/eneru:Z
+```
+
+The config is mounted **writable** (no `:ro`) so the editor inside the
+container can save it in place; the file must be owned by uid 10001.
+
+## Edit the config later
+
+```bash
+docker exec -it eneru eneru config          # guided editor, saves in place
+docker exec eneru eneru config check        # read-only inspection
+docker kill -s HUP eneru                    # hot-reload the saved config
+```
+
+The editor rewrites `/srv/eneru/config.yaml` through the bind mount and
+keeps the previous version as `/srv/eneru/state/config.yaml.bak` (the
+config's own directory inside the image isn't writable). If the editor
+reports the file as read-only, the mount still has `:ro` or the host file
+isn't owned by 10001:
+
+```bash
+sudo chown 10001:10001 /srv/eneru/config.yaml && sudo chmod 0600 /srv/eneru/config.yaml
+docker compose up -d eneru     # recreate after removing :ro from the mount
 ```
 
 ## Step 5: Verify

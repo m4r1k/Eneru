@@ -580,6 +580,86 @@ if [ -z "$NETWORK" ]; then
   exit 1
 fi
 echo ">>> Using Docker network: ${NETWORK}"
+# ======================================================================
+# Test 68: in-container editor saves a writable config mount in place
+# ======================================================================
+# 6.2: the documented container deployment mounts the config writable and
+# owned by uid 10001. `docker exec -it <ctr> eneru config` must save through
+# the single-file bind mount (same host inode, so the host file changes),
+# keep the previous version in the state volume (the image's
+# /etc/ups-monitor is not writable), and hot-reload on SIGHUP. A `:ro`
+# mount must stay untouched.
+container_config_edit_case() {
+  echo ""
+  echo ">>> Running: Test 68: in-container editor saves a writable config mount"
+  local dir=/tmp/e2e-oci-edit name=eneru-e2e-oci-edit
+  sudo rm -rf "$dir"
+  mkdir -p "$dir/state"
+  cat >"$dir/config.yaml" <<'YAML'
+# Operator comment that must survive the edit
+ups:
+  name: "TestUPS@nut-server"
+behavior:
+  dry_run: false   # flipped by the editor
+local_shutdown:
+  enabled: false
+remote_health:
+  enabled: false
+YAML
+  cp "$dir/config.yaml" "$dir/original.yaml"
+  sudo chown 10001:10001 "$dir/config.yaml" "$dir/state"
+  sudo chmod 0600 "$dir/config.yaml"
+  local inode_before
+  inode_before=$(stat -c %i "$dir/config.yaml")
+
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker run -d --name "$name" --network "$NETWORK" \
+    -v "$dir/config.yaml":/etc/ups-monitor/config.yaml \
+    -v "$dir/state":/var/lib/eneru \
+    eneru:e2e run --config /etc/ups-monitor/config.yaml >/dev/null
+  sleep 3
+
+  # Stage 2 (Safety) -> Enter toggles dry_run -> Save (y if asked) -> Quit
+  python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q' -- \
+    docker exec -it "$name" eneru config --basic >/tmp/test68a.log || true
+
+  sudo cat "$dir/config.yaml"
+  sudo grep -qE '^  dry_run: true +# flipped by the editor' "$dir/config.yaml" || {
+    echo "FAIL: in-container save did not reach the host file"; exit 1; }
+  sudo grep -q '^# Operator comment that must survive the edit' "$dir/config.yaml" || {
+    echo "FAIL: operator comment lost"; exit 1; }
+  [ "$(stat -c %i "$dir/config.yaml")" = "$inode_before" ] || {
+    echo "FAIL: config was replaced instead of rewritten in place"; exit 1; }
+  [ "$(sudo stat -c %a "$dir/state/config.yaml.bak")" = "600" ] || {
+    echo "FAIL: .bak missing from the state volume or not 0600"; exit 1; }
+  sudo cmp -s "$dir/original.yaml" "$dir/state/config.yaml.bak" || {
+    echo "FAIL: .bak does not hold the previous version"; exit 1; }
+
+  docker kill -s HUP "$name" >/dev/null
+  for _ in $(seq 1 15); do
+    docker logs "$name" 2>&1 | grep -q "SIGHUP received" && break
+    sleep 1
+  done
+  docker logs "$name" 2>&1 | grep -q "SIGHUP received" || {
+    docker logs "$name" 2>&1 | tail -30
+    echo "FAIL: container did not hot-reload on SIGHUP"; exit 1; }
+  docker rm -f "$name" >/dev/null
+
+  # A read-only mount: the editor opens it, but the file stays as it was.
+  sudo cp "$dir/config.yaml" "$dir/ro-before.yaml"
+  docker run -d --name "$name" --network "$NETWORK" \
+    -v "$dir/config.yaml":/etc/ups-monitor/config.yaml:ro \
+    -v "$dir/state":/var/lib/eneru \
+    eneru:e2e run --config /etc/ups-monitor/config.yaml >/dev/null
+  sleep 3
+  python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q|y' -- \
+    docker exec -it "$name" eneru config --basic >/tmp/test68b.log || true
+  sudo cmp -s "$dir/ro-before.yaml" "$dir/config.yaml" || {
+    echo "FAIL: a :ro config mount was modified"; exit 1; }
+  docker rm -f "$name" >/dev/null
+  echo "PASS: in-container editor saves writable mounts in place and respects :ro"
+}
+
 prepare_loopback_key
 echo ">>> Prepared loopback private key at /tmp/e2e-loopback-key"
 prepare_accept_new_ssh_material
@@ -597,5 +677,7 @@ echo ">>> Running: Test 57: E2E container remote accept-new learns host key and 
 accept_new_known_hosts_remote 19194
 echo ">>> Running: Test 61: E2E delegated poweroff delivery writes completion marker"
 delegated_completion_marker_case
+
+container_config_edit_case
 
 echo "PASS: E2E loopback root/sudo, delivery marker, accept-new SSH trust, and negative readiness checks passed"

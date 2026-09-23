@@ -18,6 +18,7 @@ Design:
 """
 
 import curses
+import errno
 import os
 import re
 from dataclasses import dataclass, field
@@ -253,6 +254,13 @@ class EditorModel:
         self.view: Dict[str, Any] = {}
         self.reset_stage()
         self.revalidate()
+        # Say it up front, not at Save time: a read-only config (e.g. a
+        # container bind mount with :ro, or a root-owned file) can be
+        # browsed and checked, but not saved.
+        self.read_only = not doc.writable()
+        if self.read_only:
+            self.flash(f"{doc.path} is read-only for this user: " +
+                       write_hint(), chk.LEVEL_ERROR)
 
     # -- stages -------------------------------------------------------
 
@@ -965,15 +973,20 @@ class EditorModel:
 
     def _write_file(self) -> None:
         n_changes = len(self.changes())
+        state_dir = (self.vget(("statistics", "db_directory"))
+                     or cat.STATISTICS_SECTION.children[0].default)
         try:
-            existed = self.doc.path.exists()
-            path = self.doc.save()
+            path = self.doc.save(backup_dir=state_dir)
         except OSError as exc:
-            self.flash(f"Save failed: {exc}", chk.LEVEL_ERROR)
+            hint = (f" {write_hint()}"
+                    if getattr(exc, "errno", None)
+                    in (errno.EACCES, errno.EPERM, errno.EROFS) else "")
+            self.flash(f"Save failed: {exc}.{hint}", chk.LEVEL_ERROR)
             return
-        backup = f" (previous version: {path.name}.bak)" if existed else ""
-        self.flash(f"Saved {n_changes} change(s) to {path}{backup}. Apply with "
-                   "`systemctl reload eneru` or a restart.", chk.LEVEL_OK)
+        backup = self.doc.last_backup
+        where = f" (previous version: {backup})" if backup else ""
+        self.flash(f"Saved {n_changes} change(s) to {path}{where}. {reload_hint()}",
+                   chk.LEVEL_OK)
 
     def request_quit(self) -> None:
         if not self.doc.modified:
@@ -984,6 +997,26 @@ class EditorModel:
             if yes:
                 self.quit = True
         self.prompt = Prompt("confirm", "Quit without saving your changes?", done)
+
+
+def _in_container() -> bool:
+    from eneru import runtime
+    return runtime._is_container_runtime(runtime._detect_runtime_context())
+
+
+def write_hint() -> str:
+    """How to make the config writable, for the deployment we're in."""
+    if _in_container():
+        return ("mount the config without :ro and `chown 10001:10001` it on "
+                "the host (see the container docs), then re-run.")
+    return "run `eneru config` as the file's owner (e.g. with sudo)."
+
+
+def reload_hint() -> str:
+    if _in_container():
+        return ("Apply with `docker kill -s HUP <container>` (hot reload) or "
+                "a restart.")
+    return "Apply with `systemctl reload eneru` or a restart."
 
 
 def _fmt_value_generic(value: Any) -> str:
@@ -1213,6 +1246,8 @@ def _draw_header(win, model: EditorModel, width: int) -> None:
     fill_row(win, 0, curses.color_pair(C_HEADER))
     mode = "BASIC" if model.mode == MODE_BASIC else "ADVANCED"
     state = "  [modified]" if model.doc.modified else ""
+    if getattr(model, "read_only", False):
+        state += "  [read-only]"
     new = "  (new file)" if not model.doc.path.exists() else ""
     text = (f"  Eneru v{__version__}  config editor  {mode}  "
             f"{model.doc.path}{new}{state}")

@@ -244,15 +244,18 @@ anything:
 
 ```bash
 sudo cp /etc/ups-monitor/config.yaml /srv/eneru/config.yaml
-# Read-only mount inside the container, so root ownership on the host
-# is fine. No chown required.
+# Writable mount (6.2+) so `docker exec -it eneru eneru config` can edit it
+# in place: hand it to the container user, private (it holds secrets).
+sudo chown 10001:10001 /srv/eneru/config.yaml
+sudo chmod 0600 /srv/eneru/config.yaml
 ```
 
 The Steps 4, 5, and 6 `docker run` examples below all source the config
 from `/srv/eneru/config.yaml`. If you'd rather keep editing in
 `/etc/ups-monitor/config.yaml` (because the package is staying around
-as a rollback path, say), swap that one bind-mount source back. Nothing
-else changes.
+as a rollback path, say), swap that one bind-mount source back and add
+`:ro` (the in-container editor then opens it read-only; edit on the host
+with `sudo eneru config`). Nothing else changes.
 
 ## Step 4: Pre-flight the container
 
@@ -265,7 +268,7 @@ just below Step 6:
 docker run --rm \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
-    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
+    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     ghcr.io/m4r1k/eneru:latest \
     validate --config /etc/ups-monitor/config.yaml
@@ -294,7 +297,7 @@ Rehearse the full sequence without firing any destructive command:
 docker run --rm \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
-    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
+    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     ghcr.io/m4r1k/eneru:latest \
     shutdown group --group "<your-ups-name>" --dry-run \
@@ -311,7 +314,7 @@ docker run -d --name eneru \
     --restart unless-stopped \
     --network host \
     -v /etc/machine-id:/etc/machine-id:ro \
-    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z \
+    -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z \
     -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z \
     -v /srv/eneru/state:/var/lib/eneru:Z \
     -v /srv/eneru/run:/var/run/eneru:Z \
@@ -359,7 +362,7 @@ services:
     network_mode: host        # daemon polls NUT and reaches the loopback
     volumes:
       - /etc/machine-id:/etc/machine-id:ro   # NEVER :Z — see warning above
-      - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
+      - /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z
       - /srv/eneru/ssh:/var/lib/eneru/ssh:Z
       - /srv/eneru/state:/var/lib/eneru:Z
       - /srv/eneru/run:/var/run/eneru:Z
@@ -441,7 +444,7 @@ row is folded by the next start.
 
 | Bind mount | What it holds |
 |---|---|
-| `-v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro` | Daemon configuration; decoupled from the package (see Step 3c). |
+| `-v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml` | Daemon configuration; decoupled from the package (see Step 3c). |
 | `-v /srv/eneru/state:/var/lib/eneru` | SQLite stats DB (samples, events, notifications). Persistent; do not skip. |
 | `-v /srv/eneru/run:/var/run/eneru` | Per-run state (battery history, shutdown flag, monitor state file). |
 | `-v /srv/eneru/logs:/var/log/eneru` | Forensic log file. |

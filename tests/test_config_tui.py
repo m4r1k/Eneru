@@ -1466,3 +1466,49 @@ def test_new_file_changes_include_the_seeded_defaults(tmp_path):
     tui.seed_new_document(doc)
     m = tui.EditorModel(doc)
     assert "+ behavior.dry_run: true" in m.changes()
+
+
+# --- container deployments ---------------------------------------------------
+
+def test_read_only_config_is_flagged_on_open(tmp_path):
+    doc = _doc(tmp_path, "config-minimal.yaml")
+    with patch.object(doc, "writable", return_value=False), \
+            patch.object(tui, "_in_container", return_value=True):
+        m = tui.EditorModel(doc)
+    assert m.read_only and m.message_level == chk.LEVEL_ERROR
+    assert "read-only" in m.message and "chown 10001:10001" in m.message
+    win = FakeWindow(40, 160)
+    with patch.object(curses, "color_pair", lambda n: n):
+        tui.draw(win, m)
+    assert "[read-only]" in win.dump()
+
+
+def test_hints_follow_the_deployment():
+    with patch.object(tui, "_in_container", return_value=True):
+        assert "chown 10001:10001" in tui.write_hint()
+        assert "docker kill -s HUP" in tui.reload_hint()
+    with patch.object(tui, "_in_container", return_value=False):
+        assert "sudo" in tui.write_hint()
+        assert "systemctl reload eneru" in tui.reload_hint()
+    with patch("eneru.runtime._detect_runtime_context", return_value="container (Docker)"):
+        assert tui._in_container()
+
+
+def test_save_permission_error_explains_the_fix(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    m.doc.set(("triggers", "low_battery_threshold"), 25)
+    with patch.object(m.doc, "save", side_effect=PermissionError(13, "Permission denied")), \
+            patch.object(tui, "_in_container", return_value=True):
+        m._write_file()
+    assert "Save failed" in m.message and "chown 10001:10001" in m.message
+    with patch.object(m.doc, "save", side_effect=OSError(28, "No space")):
+        m._write_file()
+    assert "No space" in m.message and "chown" not in m.message
+
+
+def test_save_message_names_where_the_backup_went(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    m.doc.set(("triggers", "low_battery_threshold"), 25)
+    m.revalidate()
+    m._write_file()
+    assert str(tmp_path / "config-minimal.yaml.bak") in m.message

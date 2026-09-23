@@ -120,7 +120,7 @@ sources need the correct SELinux label or the container user can't
 read them. Use `:Z` to relabel:
 
 ```bash
--v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro,Z
+-v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:Z
 -v /srv/eneru/ssh:/var/lib/eneru/ssh:Z
 -v /srv/eneru/state:/var/lib/eneru:Z
 ```

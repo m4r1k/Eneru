@@ -84,10 +84,15 @@ Homelabs, virtualization hosts (Proxmox, ESXi, libvirt), Docker/Podman container
 ```bash
 docker pull ghcr.io/m4r1k/eneru:latest
 
+# No config yet? Create one with the guided editor shipped in the image
+sudo install -d -o 10001 -g 10001 /srv/eneru
+docker run --rm -it --network host -v /srv/eneru:/srv/eneru:Z \
+  ghcr.io/m4r1k/eneru:latest config --config /srv/eneru/config.yaml
+
 docker run -d --name eneru \
   --restart unless-stopped \
   -p 9191:9191 \
-  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml:ro \
+  -v /srv/eneru/config.yaml:/etc/ups-monitor/config.yaml \
   -v /srv/eneru/state:/var/lib/eneru \
   -v /srv/eneru/run:/var/run/eneru \
   -v /srv/eneru/ssh:/var/lib/eneru/ssh \

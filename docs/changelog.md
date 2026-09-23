@@ -59,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allows the shutdown tools, add NOPASSWD rules for those custom commands:
   `eneru config check` shows which ones sudo would refuse.
 
+- **Container config is mounted writable so the editor can save it.** The
+  documented Docker/Podman samples drop `:ro` from the config mount, and the
+  host file is owned by the container user (`chown 10001:10001`, mode 0600).
+  `docker exec -it eneru eneru config` then saves in place through the
+  single-file bind mount, keeps the previous version in the state volume
+  (`/srv/eneru/state/config.yaml.bak`), and `docker kill -s HUP eneru`
+  hot-reloads it. A `:ro` mount keeps working for the daemon; the editor
+  opens it read-only and explains the fix. For a first setup, the image
+  runs the editor without Eneru installed on the host: `docker run --rm -it
+  --network host -v /srv/eneru:/srv/eneru:Z ghcr.io/m4r1k/eneru config
+  --config /srv/eneru/config.yaml`. Kubernetes ConfigMaps stay read-only.
+
 ### Removed
 
 - **RHEL 8 RPM packages are no longer built (breaking).** Starting with 6.2.0,

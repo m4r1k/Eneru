@@ -1023,3 +1023,83 @@ def test_saved_view_tracks_the_file_on_disk(tmp_path):
     assert doc.saved_view() == {}
     doc._original_text = "a: [unclosed\n"
     assert doc.saved_view() == {}
+
+
+# --- container deployments: single-file bind mount in a read-only dir -------
+
+def _eacces(*_a, **_k):
+    raise PermissionError(13, "Permission denied")
+
+
+@pytest.mark.unit
+def test_save_rewrites_in_place_when_the_directory_is_not_writable(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("a: 1\n")
+    inode = p.stat().st_ino
+    state = tmp_path / "state"
+    state.mkdir()
+    doc = ConfigDocument.load(p)
+    doc.set(("a",), 2)
+    real_open = os.open
+
+    def bak_open(path, *a, **k):
+        if str(path) == str(p) + ".bak":
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+    with patch.object(cd.tempfile, "mkstemp", side_effect=_eacces), \
+            patch.object(cd.os, "open", side_effect=bak_open):
+        doc.save(backup_dir=state)
+    assert p.read_text() == "a: 2\n" and p.stat().st_ino == inode
+    assert doc.last_backup == state / "config.yaml.bak"
+    assert (state / "config.yaml.bak").read_text() == "a: 1\n"
+    assert stat.S_IMODE((state / "config.yaml.bak").stat().st_mode) == 0o600
+
+
+@pytest.mark.unit
+def test_save_mkstemp_errors_that_are_not_permissions_propagate(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    doc = ConfigDocument.load(p)
+    with patch.object(cd.tempfile, "mkstemp", side_effect=OSError(28, "ENOSPC")):
+        with pytest.raises(OSError):
+            doc.save(backup=False)
+    new = ConfigDocument.load(tmp_path / "new.yaml")
+    new.set(("a",), 1)
+    with patch.object(cd.tempfile, "mkstemp", side_effect=_eacces):
+        with pytest.raises(PermissionError):
+            new.save()  # nothing to rewrite in place
+
+
+@pytest.mark.unit
+def test_backup_fails_when_no_location_is_writable(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    with patch.object(cd.os, "open", side_effect=_eacces):
+        with pytest.raises(PermissionError):
+            ConfigDocument._write_backup(p, tmp_path)
+    with patch.object(cd.os, "open", side_effect=OSError(28, "ENOSPC")):
+        with pytest.raises(OSError):
+            ConfigDocument._write_backup(p, tmp_path)
+
+
+@pytest.mark.unit
+def test_save_refuses_a_read_only_file_before_touching_anything(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    doc = ConfigDocument.load(p)
+    doc.set(("a",), 2)
+    with patch.object(cd.os, "access", return_value=False):
+        with pytest.raises(PermissionError):
+            doc.save(backup_dir=tmp_path)
+    assert not (tmp_path / "c.yaml.bak").exists()
+    assert p.read_text() == "a: 1\n"
+
+
+@pytest.mark.unit
+def test_writable_for_existing_and_new_files(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    assert ConfigDocument.load(p).writable()
+    assert ConfigDocument.load(tmp_path / "x" / "y" / "new.yaml").writable()
+    with patch.object(cd.os, "access", return_value=False):
+        assert not ConfigDocument.load(p).writable()

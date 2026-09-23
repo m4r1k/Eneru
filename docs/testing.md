@@ -332,7 +332,7 @@ The scenario files simulate online, on-battery, neutral/unknown, low-battery, FS
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 67 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 68 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check.
 
 | Test | Group | What it proves |
 |------|-------|----------------|
@@ -405,6 +405,7 @@ The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 67 numb
 | 65 | CLI | `eneru config check` against the real NUT server and SSH target: NUT name/login, SSH, `sudo -n -l`, PATH-augmented binaries, and a missing tool/runtime flagged red; a wrong UPS name lists the real ones; the custom command and shutdown command are never executed |
 | 66 | CLI | `eneru config` TUI driven through a pty (`tests/e2e/config-tui-driver.py`): an in-place edit changes one line, keeps the comment and writes `.bak`; a new file is 0600, explained, validates, and passes the live NUT check |
 | 67 | CLI | `use_sudo: true` runs a custom pre-shutdown command through `sudo -n` (a root-only `touch` succeeds), and without `use_sudo` it runs as the SSH user (the same `touch` fails) |
+| 68 | Loopback | `docker exec -it <ctr> eneru config` saves a writable config bind mount in place (same host inode, operator comment kept), keeps the `.bak` 0600 in the state volume, the container hot-reloads on SIGHUP, and a `:ro` mount stays untouched |
 | E1 | CLI | Bash, zsh, and fish shell completion output is syntactically usable |
 
 Every commit on the protected workflow has to prove the daemon works against real services. That means real NUT sockets, Dockerized SSH targets, a live SQLite database, rendered TUI output, validated production-shaped configs, and a full shutdown orchestration run. None of it depends on local developer state.

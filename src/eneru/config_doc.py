@@ -42,6 +42,18 @@ PER_GROUP_SECTIONS = ("remote_servers", "virtual_machines", "containers",
                       "filesystems")
 
 
+# "This directory/file isn't writable for us" (read-only mount, wrong owner).
+_NO_WRITE_ERRNOS = (errno.EACCES, errno.EPERM, errno.EROFS)
+
+
+def _write_in_place(target: Path, text: str) -> None:
+    """Rewrite ``target`` through its existing inode (bind-mount friendly)."""
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def _fsync_dir(path: Path) -> None:
     try:
         fd = os.open(str(path), os.O_RDONLY)
@@ -333,6 +345,7 @@ class ConfigDocument:
         self._original_text = original_text
         self._pending_trailing: List[Tuple[Any, Any]] = []
         self.newline = "\n"
+        self.last_backup: Optional[Path] = None
 
     # -- construction ---------------------------------------------------
 
@@ -724,25 +737,54 @@ class ConfigDocument:
         except OSError:
             return False
 
+    def writable(self) -> bool:
+        """Can this process rewrite the config file (or create it)?"""
+        target = Path(os.path.realpath(self.path))
+        if target.exists():
+            return os.access(target, os.W_OK)
+        parent = target.parent
+        while not parent.exists() and parent != parent.parent:
+            parent = parent.parent
+        return os.access(parent, os.W_OK)
+
     def save(self, path: Optional[Union[str, Path]] = None, *,
-             backup: bool = True) -> Path:
+             backup: bool = True,
+             backup_dir: Optional[Union[str, Path]] = None) -> Path:
         """Durably write the document; keep a private `.bak` of the old file.
 
-        The write goes to a temp file in the same directory (fsync'd, same
-        mode and owner as the original) that atomically replaces the target;
-        a symlinked config is written through to its real file. A single-file
-        bind mount (containers) can't be replaced, so it is rewritten in place.
+        ELI5: normally we write a fresh copy next to the file and swap it in
+        (a power cut mid-write can't leave half a config). In a container the
+        config is often a single-file bind mount inside a directory we may not
+        write to: then the copy can't be made next to it, so the file itself
+        is rewritten in place (same inode, so the host sees the change), and
+        the `.bak` goes to ``backup_dir`` (the persistent state volume).
+
+        A symlinked config is written through to its real file; mode and
+        owner of an existing file are kept. ``self.last_backup`` records
+        where the previous version went.
         """
         target = Path(os.path.realpath(path if path else self.path))
         text = self._serialized()
         target.parent.mkdir(parents=True, exist_ok=True)
         mode, owner = 0o600, None
+        self.last_backup = None
+        if target.exists() and not os.access(target, os.W_OK):
+            # Refuse before touching anything (no stray .bak for a :ro mount).
+            raise PermissionError(errno.EACCES, "config file is read-only for "
+                                  "this user", str(target))
         if target.exists():
             st = target.stat()
             mode, owner = st.st_mode & 0o777, (st.st_uid, st.st_gid)
             if backup:
-                self._write_backup(target)
-        fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+                self.last_backup = self._write_backup(target, backup_dir)
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.",
+                                       dir=str(target.parent))
+        except OSError as exc:
+            if exc.errno not in _NO_WRITE_ERRNOS or not target.exists():
+                raise
+            _write_in_place(target, text)
+            return self._saved(target, text)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                 fh.write(text)
@@ -757,10 +799,7 @@ class ConfigDocument:
                 if exc.errno not in (errno.EBUSY, errno.EXDEV):
                     raise
                 os.unlink(tmp)
-                with open(target, "w", encoding="utf-8", newline="") as fh:
-                    fh.write(text)
-                    fh.flush()
-                    os.fsync(fh.fileno())
+                _write_in_place(target, text)
             _fsync_dir(target.parent)
         except BaseException:
             try:
@@ -768,6 +807,9 @@ class ConfigDocument:
             except OSError:
                 pass
             raise
+        return self._saved(target, text)
+
+    def _saved(self, target: Path, text: str) -> Path:
         self.path = target
         self.existed = True
         self.modified = False
@@ -775,19 +817,34 @@ class ConfigDocument:
         return target
 
     @staticmethod
-    def _write_backup(target: Path) -> None:
-        # Created 0600 from the first byte (it holds the same secrets as the
-        # config); O_NOFOLLOW refuses a planted symlink.
-        bak = target.with_name(target.name + ".bak")
+    def _write_backup(target: Path,
+                      backup_dir: Optional[Union[str, Path]] = None) -> Path:
+        """Copy the current file to `<name>.bak`; return where it went.
+
+        Created 0600 from the first byte (it holds the same secrets as the
+        config); O_NOFOLLOW refuses a planted symlink. When the config's own
+        directory isn't writable, the copy goes to ``backup_dir``.
+        """
+        candidates = [target.with_name(target.name + ".bak")]
+        if backup_dir:
+            candidates.append(Path(backup_dir) / (target.name + ".bak"))
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(bak), flags, 0o600)
-        try:
-            os.fchmod(fd, 0o600)
-            with open(target, "rb") as src:
-                os.write(fd, src.read())
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        for i, bak in enumerate(candidates):
+            try:
+                fd = os.open(str(bak), flags, 0o600)
+            except OSError as exc:
+                if exc.errno in _NO_WRITE_ERRNOS and i + 1 < len(candidates):
+                    continue
+                raise
+            try:
+                os.fchmod(fd, 0o600)
+                with open(target, "rb") as src:
+                    os.write(fd, src.read())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return bak
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def snapshot(self) -> CommentedMap:
         """Deep copy for undo/cancel of a sub-editor."""

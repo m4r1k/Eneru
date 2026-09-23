@@ -94,6 +94,7 @@ shutdown view uses.
 
 ```bash
 sudo eneru config                      # edit /etc/ups-monitor/config.yaml (or create it)
+docker exec -it eneru eneru config     # container: edit the running daemon's config
 eneru config --config ./config.yaml    # another file
 eneru config --basic                   # skip the mode question
 eneru config --advanced
@@ -148,7 +149,9 @@ before you save.
   file.
 - **Symlinks and bind mounts.** A symlinked config is written through to its
   real file. A single-file bind mount (common in containers) can't be
-  replaced atomically, so it is rewritten in place. The owner, group and mode
+  replaced atomically, so it is rewritten in place, and when the config's
+  directory isn't writable the `.bak` goes to the state directory
+  (`statistics.db_directory`, `/var/lib/eneru` in the image). The owner, group and mode
   of an existing file are kept. If the file changed on disk while you were
   editing, the editor asks before overwriting it.
 - **New keys get an explanation.** When the editor adds a key (or creates a

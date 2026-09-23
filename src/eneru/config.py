@@ -1167,6 +1167,8 @@ class ConfigLoader:
 
             if path is None:
                 print("No config file found. Using default configuration.")
+                print("Create one with the guided editor: `eneru config` "
+                      "(container: see `docker run ... config` in the docs).")
                 return config
 
         # Load YAML
