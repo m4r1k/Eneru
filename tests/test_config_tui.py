@@ -15,6 +15,15 @@ from eneru.config_doc import ConfigDocument
 pytestmark = pytest.mark.unit
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+
+@pytest.fixture(autouse=True)
+def _host_independent_checks(monkeypatch):
+    """The editor re-runs the static check after every edit; its binary
+    lookups (upsc, virsh, ...) must not depend on what the CI runner or a
+    dev box has installed, or a missing `upsc` turns a clean save into a
+    "save anyway?" prompt. Tests that need a missing binary patch again."""
+    monkeypatch.setattr(chk, "command_exists", lambda _cmd: True)
 ENTER = 10
 ESC = 27
 
