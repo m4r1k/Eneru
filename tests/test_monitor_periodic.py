@@ -595,6 +595,24 @@ class TestObservedSelfTest:
         assert any("Observed UPS self-test: passed" in m for m in mon.logs)
 
     @pytest.mark.unit
+    def test_result_appearing_after_absent_is_recorded(self, store):
+        # Some drivers expose ups.test.result only after a test has run: the
+        # first real result must be news, not adopted as the baseline.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        for _ in range(3):
+            mon._check_observed_self_test({"ups.status": "OL"})
+        assert store.get_meta("self_test_observed_key") == "|<none>"
+        mon._check_observed_self_test(
+            {"ups.test.result": "Done and error", "ups.test.date": "09/23/2026"})
+        assert store.latest_self_test()["result_enum"] == "failed"
+
+    @pytest.mark.unit
+    def test_failed_poll_does_not_seed_empty_baseline(self, store):
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test(None)
+        assert not store.get_meta("self_test_observed_key")
+
+    @pytest.mark.unit
     def test_dedups_same_result(self, store):
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
         _seed_observed_baseline(store)  # F-096: first sight only seeds

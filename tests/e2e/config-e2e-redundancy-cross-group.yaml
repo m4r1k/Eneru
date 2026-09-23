@@ -52,7 +52,7 @@ redundancy_groups:
     remote_servers:
       - name: "Redundancy rack server"
         enabled: true
-        host: "localhost"
+        host: "127.0.0.1"  # distinct owner key from the UPS1 tier (host+user)
         user: "testuser"
         connect_timeout: 5
         command_timeout: 10

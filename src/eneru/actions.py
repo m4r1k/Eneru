@@ -71,7 +71,7 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'loginctl list-users --no-legend 2>/dev/null | '
         'awk \'$1+0 >= 1000 {{print $2}}\' | '
         'while read -r user; do '
-        '  sudo -u "$user" podman ps -q 2>/dev/null | _filter | '
+        '  sudo -u "$user" podman ps -q 2>/dev/null </dev/null | _filter | '
         '  xargs -r sudo -u "$user" podman stop -t $t 2>/dev/null; '
         'done; '
         'true'
@@ -85,15 +85,16 @@ REMOTE_ACTIONS: Dict[str, str] = {
         'wait={wait_interval}; '
         # F-105: one VM name per line, read verbatim. ``xargs`` split names
         # on spaces and aborted on quotes, skipping every remaining VM.
+        # ``</dev/null`` keeps sudo/virsh from reading the rest of the list.
         '{sudo}virsh list --name --state-running | while IFS= read -r vm; do '
-        '[ -n "$vm" ] && {sudo}virsh shutdown "$vm"; done; '
+        '[ -n "$vm" ] && {sudo}virsh shutdown "$vm" </dev/null; done; '
         # Bound the whole graceful-wait subprocess, including slow/hung status
         # probes. coreutils and BusyBox ``timeout`` use elapsed time, so NTP
         # wall-clock steps cannot shorten or extend the window. If ``timeout``
         # itself is absent, rc=127 falls through safely to force cleanup.
         'timeout "$t" sh -c \'while {sudo}virsh list --name --state-running | grep -q .; do sleep "$1"; done\' _ "$wait" 2>/dev/null || true; '
         '{sudo}virsh list --name --state-running | while IFS= read -r vm; do '
-        '[ -n "$vm" ] && {sudo}virsh destroy "$vm" 2>/dev/null; done; '
+        '[ -n "$vm" ] && {sudo}virsh destroy "$vm" </dev/null 2>/dev/null; done; '
         'true'
     ),
 

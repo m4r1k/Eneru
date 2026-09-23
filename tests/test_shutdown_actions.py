@@ -644,3 +644,28 @@ def test_stop_vms_handles_names_with_spaces_and_quotes(tmp_path):
     assert [c for c in calls if c.startswith("destroy|")] == \
         [f"destroy|{n}" for n in names]
     assert state.read_text() == ""
+
+
+@pytest.mark.unit
+def test_stop_vms_loop_body_cannot_eat_the_remaining_names(tmp_path):
+    """A `virsh shutdown` that reads stdin (sudo with use_pty/log_input
+    relays it) must not swallow the rest of the VM list."""
+    import os
+    import subprocess
+    from eneru.actions import render_action
+
+    names = ["a", "b", "c"]
+    log = tmp_path / "calls"
+    shim = tmp_path / "virsh"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'log="{log}"\n'
+        'case "$1" in\n'
+        '  list) [ -f "$log" ] || printf "a\\nb\\nc\\n";;\n'
+        '  shutdown) cat >/dev/null; printf "%s\\n" "$2" >> "$log";;\n'
+        "esac\n")
+    shim.chmod(0o755)
+    script = render_action("stop_vms", timeout=1, wait_interval=1)
+    env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+    subprocess.run(["sh", "-c", script], env=env, check=True, timeout=30)
+    assert log.read_text().splitlines() == names

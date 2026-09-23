@@ -78,6 +78,8 @@ SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
 # on every poll tick.
 SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
 SELF_TEST_ATTRIBUTION_SECONDS = 30
+# Observed-self-test baseline for a UPS that reports no ups.test.result yet.
+_NO_TEST_RESULT_KEY = "|<none>"
 # F-119: how long a poll waits for a running NUT control command before
 # polling without the per-UPS lock.
 UPSC_LOCK_WAIT_SECONDS = 1.0
@@ -2803,13 +2805,19 @@ class UPSGroupMonitor(
         if store is None or not getattr(store, "is_open", False):
             return
         raw = (ups_data or {}).get("ups.test.result")
-        if not raw:
-            return  # this UPS doesn't report a test result
-        date = (ups_data or {}).get("ups.test.date") or ""
-        key = f"{date}|{raw}"
         # Fingerprint of the last result Eneru already accounted for — via this
         # observer OR its own scheduled finalise (which stamps the same key).
         stored = store.get_meta("self_test_observed_key")
+        if not raw:
+            # Some drivers expose ups.test.result only after a test has run.
+            # Seed an empty baseline on the first good poll so the first
+            # result that appears later counts as news (R2 regression of
+            # F-096: it was otherwise adopted as the baseline and dropped).
+            if ups_data and not stored:
+                store.set_meta("self_test_observed_key", _NO_TEST_RESULT_KEY)
+            return  # this UPS doesn't report a test result (yet)
+        date = (ups_data or {}).get("ups.test.date") or ""
+        key = f"{date}|{raw}"
         if stored == key:
             return
         if not stored:

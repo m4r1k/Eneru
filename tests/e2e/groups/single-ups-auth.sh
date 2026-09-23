@@ -661,7 +661,10 @@ grep -q "requires API authentication" /tmp/test62-noauth.log \
 echo "PASS: self_test without auth is rejected at validation"
 
 # --- (B) passive observation: the UPS reports its own last self-test ---
-apply_scenario self-test-passed
+# Start on a UPS that reports no test result yet: the first poll on a fresh
+# stats DB only records a baseline (F-096), so the result must appear AFTER
+# Eneru is watching to count as a new observation.
+apply_scenario online-charging
 timeout 180s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test62-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
@@ -670,6 +673,18 @@ for _ in $(seq 1 30); do
   curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
   sleep 0.5
 done
+BASELINE=""
+for _ in $(seq 1 40); do
+  ST_DB=$(find "$ST_STATS_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
+  if [ -n "$ST_DB" ]; then
+    BASELINE=$(sqlite3 "$ST_DB" "SELECT value FROM meta WHERE key='self_test_observed_key';" 2>/dev/null || true)
+    [ -n "$BASELINE" ] && break
+  fi
+  sleep 0.5
+done
+[ "$BASELINE" = "|<none>" ] \
+  || { echo "FAIL: expected the empty self-test baseline, got '$BASELINE'"; cat /tmp/test62-daemon.log; exit 1; }
+apply_scenario self-test-passed
 
 # Poll the anonymous /api/v1/ups read until the observer has recorded the
 # device result into the selfTest block (record commits immediately).

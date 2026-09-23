@@ -153,9 +153,10 @@ spec:
             defaultMode: 0400
 ---
 # The API is plain HTTP and, with auth off, read-open (status, topology,
-# events). Only let the pods that need it reach port 9191; label your
-# Prometheus (or dashboard proxy) pods `eneru-client: "true"`. Egress is left
-# open: Eneru must reach NUT, SSH targets and notification services.
+# events). Only let the pods that need it reach port 9191: pods labelled
+# `eneru-client: "true"` in this namespace, and Prometheus in a namespace
+# labelled `eneru-client: "true"` (e.g. `monitoring`). Egress is left open:
+# Eneru must reach NUT, SSH targets and notification services.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -168,6 +169,9 @@ spec:
   ingress:
     - from:
         - podSelector:
+            matchLabels:
+              eneru-client: "true"
+        - namespaceSelector:
             matchLabels:
               eneru-client: "true"
       ports:
