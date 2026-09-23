@@ -235,8 +235,9 @@ class MultiUPSCoordinator:
         # rows already on disk from the previous process.
         self._cancel_prev_pending_lifecycle_rows(stats_dir)
 
-        if self._notification_worker:
-            self._notification_worker.send(
+        worker = self._notification_worker
+        if worker:
+            worker.send(
                 body=body, notify_type=notify_type, category="lifecycle",
             )
         # Always consume the markers so the next start doesn't replay
@@ -533,8 +534,9 @@ class MultiUPSCoordinator:
         notify_fn = None
         if self._notification_worker is not None:
             def notify_fn(body, typ):
-                if self._notification_worker is not None:
-                    self._notification_worker.send(body, typ, category="health")
+                worker = self._notification_worker
+                if worker is not None:
+                    worker.send(body, typ, category="health")
 
         manager = RemoteHealthManager(
             config=self.config,
@@ -619,7 +621,8 @@ class MultiUPSCoordinator:
         except Exception as e:
             label = group.ups.label
             self._log(f"❌  Monitor thread for {label} crashed: {e}")
-            if self._notification_worker:
+            worker = self._notification_worker
+            if worker:
                 # Pin to the monitor's store ONLY if it actually opened
                 # (the crash may have happened before _initialize_notifications
                 # got that far). Otherwise pass None so the worker can
@@ -628,7 +631,7 @@ class MultiUPSCoordinator:
                 store = getattr(monitor, "_stats_store", None)
                 if store is not None and getattr(store, "_conn", None) is None:
                     store = None
-                self._notification_worker.send(
+                worker.send(
                     f"❌  **Monitor Crashed:** {label}\nError: {e}",
                     "failure",
                     category="lifecycle",
@@ -815,8 +818,9 @@ class MultiUPSCoordinator:
                         "❌  Delegated host poweroff failed; shutdown "
                         f"sequence is incomplete: {details}"
                     )
-                    if self._notification_worker:
-                        self._notification_worker.send(
+                    worker = self._notification_worker
+                    if worker:
+                        worker.send(
                             "❌  **Shutdown Sequence Incomplete**\n"
                             f"Host poweroff delegation failed: {details}",
                             "failure",
@@ -833,14 +837,15 @@ class MultiUPSCoordinator:
                         "failed delegated local shutdown")
                     outcome = "failed"
                 else:
-                    if self._notification_worker:
-                        self._notification_worker.send(
+                    worker = self._notification_worker
+                    if worker:
+                        worker.send(
                             "✅  **Shutdown Sequence Complete**\n"
                             "Host poweroff delegated to loopback SSH.",
                             "failure",
                             category="shutdown_summary",
                         )
-                        self._notification_worker.flush(timeout=5)
+                        worker.flush(timeout=5)
                     # Tag as power-loss-triggered so the next start emits
                     # "📊  Recovered" (matches the single-UPS delegated path).
                     write_shutdown_marker(
@@ -854,15 +859,19 @@ class MultiUPSCoordinator:
                     self._log(f"🧪  [DRY-RUN] Would execute: {self.config.local_shutdown.command}")
                     self._clear_global_shutdown_flag("dry-run local shutdown")
                 else:
-                    if self._notification_worker:
-                        self._notification_worker.send(
+                    # F-122: read once; a SIGHUP reload disabling
+                    # notifications may null the attribute between send()
+                    # and flush(), which used to raise and skip the poweroff.
+                    worker = self._notification_worker
+                    if worker:
+                        worker.send(
                             "🛑  **Shutdown Sequence Complete**\nShutting down local server NOW.",
                             "failure",
                             category="shutdown_summary",
                         )
                         # Drain in flight before halt; lossless guarantee on
                         # what doesn't make it.
-                        self._notification_worker.flush(timeout=5)
+                        worker.flush(timeout=5)
                     else:
                         time.sleep(5)
                     # ISS-015: validate the poweroff command BEFORE writing the
@@ -885,8 +894,9 @@ class MultiUPSCoordinator:
                         # also notifies on an incomplete sequence so operators
                         # learn the host is still up rather than only seeing it
                         # in the journal.
-                        if self._notification_worker:
-                            self._notification_worker.send(
+                        worker = self._notification_worker
+                        if worker:
+                            worker.send(
                                 "❌  **Shutdown Sequence Incomplete**\n"
                                 "Host poweroff command is empty; the host is "
                                 "still up.",
@@ -935,8 +945,9 @@ class MultiUPSCoordinator:
                                 f"❌  ERROR: host poweroff command failed "
                                 f"(rc={rc}): {detail}; the host is still up."
                             )
-                            if self._notification_worker:
-                                self._notification_worker.send(
+                            worker = self._notification_worker
+                            if worker:
+                                worker.send(
                                     f"❌  **Shutdown Sequence Incomplete**\n"
                                     f"Host poweroff command failed (rc={rc}); "
                                     f"the host is still up.",
@@ -1088,10 +1099,11 @@ class MultiUPSCoordinator:
         also owns the dedup meta). ``@`` is still escaped to avoid Discord
         mentions in UPS names like ``ups@host``.
         """
-        if not self._notification_worker or not self._monitors:
+        worker = self._notification_worker
+        if not worker or not self._monitors:
             return
         escaped = body.replace("@", "@\u200B")   # zero-width space after @
-        return self._notification_worker.send(
+        return worker.send(
             body=escaped, notify_type=notify_type, category=category,
             store=getattr(self._monitors[0], "_stats_store", None),
             require_persistent=True,
@@ -1413,17 +1425,20 @@ class MultiUPSCoordinator:
         # Capturing first_store BEFORE stop() because stop() doesn't
         # actually clear the registered stores list, but doing it here
         # is symmetric with how we'll use it for the deferred handoff.
+        # F-122: one local read -- an API reload on another thread may null
+        # the attribute mid-exit.
+        worker = self._notification_worker
         first_store = None
-        if self._notification_worker is not None:
-            with self._notification_worker._stores_lock:
-                first_store = (self._notification_worker._stores[0]
-                               if self._notification_worker._stores else None)
-            self._notification_worker.flush(timeout=5)
-            self._notification_worker.stop()
+        if worker is not None:
+            with worker._stores_lock:
+                first_store = (worker._stores[0]
+                               if worker._stores else None)
+            worker.flush(timeout=5)
+            worker.stop()
 
         notif_id = None
-        if self._notification_worker and not upgrade_in_progress:
-            notif_id = self._notification_worker.send(
+        if worker and not upgrade_in_progress:
+            notif_id = worker.send(
                 body=body,
                 notify_type=notify_type,
                 category="lifecycle",
@@ -1442,16 +1457,16 @@ class MultiUPSCoordinator:
                     config_path=getattr(self.config, "config_path", None),
                     body=body,
                     notify_type=notify_type,
-                    worker=self._notification_worker,
+                    worker=worker,
                     log_fn=self._log,
                 )
-            elif self._notification_worker is not None:
+            elif worker is not None:
                 # CodeRabbit P1 (mirrored from monitor.py): no store
                 # registered means worker.send() returned None and the
                 # row never landed in SQLite. Ship eagerly via Apprise
                 # so the lifecycle stop isn't silently lost.
                 try:
-                    self._notification_worker._send_via_apprise_bounded(
+                    worker._send_via_apprise_bounded(
                         body, notify_type,
                     )
                 except Exception:

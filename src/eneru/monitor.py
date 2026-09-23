@@ -78,6 +78,9 @@ SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
 # on every poll tick.
 SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
 SELF_TEST_ATTRIBUTION_SECONDS = 30
+# F-119: how long a poll waits for a running NUT control command before
+# polling without the per-UPS lock.
+UPSC_LOCK_WAIT_SECONDS = 1.0
 # ISS-022: minimum interval between `upsc -l` ups.name diagnostics -- the
 # probe blocks the poll thread for up to ~10s, so a flapping NUT server is
 # probed at most once per window.
@@ -273,6 +276,8 @@ class UPSGroupMonitor(
         self._self_test_pending_id: Optional[int] = None
         self._self_test_poll_due_mono: Optional[float] = None
         self._self_test_outage_attributed = False
+        # F-119: one log line per episode of polling past a busy control lock.
+        self._upsc_lock_bypassed = False
         self._self_test_repair_done = False
         self._self_test_monitor_only_alerted = False
         self._self_test_failure_triggered = False
@@ -819,7 +824,9 @@ class UPSGroupMonitor(
                 the notification row.
         """
         del blocking  # see docstring
-        if not self._notification_worker:
+        # F-122: read once -- a reload may null the attribute concurrently.
+        worker = self._notification_worker
+        if not worker:
             return None
 
         # Prefix notification body with UPS name in multi-UPS mode.
@@ -828,7 +835,7 @@ class UPSGroupMonitor(
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
         escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
-        return self._notification_worker.send(
+        return worker.send(
             body=escaped_body,
             notify_type=notify_type,
             category=category,
@@ -1132,13 +1139,32 @@ class UPSGroupMonitor(
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self._poll_target, *args]
-        with nutctl.command_lock(self.config.ups.name):
+        # Polls share the per-UPS control lock so a read doesn't interleave
+        # with an INSTCMD/SET or a self-test issue (ee96ed9: "serialize NUT
+        # reads with control commands"). But a control command can hold that
+        # lock for up to nut_control.timeout, and back-to-back API commands
+        # almost continuously: power-event detection must never queue behind
+        # them (F-119). So wait briefly, then poll without the lock -- a rare
+        # slightly racy read beats a late OB/LB.
+        lock = nutctl.command_lock(self.config.ups.name)
+        acquired = lock.acquire(timeout=UPSC_LOCK_WAIT_SECONDS)
+        if not acquired and not self._upsc_lock_bypassed:
+            self._upsc_lock_bypassed = True
+            self._log_message(
+                "⏱️  A NUT control command is still running on "
+                f"{self.config.ups.label}; polling without waiting for it.")
+        elif acquired:
+            self._upsc_lock_bypassed = False
+        try:
             started = time.monotonic()
             # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
             # database" on stderr even for plain read-only polling. Suppress that
             # upstream noise so real connection/UPS-name errors stay visible.
             result = run_command(
                 cmd, env_overrides={"NUT_QUIET_INIT_SSL": "true"})
+        finally:
+            if acquired:
+                lock.release()
         elapsed = time.monotonic() - started
         self._record_upsc_latency(elapsed, cmd, full_poll=full_poll)
         return result
@@ -1745,8 +1771,11 @@ class UPSGroupMonitor(
                 # rather than always waiting the full 5s. Whatever doesn't
                 # drain stays in SQLite as 'pending' and ships on the
                 # next start (the lossless guarantee).
-                if self._notification_worker:
-                    self._notification_worker.flush(timeout=5)
+                # F-122: read once; a SIGHUP reload that disables
+                # notifications can null the attribute between check and use.
+                worker = self._notification_worker
+                if worker:
+                    worker.flush(timeout=5)
 
                 # Slice 3: tag this shutdown as power-loss-triggered so
                 # the next start can emit "📊  Recovered" and (with Slice
@@ -1897,8 +1926,11 @@ class UPSGroupMonitor(
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
                 )
-                if self._notification_worker:
-                    self._notification_worker.flush(timeout=5)
+                # F-122: read once; a SIGHUP reload that disables
+                # notifications can null the attribute between check and use.
+                worker = self._notification_worker
+                if worker:
+                    worker.flush(timeout=5)
                 from pathlib import Path
                 write_shutdown_marker(
                     Path(self.config.statistics.db_directory),
@@ -2137,11 +2169,12 @@ class UPSGroupMonitor(
             self._api_server.stop()
 
         if self._shutdown_guard_active():
-            if self._notification_worker:
+            worker = self._notification_worker
+            if worker:
                 # Mid-shutdown signal: still try to drain any in-flight
                 # rows; whatever's left persists for the next start.
-                self._notification_worker.flush(timeout=5)
-                self._notification_worker.stop()
+                worker.flush(timeout=5)
+                worker.stop()
             self._stop_stats()
             sys.exit(0)
 
@@ -2188,9 +2221,10 @@ class UPSGroupMonitor(
         # `_send_notification` still writes the row to SQLite (the
         # enqueue is a synchronous DB insert; only delivery requires the
         # worker thread).
-        if self._notification_worker:
-            self._notification_worker.flush(timeout=5)
-            self._notification_worker.stop()
+        worker = self._notification_worker
+        if worker:
+            worker.flush(timeout=5)
+            worker.stop()
 
         notif_id = None
         if not upgrade_in_progress:
@@ -2217,10 +2251,10 @@ class UPSGroupMonitor(
                     config_path=getattr(self.config, "config_path", None),
                     body=body,
                     notify_type=notify_type,
-                    worker=self._notification_worker,
+                    worker=worker,
                     log_fn=self._log_message,
                 )
-            elif self._notification_worker is not None:
+            elif worker is not None:
                 # CodeRabbit P1: stats DB open() failed (per the warning
                 # logged in _initialize_notifications), so notif_id is
                 # None and the row never landed in SQLite. Without this
@@ -2230,7 +2264,7 @@ class UPSGroupMonitor(
                 # coalescing in this degraded case, but the alternative
                 # is no notification at all).
                 try:
-                    self._notification_worker._send_via_apprise_bounded(
+                    worker._send_via_apprise_bounded(
                         body, notify_type,
                     )
                 except Exception:
@@ -2771,16 +2805,27 @@ class UPSGroupMonitor(
         raw = (ups_data or {}).get("ups.test.result")
         if not raw:
             return  # this UPS doesn't report a test result
-        enum = selftest.normalize_result(raw)
-        # Only persist a SETTLED, meaningful result. running/unknown churn while a
-        # test is in flight or was never run; unsupported is one-time noise.
-        if enum not in ("passed", "warning", "failed", "aborted"):
-            return
         date = (ups_data or {}).get("ups.test.date") or ""
         key = f"{date}|{raw}"
         # Fingerprint of the last result Eneru already accounted for — via this
         # observer OR its own scheduled finalise (which stamps the same key).
-        if store.get_meta("self_test_observed_key") == key:
+        stored = store.get_meta("self_test_observed_key")
+        if stored == key:
+            return
+        if not stored:
+            # F-096: first sight on this stats DB (new install, fresh container
+            # volume, DB reset). Whatever the UPS's logbook says was written
+            # BEFORE Eneru was watching -- possibly months ago, before a
+            # battery swap. Adopt it as the baseline instead of replaying it as
+            # news: an old "Done and error" must not arm the failed-test
+            # shutdown latch for every future outage. Only a CHANGE after this
+            # is a new observation.
+            store.set_meta("self_test_observed_key", key)
+            return
+        enum = selftest.normalize_result(raw)
+        # Only persist a SETTLED, meaningful result. running/unknown churn while a
+        # test is in flight or was never run; unsupported is one-time noise.
+        if enum not in ("passed", "warning", "failed", "aborted"):
             return
         # Never race the scheduled path: it owns the row for a test it issued.
         if self._self_test_pending_id is not None:
@@ -2942,9 +2987,19 @@ class UPSGroupMonitor(
             self._self_test_outage_attributed = already_attributed
             return
         self._notify_self_test_start(pending_id, row.get("command", ""))
+        on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
+        if already_attributed and not on_battery:
+            # F-097: the attributed battery interval just ended. This poll's
+            # OB->OL transition still belongs to the test (it is reported as the
+            # test's own return to line power), but the attribution must not
+            # outlive that interval: a test whose row never reaches a terminal
+            # result would otherwise relabel a real outage hours later as
+            # SELF_TEST_ON_BATTERY and silence its alerts and the T5 trigger.
+            self._self_test_outage_attributed = True
+            store.set_meta("self_test_attributed_id", "")
+            return
         recent_issue = (
             time.time() - row["started_ts"] <= SELF_TEST_ATTRIBUTION_SECONDS)
-        on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
         self._self_test_outage_attributed = (
             already_attributed or (on_battery and recent_issue))
         if self._self_test_outage_attributed:

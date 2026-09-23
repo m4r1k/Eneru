@@ -803,12 +803,93 @@ class TestShutdownSequence:
         monitor._shutdown_remote_servers = (
             lambda: call_order.append("remote") or [])
 
+        # F-137: real (non-dry-run) poweroff so the order spy can see it.
+        monitor.config.behavior.dry_run = False
+        monitor.config.local_shutdown.enabled = True
+
         # No raise: the sequence completes despite the VM step failing.
-        monitor._execute_shutdown_sequence()
+        with patch("eneru.monitor.run_command",
+                   side_effect=lambda *a, **k: call_order.append("poweroff")
+                   or (0, "", "")), \
+             patch("eneru.monitor.write_shutdown_marker"):
+            monitor._execute_shutdown_sequence()
 
         # Every drain step ran AND the remote/poweroff path was reached.
-        assert call_order == ["vms", "containers", "sync", "unmount", "remote"]
+        assert call_order == [
+            "vms", "containers", "sync", "unmount", "remote", "poweroff"]
         assert monitor._shutdown_progress.snapshot()["state"] == "failed"
+
+    @pytest.mark.unit
+    def test_local_poweroff_runs_after_remote_phase(self, tmp_path):
+        """F-137: the local host poweroff is the LAST step, after every drain
+        phase and the remote-server phase (remotes may depend on this host)."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+        monitor.config.virtual_machines.enabled = True
+        monitor.config.containers.enabled = True
+        monitor.config.filesystems.sync_enabled = True
+        monitor.config.filesystems.unmount.enabled = True
+        call_order = []
+        monitor._shutdown_vms = lambda: call_order.append("vms")
+        monitor._shutdown_containers = lambda: call_order.append("containers")
+        monitor._sync_filesystems = lambda: call_order.append("sync")
+        monitor._unmount_filesystems = lambda: call_order.append("unmount")
+        monitor._shutdown_remote_servers = (
+            lambda: call_order.append("remote") or [])
+
+        with patch("eneru.monitor.run_command",
+                   side_effect=lambda *a, **k: call_order.append("poweroff")
+                   or (0, "", "")), \
+             patch("eneru.monitor.write_shutdown_marker"):
+            monitor._execute_shutdown_sequence()
+
+        assert call_order == [
+            "vms", "containers", "sync", "unmount", "remote", "poweroff"]
+
+    @pytest.mark.unit
+    def test_flush_and_marker_precede_poweroff(self, tmp_path):
+        """F-128: the notification flush and the completion marker must both
+        land BEFORE the host poweroff -- once the halt runs, the queued
+        'Sequence Complete' message and the recovery marker are lost."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+        parent = MagicMock()
+        worker = MagicMock()
+        parent.attach_mock(worker.flush, "flush")
+        monitor._notification_worker = worker
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker") as write_marker:
+            parent.attach_mock(run_cmd, "poweroff")
+            parent.attach_mock(write_marker, "marker")
+            monitor._execute_shutdown_sequence()
+
+        names = [c[0] for c in parent.mock_calls]
+        assert names == ["flush", "marker", "poweroff"], names
+
+    @pytest.mark.unit
+    def test_reload_nulling_worker_mid_sequence_still_powers_off(self, tmp_path):
+        """F-122: a SIGHUP reload that disables notifications can land between
+        the worker truthiness check and ``.flush()`` (the handler runs between
+        bytecodes on the main thread). Re-reading the attribute used to raise
+        AttributeError and skip the host poweroff."""
+        monitor = self._prep_local_poweroff_monitor(tmp_path)
+        worker = MagicMock()
+
+        def reload_lands_here():
+            # Simulates _reload_notification_worker() disabling notifications.
+            monitor._notification_worker = None
+            return True
+
+        worker.__bool__ = MagicMock(side_effect=reload_lands_here)
+        monitor._notification_worker = worker
+
+        with patch("eneru.monitor.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.monitor.write_shutdown_marker"):
+            monitor._execute_shutdown_sequence()
+
+        run_cmd.assert_called_once()
+        worker.flush.assert_called_once_with(timeout=5)
 
     def _prep_local_poweroff_monitor(self, tmp_path):
         """Build a monitor wired for the real (non-dry-run) local poweroff
@@ -2505,10 +2586,14 @@ class TestWaitForInitialConnection:
         log = []
         monitor._log_message = log.append
 
-        # Always-fail get_all_ups_data, but skip the actual sleep
+        # Always-fail get_all_ups_data; skip the real 5 s waits (ISS-021 moved
+        # them from time.sleep to the stop event -- F-136).
         with patch.object(monitor, "_get_all_ups_data", return_value=(False, None, "err")), \
-             patch("eneru.monitor.time.sleep"):
+             patch.object(monitor._stop_event, "wait",
+                          return_value=False) as waits:
             monitor._wait_for_initial_connection()
+
+        assert waits.call_count == 5  # 6 attempts, no wait after the last
 
         assert any("Failed to connect" in m and "30s" in m for m in log), log
 
@@ -2999,6 +3084,30 @@ class TestTriggerImmediateShutdown:
     """`_trigger_immediate_shutdown` is the path low-battery / FSD /
     depletion fire when conditions become unsafe. Coverage: the wall(1)
     broadcast and the EMERGENCY_SHUTDOWN_INITIATED event log."""
+
+    @pytest.mark.unit
+    def test_in_flight_flag_set_at_admission(self, tmp_path):
+        """F-129: the sequence is marked in flight BEFORE the trigger's
+        notify/event/wall work, so a SIGTERM landing in that window is ignored
+        instead of sys.exit()-ing out of the emergency shutdown."""
+        import signal as _signal
+        monitor = make_monitor(tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._execute_shutdown_sequence = MagicMock()
+        seen = []
+
+        def sigterm_during_notify(*_a, **_k):
+            seen.append(monitor._shutdown_sequence_in_flight)
+            # Must return (ignored), not raise SystemExit.
+            monitor._cleanup_and_exit(_signal.SIGTERM, None)
+
+        monitor._send_notification = MagicMock(side_effect=sigterm_during_notify)
+
+        monitor._trigger_immediate_shutdown("battery 5% < threshold 20%")
+
+        assert seen == [True]
+        monitor._execute_shutdown_sequence.assert_called_once()
+        assert not monitor._stop_event.is_set()
 
     @pytest.mark.unit
     def test_wall_broadcast_fires_when_configured(self, tmp_path):
@@ -5434,6 +5543,40 @@ class TestUpscCommandSerialization:
 
         assert entered.is_set()
         assert finished.is_set()
+
+
+class TestUpscPollNeverStallsBehindControl:
+    """F-119: a long upscmd/upsrw holding the per-UPS lock must not delay
+    power-event detection beyond UPSC_LOCK_WAIT_SECONDS."""
+
+    @pytest.mark.unit
+    def test_poll_proceeds_without_lock_after_bounded_wait(
+            self, tmp_path, monkeypatch):
+        from eneru import nut_control
+        import eneru.monitor as monitor_mod
+
+        monitor = make_monitor(tmp_path)
+        monitor._log_message = MagicMock()
+        monkeypatch.setattr(monitor_mod, "UPSC_LOCK_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr("eneru.monitor.run_command",
+                            lambda *a, **k: (0, "ups.status: OB", ""))
+        lock = nut_control.command_lock(monitor.config.ups.name)
+        with lock:  # a control command that outlasts the wait
+            started = time.monotonic()
+            result = monitor._run_upsc([], full_poll=True)
+            waited = time.monotonic() - started
+            # Second poll in the same episode: no second log line.
+            monitor._run_upsc([], full_poll=True)
+        assert result == (0, "ups.status: OB", "")
+        assert waited < 2
+        logs = [c.args[0] for c in monitor._log_message.call_args_list]
+        assert sum("polling without waiting" in m for m in logs) == 1
+        # The lock was never released by the poll it didn't own.
+        assert lock.acquire(blocking=False)
+        lock.release()
+        # Lock free again: the episode ends, and a later bypass logs again.
+        monitor._run_upsc([], full_poll=True)
+        assert monitor._upsc_lock_bypassed is False
 
 
 class TestNominalPowerOverrideWarning:

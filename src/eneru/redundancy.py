@@ -206,7 +206,8 @@ class RedundancyGroupExecutor(
         # the redundancy executor doesn't own one — the worker falls
         # back to the first registered store, which in coordinator mode
         # is the first per-UPS monitor's DB.
-        if not self._notification_worker:
+        worker = self._notification_worker  # F-122: read once
+        if not worker:
             return
         prefixed = f"{self._log_prefix}{body}" if self._log_prefix else body
         # Match the monitor's @-escape so notifications can carry UPS@host
@@ -214,7 +215,7 @@ class RedundancyGroupExecutor(
         escaped = prefixed.replace("@", "@\u200B")
         # Redundancy-group shutdowns are always "during shutdown" by definition,
         # so notifications are non-blocking to avoid network-stall delays.
-        self._notification_worker.send(
+        worker.send(
             body=escaped, notify_type=notify_type, category=category,
             blocking=False,
         )

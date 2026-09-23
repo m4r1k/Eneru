@@ -573,12 +573,18 @@ class TestRunSelfTestTask:
 # _check_observed_self_test (v6.1.2 passive observation)
 # --------------------------------------------------------------------------
 
+def _seed_observed_baseline(store):
+    """Mark the UPS's logbook as already seen (F-096 first-sight baseline)."""
+    store.set_meta("self_test_observed_key", "baseline|seen before Eneru")
+
+
 class TestObservedSelfTest:
     @pytest.mark.unit
     def test_records_device_result(self, store):
         # A UPS that ran its own test (device schedule / manual) is recorded even
         # with self_test disabled — regardless of whether Eneru schedules tests.
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        _seed_observed_baseline(store)  # F-096: first sight only seeds
         mon._check_observed_self_test(
             {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
         latest = store.latest_self_test()
@@ -591,6 +597,7 @@ class TestObservedSelfTest:
     @pytest.mark.unit
     def test_dedups_same_result(self, store):
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        _seed_observed_baseline(store)  # F-096: first sight only seeds
         data = {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"}
         mon._check_observed_self_test(data)
         first = store.latest_self_test()["id"]
@@ -600,6 +607,7 @@ class TestObservedSelfTest:
     @pytest.mark.unit
     def test_new_test_records_again(self, store):
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        _seed_observed_baseline(store)  # F-096: first sight only seeds
         mon._check_observed_self_test(
             {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
         first = store.latest_self_test()["id"]
@@ -641,6 +649,7 @@ class TestObservedSelfTest:
     def test_records_without_date(self, store):
         # Some UPSes report a result but no ups.test.date.
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        _seed_observed_baseline(store)  # F-096: first sight only seeds
         mon._check_observed_self_test({"ups.test.result": "Battery test failed"})
         latest = store.latest_self_test()
         assert latest["result_enum"] == "failed"
@@ -652,10 +661,11 @@ class TestObservedSelfTest:
         # must NOT be stamped, so the next poll retries instead of silently
         # dropping a device result forever.
         mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        _seed_observed_baseline(store)  # F-096: first sight only seeds
         monkeypatch.setattr(store, "record_self_test", lambda *a, **k: None)
         mon._check_observed_self_test(
             {"ups.test.result": "done and passed", "ups.test.date": "2026-06-02"})
-        assert store.get_meta("self_test_observed_key") in (None, "")
+        assert store.get_meta("self_test_observed_key") == "baseline|seen before Eneru"
         # Recovery: once the write succeeds, it records + fingerprints.
         monkeypatch.undo()
         mon._check_observed_self_test(
@@ -871,6 +881,7 @@ class TestSelfTestRuntimeContract:
         mon = _make_monitor(_cfg(
             "notifications:\n  enabled: true\n"
             "  urls: ['json://notify.invalid']\nups:\n  name: U@h\n"), store)
+        _seed_observed_baseline(store)  # F-096: first sight only seeds
         notifications = []
         mon._send_notification = (
             lambda body, *args, **kwargs: notifications.append(body) or None)
@@ -924,3 +935,75 @@ class TestSelfTestRuntimeContract:
         mon._repair_historical_self_test_events()
         assert calls == [1]
         assert store.get_meta("self_test_event_repair_v1") == "1"
+
+
+class TestSelfTestReviewFixes:
+    """6.2.0 release review: F-096 (first sight seeds), F-097 (attribution
+    ends with its battery interval)."""
+
+    @pytest.mark.unit
+    def test_first_sight_of_old_failure_only_seeds_the_baseline(self, store):
+        # F-096 reviewer scenario: plain config, fresh stats DB, the UPS's own
+        # logbook still says a months-old test failed.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test(
+            {"ups.test.result": "Done and error", "ups.test.date": "01/02/2024"})
+        assert store.latest_self_test() is None
+        assert store.get_meta("self_test_failure_latched") in (None, "")
+        assert store.get_meta("self_test_observed_key") == "01/02/2024|Done and error"
+        # Same logbook entry again: still nothing.
+        mon._check_observed_self_test(
+            {"ups.test.result": "Done and error", "ups.test.date": "01/02/2024"})
+        assert store.latest_self_test() is None
+        # A NEW device-run failure after the baseline is the rc1 feature: it is
+        # recorded and arms the latch.
+        mon._check_observed_self_test(
+            {"ups.test.result": "Done and error", "ups.test.date": "09/23/2026"})
+        latest = store.latest_self_test()
+        assert latest["result_enum"] == "failed"
+        assert store.get_meta("self_test_failure_latched")
+
+    @pytest.mark.unit
+    def test_first_sight_seeds_even_a_running_entry(self, store):
+        # A test already in progress at first sight becomes the baseline; its
+        # completion is a change and gets recorded.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._check_observed_self_test({"ups.test.result": "In progress"})
+        assert store.get_meta("self_test_observed_key") == "|In progress"
+        mon._check_observed_self_test({"ups.test.result": "done and passed"})
+        assert store.latest_self_test()["result_enum"] == "passed"
+
+    @pytest.mark.unit
+    def test_attribution_ends_with_its_battery_interval(self, store):
+        # F-097: OB (test) -> OL -> OB again with the row still "running":
+        # the second OB is a real outage, not the test.
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._prepare_self_test_attribution(
+            {"ups.status": "OB", "ups.test.result": "In progress"})
+        assert mon._self_test_outage_attributed is True
+        test_id = store.latest_self_test()["id"]
+        assert store.get_meta("self_test_attributed_id") == str(test_id)
+        # Back on line: this transition still belongs to the test...
+        mon._prepare_self_test_attribution(
+            {"ups.status": "OL", "ups.test.result": "In progress"})
+        assert mon._self_test_outage_attributed is True
+        # ...but the attribution is released for good.
+        assert store.get_meta("self_test_attributed_id") == ""
+        # Later OB while the row never reached a terminal result.
+        row = store.get_self_test(test_id)
+        store._conn.execute(
+            "UPDATE self_tests SET started_ts = ? WHERE id = ?",
+            (row["started_ts"] - 3600, test_id))
+        mon._prepare_self_test_attribution(
+            {"ups.status": "OB", "ups.test.result": "In progress"})
+        assert mon._self_test_outage_attributed is False
+
+    @pytest.mark.unit
+    def test_normal_test_path_still_attributed_through_completion(self, store):
+        mon = _make_monitor(_cfg("ups:\n  name: U@h\n"), store)
+        mon._prepare_self_test_attribution(
+            {"ups.status": "OB", "ups.test.result": "In progress"})
+        assert mon._self_test_outage_attributed is True
+        mon._prepare_self_test_attribution(
+            {"ups.status": "OB", "ups.test.result": "In progress"})
+        assert mon._self_test_outage_attributed is True  # still the same interval
