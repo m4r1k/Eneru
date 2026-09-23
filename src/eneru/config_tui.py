@@ -681,13 +681,17 @@ class EditorModel:
 
     # -- editing ------------------------------------------------------
 
-    def _write(self, path: Tuple[Any, ...], value: Any, label: str) -> None:
+    def _write(self, path: Tuple[Any, ...], value: Any, label: str, *,
+               secret: bool = False) -> None:
         if value is _RESET:
             if self.doc.delete(path):
                 self._edited(f"{label} reset to its default")
             return
         self._write_through_scalar(path, value)
-        self._edited(f"{label} = {_fmt_value_generic(value)}")
+        # Never echo a password into the status bar (screen shares, tmux
+        # logs, PTY recordings): the input line and the row are masked too.
+        shown = "********" if secret and value else _fmt_value_generic(value)
+        self._edited(f"{label} = {shown}")
 
     def _write_through_scalar(self, path: Tuple[Any, ...], value: Any) -> None:
         """Handle list items that are a bare scalar (compose file, mount)."""
@@ -764,7 +768,7 @@ class EditorModel:
             ok, value, err = parse_input(opt, text)
             if not ok:
                 raise ValueError(err)
-            self._write(path, value, opt.key)
+            self._write(path, value, opt.key, secret=opt.kind == "secret")
         hint = " (empty = default)" if not opt.nullable else " (empty = unset)"
         self.prompt = Prompt("text", f"{opt.key}{hint}", done, buffer=start,
                              cursor=len(start), secret=opt.kind == "secret")

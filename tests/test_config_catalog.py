@@ -274,3 +274,41 @@ def test_help_for_path(path, expected):
 def test_help_for_legacy_docker_alias_uses_containers_help():
     assert cat.help_for_path(("docker", "stop_timeout")) == \
         cat.help_for_path(("containers", "stop_timeout"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path,good,bad", [
+    (("api", "auth", "session_ttl"), [1], [0]),
+    (("battery_health", "update_interval"), [1], [0]),
+    (("battery_health", "expected_life_years"), [1], [0.9]),
+    (("reports", "monthly_day"), [1, 31], [0, 32]),
+])
+def test_hand_written_bounds_match_the_loader(path, good, bad):
+    """The editor must accept exactly what ConfigLoader.validate_config accepts
+    for these hand-written bounds (drift guard)."""
+    from eneru.config import ConfigLoader
+    from eneru.config_tui import parse_input
+    opt = None
+    for p, o in cat.iter_options(cat.root_section(path[0]), (path[0],)):
+        if p == path:
+            opt = o
+    assert opt is not None
+
+    def loader_errors(value):
+        data = {}
+        node = data
+        for k in path[:-1]:
+            node = node.setdefault(k, {})
+        node[path[-1]] = value
+        config = ConfigLoader._parse_config(data)
+        msgs = ConfigLoader.validate_config(config, raw_data=data)
+        key = ".".join(path[-2:])
+        return [m for m in msgs if m.startswith("ERROR") and path[-1] in m
+                and (key in m or path[-1] in m)]
+
+    for v in good:
+        assert parse_input(opt, str(v))[0], (path, v)
+        assert not loader_errors(v), (path, v)
+    for v in bad:
+        assert not parse_input(opt, str(v))[0], (path, v)
+        assert loader_errors(v), (path, v)

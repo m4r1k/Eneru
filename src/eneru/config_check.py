@@ -766,6 +766,25 @@ _POWER_BINARIES = {"shutdown", "poweroff", "halt", "reboot", "synoshutdown",
                    "systemctl", "init"}
 
 
+def first_command_tokens(command: str) -> Tuple[Optional[List[str]], bool]:
+    """Quote-aware tokens of the first simple command, and "is it chained?".
+
+    Splits like the shell: an operator inside quotes (`sh -c 'a; b'`) is
+    data, only an unquoted `;`, `&` or `|` ends the first command.
+    """
+    lex = shlex.shlex(command or "", posix=True, punctuation_chars=";&|")
+    lex.whitespace_split = True
+    tokens: List[str] = []
+    try:
+        for tok in lex:
+            if tok and not tok.strip(";&|"):
+                return tokens, True
+            tokens.append(tok)
+    except ValueError:
+        return None, False
+    return tokens, False
+
+
 def command_binary(command: str) -> Tuple[Optional[str], bool, List[str]]:
     """Return (binary, via_sudo, args) for the first simple command.
 
@@ -773,10 +792,8 @@ def command_binary(command: str) -> Tuple[Optional[str], bool, List[str]]:
     to the operator. ``sudo`` options are skipped to find the real binary;
     ``args`` are the binary's own arguments (sudoers rules may pin them).
     """
-    head = re.split(r"[;&|]", command or "", maxsplit=1)[0]
-    try:
-        tokens = shlex.split(head)
-    except ValueError:
+    tokens, _chained = first_command_tokens(command)
+    if tokens is None:
         return None, False, []
     while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
         tokens.pop(0)
@@ -964,7 +981,7 @@ def command_checks(command: str, use_sudo: bool, *,
     if not binary:
         notes.append(f"could not parse '{command}'; nothing was checked")
         return [], notes
-    if via_sudo and re.search(r"[;&|]", command or ""):
+    if via_sudo and first_command_tokens(command)[1]:
         notes.append(
             f"'{command}': only its first command runs under sudo; wrap the "
             "rest yourself (e.g. sudo -n sh -c '...') if it needs root too.")

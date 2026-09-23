@@ -53,15 +53,12 @@ overrides:
       - python3
       - python3-pyyaml
       - nut-client
-    # python3-paho-mqtt is a SOFT dep on RPM. RHEL 10 doesn't ship it
-    # at all (not in BaseOS / AppStream / CRB / EPEL 10), so making it
-    # a hard `depends:` would break installation on RHEL 10. The MQTT
-    # publisher gracefully degrades when paho is missing (see
-    # src/eneru/mqtt.py), so RPM users who want MQTT install it via
-    # `pip install paho-mqtt` (use a venv or `--break-system-packages`
-    # on EL10 per PEP 668). RHEL 9 with EPEL still resolves the
-    # `recommends:` automatically.
-    # python3-bcrypt is a SOFT dep on RPM for the same EL10 reason as
+    # python3-paho-mqtt is a SOFT dep on RPM: it only exists in EPEL (RHEL 9
+    # and 10), and a hard `depends:` would break installation on hosts
+    # without EPEL. The MQTT publisher gracefully degrades when paho is
+    # missing (see src/eneru/mqtt.py); with EPEL enabled dnf resolves the
+    # `recommends:` automatically, otherwise `pip install paho-mqtt`.
+    # python3-bcrypt is a SOFT dep on RPM for the same EPEL-only reason as
     # python3-paho-mqtt above: it may not resolve on every EL target.
     # API auth is opt-in and src/eneru/auth.py lazy-imports bcrypt with an
     # actionable install hint, so a missing package degrades cleanly rather

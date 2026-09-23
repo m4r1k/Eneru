@@ -1134,3 +1134,27 @@ def test_convert_to_multi_keeps_root_section_headings(tmp_path):
     assert data["ups"][0]["remote_servers"] == [{"name": "nas"}]
     # The heading still sits right above local_shutdown at the root.
     assert "# === LOCAL SHUTDOWN ===\nlocal_shutdown:" in out
+
+
+@pytest.mark.unit
+def test_swap_items_keeps_the_block_between_items(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("l:\n  - name: a\n\n  # about b\n  - name: b\n\n# heading\nz: 1\n")
+    doc = ConfigDocument.load(p)
+    assert doc.swap_items(("l",), 0, 1)
+    out = doc.dumps()
+    assert "# about b" in out and "# heading" in out
+    import yaml
+    assert yaml.safe_load(out)["l"] == [{"name": "b"}, {"name": "a"}]
+
+
+@pytest.mark.unit
+def test_delete_then_set_does_not_resurrect_old_comments(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("s:\n  a: 1\n  b: 2  # eol b\n  c: 3\n")
+    doc = ConfigDocument.load(p)
+    doc.delete(("s", "b"))
+    assert "b" not in doc.data["s"].ca.items
+    doc.set(("s", "b"), 5)
+    out = doc.dumps()
+    assert "# eol b" not in out and "b: 5" in out

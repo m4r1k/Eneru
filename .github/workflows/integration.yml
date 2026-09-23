@@ -254,23 +254,10 @@ jobs:
 
           # RHEL 9/10: system python3 == 3.9+.
           dnf install -y ${{ matrix.python_pkg }}
-          # paho-mqtt SOFT dep, installed per-version because the distro story
-          # is uneven (see nfpm.yaml):
-          #   * RHEL 9 + EPEL ships python3-paho-mqtt for the system python3.
-          #   * RHEL 10 has no python3-paho-mqtt in BaseOS/AppStream/CRB/EPEL
-          #     10 at all. pip-install it; --break-system-packages is required
-          #     by PEP 668 since EL 10 marks site-packages externally managed
-          #     (acceptable in a throw-away CI container). ubi10 ships python3
-          #     without pip, so install python3-pip (AppStream) first.
-          case "${{ matrix.version }}" in
-            9)
-              dnf install -y python3-paho-mqtt
-              ;;
-            10)
-              dnf install -y python3-pip
-              python3 -m pip install --no-deps --break-system-packages paho-mqtt
-              ;;
-          esac
+          # paho-mqtt SOFT dep (see nfpm.yaml): EPEL ships python3-paho-mqtt
+          # for the system python3 on both RHEL 9 and RHEL 10 (EPEL is
+          # enabled above), so the distro package is what we verify.
+          dnf install -y python3-paho-mqtt
           # Try rpm first (fast, with --nodeps for the missing nut-client).
           # --nodeps is kept only because nut-client is absent in the minimal
           # UBI test images. If that fails for non-dep reasons, fall back to

@@ -305,10 +305,13 @@ mqtt:
 
 **TLS.** Set the broker URL to `mqtts://...` to enable TLS using the system trust store. Default port is 8883 unless explicitly given. mTLS / client certificates are not supported in v5.3.
 
-**Packaging.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it under `Recommends:` only because EPEL coverage is uneven: RHEL 9 + EPEL ships it for the system Python; RHEL 10 doesn't ship it at all. On RHEL 10, install paho via pip after installing eneru:
+**Packaging.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it under `Recommends:` only, so the install never fails without it. EPEL ships it for RHEL 9 and RHEL 10, and dnf pulls it in automatically when EPEL is enabled. Without EPEL, install it via pip after installing eneru:
 
 ```bash
-# RHEL 10 (PEP 668 — system site-packages externally managed):
+# With EPEL (RHEL 9 / 10):
+sudo dnf install python3-paho-mqtt
+
+# Without EPEL (PEP 668 — system site-packages externally managed):
 python3 -m pip install --break-system-packages paho-mqtt
 ```
 

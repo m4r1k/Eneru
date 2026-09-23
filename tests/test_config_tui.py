@@ -1519,3 +1519,12 @@ def test_save_message_names_where_the_backup_went(tmp_path):
     m.revalidate()
     m._write_file()
     assert str(tmp_path / "config-minimal.yaml.bak") in m.message
+
+
+def test_secret_value_is_masked_in_the_status_bar(tmp_path):
+    m = _model(tmp_path, "config-minimal.yaml")
+    goto(m, "ups")
+    select(m, lambda r: r.label == "password")
+    press(m, ENTER, "s3cret", ENTER)
+    assert "s3cret" not in m.message and "password = ********" in m.message
+    assert m.view["nut_control"]["password"] == "s3cret"

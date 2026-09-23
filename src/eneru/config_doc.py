@@ -244,7 +244,18 @@ def _attach_trailing_comment(node: Any, tok: Any) -> None:
     entry = container.ca.items.setdefault(key, [None, None, None, None])
     while len(entry) < 4:
         entry.append(None)
-    entry[_comment_pos(container)] = tok
+    pos = _comment_pos(container)
+    existing = entry[pos]
+    if existing is None:
+        entry[pos] = tok
+        return
+    # Merge, never replace: the slot may already hold the block that sits
+    # between two list items (e.g. after swap_items reorders them).
+    base = existing.value or ""
+    extra = tok.value or ""
+    if base.endswith("\n") and extra.startswith("\n"):
+        extra = extra[1:]
+    existing.value = base + extra
 
 
 def _comment_token(text: str, column: int) -> Any:
@@ -523,6 +534,10 @@ class ConfigDocument:
         # CommentedSeq.__delitem__ already re-keys the later items' comment
         # slots (ruamel 0.16+); shifting them again would misplace them.
         del parent[key]
+        if isinstance(parent, CommentedMap):
+            # CommentedMap keeps the deleted key's comment slot; a later set()
+            # of the same key would resurrect the old EOL comment/heading.
+            parent.ca.items.pop(key, None)
         if tok is not None:
             self._reattach_comment(parent, idx, tok, path[:-1])
         self.modified = True

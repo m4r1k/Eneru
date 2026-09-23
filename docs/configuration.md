@@ -426,10 +426,10 @@ needs a restart.
 
 `remote_health.probe_command` is rejected at validation time if it contains shell metacharacters (`;`, `|`, `&`, `$`, backtick, redirections, parentheses, or newlines) or any keyword in the dangerous-words blocklist. Probes are advisory: they never run pre-shutdown commands, VM/container shutdown commands, custom commands, or the configured `shutdown_command`.
 
-**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only. RHEL 9 + EPEL pulls it in automatically, but on RHEL 10 (no `python3-paho-mqtt` exists in BaseOS / AppStream / CRB / EPEL 10) you need to install it via pip after installing eneru:
+**MQTT on RHEL.** Debian/Ubuntu `.deb` packages install `python3-paho-mqtt` as a hard dependency. RPM packages list it as a `Recommends:` only. EPEL ships it for RHEL 9 and RHEL 10, so dnf pulls it in automatically when EPEL is enabled. Without EPEL, install it via pip after installing eneru:
 
 ```bash
-# RHEL 10 (PEP 668 — system site-packages externally managed):
+# Without EPEL (PEP 668 — system site-packages externally managed):
 python3 -m pip install --break-system-packages paho-mqtt
 ```
 

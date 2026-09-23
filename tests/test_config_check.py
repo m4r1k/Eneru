@@ -1354,3 +1354,16 @@ class TestCubicRound:
             out = cc.probe_ups(config, group)
         assert any("NUT login is incomplete" in f.message and f.level == "warning"
                    for f in out)
+
+
+class TestQuoteAwareCommands:
+    def test_quoted_operators_stay_in_the_argument(self):
+        assert cc.command_binary("sudo -n sh -c 'a; b'") == ("sh", True, ["-c", "a; b"])
+        checks, notes = cc.command_checks("sudo -n sh -c 'systemctl stop a; systemctl stop b'", True)
+        assert [c.kind for c in checks] == ["exists", "sudo"]
+        assert not [n for n in notes if "first command" in n]
+
+    def test_unquoted_operator_ends_the_first_command(self):
+        assert cc.first_command_tokens("a b && c") == (["a", "b"], True)
+        assert cc.first_command_tokens("a 'b|c'") == (["a", "b|c"], False)
+        assert cc.first_command_tokens("echo 'open") == (None, False)
