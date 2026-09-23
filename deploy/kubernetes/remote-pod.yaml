@@ -49,15 +49,21 @@ spec:
         limits:
           cpu: "200m"
           memory: "128Mi"
+      # exec probes run on 127.0.0.1, so they use the API's
+      # loopback-reserved connection slots (httpGet comes from the node IP).
       livenessProbe:
-        httpGet:
-          path: /health
-          port: http
+        exec:
+          command:
+            - "python"
+            - "-c"
+            - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/health', timeout=3).read()"
         initialDelaySeconds: 45
       readinessProbe:
-        httpGet:
-          path: /ready
-          port: http
+        exec:
+          command:
+            - "python"
+            - "-c"
+            - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/ready', timeout=3).read()"
         initialDelaySeconds: 45
       volumeMounts:
         - name: config
