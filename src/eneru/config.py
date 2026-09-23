@@ -279,8 +279,8 @@ class EnergyConfig:
     cost_per_kwh: Optional[float] = None
     currency: str = "USD"                # ISO 4217 code
     cost_format: Optional[str] = None    # e.g. "{value} €"; overrides the currency table
-    nominal_power: Optional[float] = None  # rated W fallback when NUT reports
-    # neither ups.realpower nor ups.realpower.nominal
+    nominal_power: Optional[float] = None  # rated W override used when NUT
+    # reports no ups.realpower; beats ups.realpower.nominal and ups.power.nominal
 
 
 @dataclass

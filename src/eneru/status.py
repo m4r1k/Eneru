@@ -217,8 +217,8 @@ def power_series(store: Any, start: int, end: int,
     """Per-sample power for the Energy chart: ``[{ts, loadPct, watts, estimated}]``.
 
     ``watts`` is ``ups.realpower`` when reported, else the ``load% * nominal``
-    fallback (``estimated=True``) using the sample's ``ups.power.nominal`` or the
-    configured ``nominal_fallback`` (``energy.nominal_power``), else ``None`` —
+    fallback (``estimated=True``) using the configured ``nominal_fallback``
+    (``energy.nominal_power``), else the sample's reported ratings, else ``None`` —
     the same rule energy.py uses for kWh, so the chart and the kWh figure agree.
     """
     if store is None:
@@ -402,10 +402,11 @@ def _redundancy_load(member_rows: List[dict], min_healthy: int,
     }
     real_ratings = []
     for row in member_rows:
-        rating = _finite_number(row.get("realPowerNominal"))
+        # Same precedence as energy: configured watts beat the reported rating.
+        energy = energy_by_name.get(row.get("name"), config.energy)
+        rating = _finite_number(getattr(energy, "nominal_power", None))
         if rating is None or rating <= 0:
-            energy = energy_by_name.get(row.get("name"), config.energy)
-            rating = _finite_number(getattr(energy, "nominal_power", None))
+            rating = _finite_number(row.get("realPowerNominal"))
         real_ratings.append(rating)
     apparent_ratings = [
         _finite_number(row.get("powerNominal")) for row in member_rows

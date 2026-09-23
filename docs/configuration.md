@@ -231,7 +231,7 @@ See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guid
 | `cost_per_kwh` | `null` | Optional tariff; `null` disables cost fields |
 | `currency` | `USD` | ISO 4217 code used to format costs |
 | `cost_format` | `null` | Optional format such as `{value} EUR` |
-| `nominal_power` | `null` | Rated watts fallback used after `ups.realpower.nominal` and before `ups.power.nominal` |
+| `nominal_power` | `null` | Rated watts used to estimate power from load%; overrides `ups.realpower.nominal` and `ups.power.nominal` (warns once if above the reported watt rating) |
 
 In list-form `ups:`, only `cost_per_kwh` and `nominal_power` may appear in a
 per-UPS `energy:` block. Missing keys inherit the global value; explicit `null`

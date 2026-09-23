@@ -106,16 +106,19 @@ class TestPowerSeries:
         assert out[0]["watts"] == 200.0 and out[0]["estimated"] is True
 
     @pytest.mark.unit
-    def test_power_series_prefers_reported_nominal_watts(self):
+    def test_power_series_prefers_configured_then_reported_watts(self):
         from eneru.status import power_series
 
         class _S:
             def power_samples(self, a, b):
                 return [(100, None, 50.0, 800.0, 1500.0)]
 
+        # Configured watts override the reported rating; without them the
+        # reported ups.realpower.nominal beats the VA rating.
         out = power_series(_S(), 0, 200, nominal_fallback=1000.0)
-        assert out[0]["watts"] == 400.0
+        assert out[0]["watts"] == 500.0
         assert out[0]["estimated"] is True
+        assert power_series(_S(), 0, 200)[0]["watts"] == 400.0
 
     @pytest.mark.unit
     def test_power_endpoint_route(self):

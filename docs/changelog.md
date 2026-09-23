@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [6.2.0-rc4] - 2026-09-23
 
+### Changed
+
+- **A configured `nominal_power` now overrides NUT's reported rating.** The
+  precedence is `ups.realpower`, then configured `nominal_power`, then
+  `ups.realpower.nominal`, then `ups.power.nominal`. A configured value above
+  the UPS's reported `ups.realpower.nominal` logs one warning (usually a VA
+  figure or a typo). A global `nominal_power` applies to every UPS without its
+  own, so mixed fleets should set it per UPS.
+  Estimated kWh and cost are computed from stored samples when read, so
+  existing today/month/year totals and reports are recalculated with the new
+  precedence after upgrading.
+
 ### Fixed
 
 - **Group energy cost gaps no longer read as kWh gaps.** A member with

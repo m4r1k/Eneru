@@ -337,9 +337,11 @@ energy:
   # symbol/placement table is used per currency code.
   cost_format: null
   # Rated watts used to estimate watts/kWh from load%. Precedence is reported
-  # ups.realpower, reported ups.realpower.nominal, this configured watt rating,
-  # then reported ups.power.nominal (VA). null leaves the reported ratings as
-  # the only fallbacks; energy stays "unknown" when none is usable.
+  # ups.realpower, then this configured watt rating (your explicit override),
+  # then reported ups.realpower.nominal, then ups.power.nominal (VA). A value
+  # above the UPS's reported ups.realpower.nominal logs a one-time warning
+  # (often a VA figure or a typo). null leaves the reported ratings as the only
+  # fallbacks; energy stays "unknown" when none is usable.
   # e.g. a UPS rated for 900 W: nominal_power: 900
   nominal_power: null
 

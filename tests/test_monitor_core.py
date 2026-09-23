@@ -5434,3 +5434,69 @@ class TestUpscCommandSerialization:
 
         assert entered.is_set()
         assert finished.is_set()
+
+
+class TestNominalPowerOverrideWarning:
+    """#98: configured nominal_power always wins; only a value ABOVE the
+    UPS's reported rating (likely a typo or VA) gets a one-time warning."""
+
+    def _monitor(self, tmp_path, nominal_power):
+        from eneru.config import EnergyConfig
+
+        monitor = make_monitor(tmp_path)
+        monitor.config.energy = EnergyConfig(nominal_power=nominal_power)
+        monitor._log_message = MagicMock()
+        return monitor
+
+    @staticmethod
+    def _warnings(monitor):
+        return [c.args[0] for c in monitor._log_message.call_args_list
+                if "nominal_power" in c.args[0]]
+
+    @pytest.mark.unit
+    def test_higher_configured_value_warns_once(self, tmp_path):
+        monitor = self._monitor(tmp_path, 1200)
+        for _ in range(3):
+            monitor._check_nominal_power_override(
+                {"ups.realpower.nominal": "1000"})
+        warnings = self._warnings(monitor)
+        assert len(warnings) == 1
+        assert "(1200 W)" in warnings[0] and "(1000 W)" in warnings[0]
+
+    @pytest.mark.unit
+    def test_warning_refires_when_values_change(self, tmp_path):
+        monitor = self._monitor(tmp_path, 1200)
+        monitor._check_nominal_power_override({"ups.realpower.nominal": "1000"})
+        monitor.config.energy.nominal_power = 1500  # reloaded config
+        monitor._check_nominal_power_override({"ups.realpower.nominal": "1000"})
+        assert len(self._warnings(monitor)) == 2
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(("configured", "reported"), [
+        (800, "1000"),     # lower: deliberate, silent
+        (1000, "1000"),    # equal
+        (1200, ""),        # NUT reports no watt rating
+        (1200, "n/a"),     # non-numeric
+        (1200, "0"),       # nonsensical zero rating
+        (None, "1000"),    # nothing configured
+    ])
+    def test_silent_cases(self, tmp_path, configured, reported):
+        monitor = self._monitor(tmp_path, configured)
+        monitor._check_nominal_power_override(
+            {"ups.realpower.nominal": reported})
+        assert self._warnings(monitor) == []
+
+    @pytest.mark.unit
+    def test_per_ups_override_is_the_effective_value(self, tmp_path):
+        from eneru.config import EnergyConfig
+
+        monitor = self._monitor(tmp_path, 1200)
+        monitor.config.ups_groups[0].energy = EnergyConfig(nominal_power=900)
+        monitor._check_nominal_power_override({"ups.realpower.nominal": "1000"})
+        assert self._warnings(monitor) == []
+
+    @pytest.mark.unit
+    def test_errors_never_escape(self, tmp_path):
+        monitor = self._monitor(tmp_path, 1200)
+        monitor._log_message = MagicMock(side_effect=RuntimeError("log down"))
+        monitor._check_nominal_power_override({"ups.realpower.nominal": "1000"})

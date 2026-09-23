@@ -451,7 +451,8 @@ assert [phase["id"] for phase in phases if phase["enabled"]] == ["remote"]
 PY
 
 # Issue #98: the per-UPS 800 W override must differ from UPS2's inherited
-# 1200 W default, and both configured watt ratings must beat reported VA.
+# 1200 W default, and both configured watt ratings must beat the dummy's
+# reported 1000 W ups.realpower.nominal (and its 1000 VA rating).
 POWER_SEEN=false
 # Keep the query in the raw-sample retention tier. A from=0 query is clamped
 # to five years and selects hourly rollups, which a fresh daemon has not made.
@@ -498,6 +499,16 @@ if [ "$POWER_SEEN" != true ]; then
   echo "FAIL: per-UPS energy overrides or redundancy telemetry were not published"
   cat /tmp/test63-power1.json /tmp/test63-power2.json \
     /tmp/test63-status.json 2>/dev/null || true
+  exit 1
+fi
+
+# Only UPS2's inherited 1200 W exceeds the reported 1000 W rating, so exactly
+# one override warning is logged; UPS1's lower 800 W stays silent.
+WARNINGS=$(grep -c "nominal_power (.* W) is above this UPS's reported" /tmp/test63.log || true)
+if [ "$WARNINGS" != "1" ] || \
+   ! grep -q "nominal_power (1200 W) is above this UPS's reported ups.realpower.nominal (1000 W)" /tmp/test63.log; then
+  echo "FAIL: expected exactly one nominal_power override warning (1200 W > 1000 W), got $WARNINGS"
+  tail -60 /tmp/test63.log
   exit 1
 fi
 

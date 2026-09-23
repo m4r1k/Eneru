@@ -10,8 +10,9 @@ maintain.
 For each sample, Eneru picks the power in watts in this order:
 
 1. `ups.realpower` (`real_power`), when the UPS reports it;
-2. `ups.load / 100 × ups.realpower.nominal`, flagged `estimated`;
-3. `ups.load / 100 × energy.nominal_power`, flagged `estimated`;
+2. `ups.load / 100 × energy.nominal_power`, flagged `estimated`. A configured
+   rating is your explicit override, so it wins over what NUT reports;
+3. `ups.load / 100 × ups.realpower.nominal`, flagged `estimated`;
 4. `ups.load / 100 × ups.power.nominal`, flagged `estimated`; or
 5. **unknown** when no usable load and rating are available (never silently `0`).
 
@@ -30,14 +31,21 @@ energy:
   cost_per_kwh: null            # null/unset => cost tracking is OFF entirely
   currency: USD                 # ISO 4217 code (USD, EUR, GBP, ...)
   cost_format: null             # optional override, e.g. "{value} €"
-  nominal_power: null           # rated watts fallback after NUT's nominal watts
-                                # and before NUT's nominal VA
+  nominal_power: null           # rated watts; overrides NUT's reported
+                                # nominal watts and VA
 ```
 
 In multi-UPS list form, `cost_per_kwh` and `nominal_power` can be overridden
 per UPS. Missing values inherit the global defaults; an explicit `null` clears
 an inherited optional value. `enabled`, `currency`, and `cost_format` remain
 global-only.
+
+A global `nominal_power` applies to every UPS that doesn't set its own, and
+it overrides each one's reported `ups.realpower.nominal`. In a mixed fleet, set
+the rating per UPS (or leave the global `null`) so a correct NUT rating isn't
+replaced by another unit's value. If a configured value is **above** the rating
+the UPS reports, Eneru logs one warning, because that is usually a VA figure or
+a typo. A lower value is treated as deliberate and accepted silently.
 
 ```yaml
 energy:
@@ -61,8 +69,8 @@ ups:
 Some integrated UPSes expose no usable watt rating. Set `energy.nominal_power`
 to the unit's rated **watts** and Eneru estimates
 `watts = (load% / 100) × nominal_power` (flagged `estimated`). This configured
-watt rating is used after `ups.realpower.nominal` and before the less precise
-`ups.power.nominal` VA fallback. The Energy tab's **Power (W)** line then plots,
+watt rating takes precedence over both `ups.realpower.nominal` and the less
+precise `ups.power.nominal` VA fallback. The Energy tab's **Power (W)** line then plots,
 and kWh/cost populate.
 
 ### Windows

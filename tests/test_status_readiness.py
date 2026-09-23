@@ -579,6 +579,32 @@ class TestRedundancyGroupStatus:
         }
 
     @pytest.mark.unit
+    def test_redundancy_load_configured_watts_beat_reported_rating(self):
+        from eneru.status import _redundancy_load
+
+        config = Config(
+            ups_groups=[
+                UPSGroupConfig(
+                    ups=UPSConfig(name="A"),
+                    energy=EnergyConfig(nominal_power=800),
+                ),
+                UPSGroupConfig(ups=UPSConfig(name="B")),
+            ],
+            energy=EnergyConfig(nominal_power=None),
+        )
+        rows = [
+            {"name": "A", "load": 50, "realPowerNominal": 2000},
+            {"name": "B", "load": 50, "realPowerNominal": 1000},
+        ]
+
+        load = _redundancy_load(rows, 1, config)
+
+        # A: configured 800 W beats NUT's 2000 W; B falls back to NUT 1000 W.
+        assert load["capacity"] == 800.0
+        assert load["draw"] == 900.0
+        assert load["unit"] == "W"
+
+    @pytest.mark.unit
     def test_redundancy_load_never_mixes_watts_and_va(self):
         group = RedundancyGroupConfig(
             name="rack", ups_sources=["UPS-A@host", "UPS-B@host"],

@@ -83,7 +83,9 @@ def power_sample_w(real_power: Optional[float],
         return float(real_power), False
     if ups_load is None or not math.isfinite(ups_load) or ups_load < 0:
         return None, False
-    for nominal in (real_power_nominal, nominal_fallback, power_nominal):
+    # The operator's configured rating is an explicit override, so it beats
+    # the device-reported watt rating; VA is the least precise fallback.
+    for nominal in (nominal_fallback, real_power_nominal, power_nominal):
         if nominal is not None and math.isfinite(nominal) and nominal > 0:
             return max(0.0, float(ups_load) / 100.0 * float(nominal)), True
     return None, False
@@ -116,9 +118,9 @@ def integrate_kwh(samples: List[PowerSample], *,
     raw tier (~1s) and the aggregate tiers (300s / 3600s) without the caller
     having to know which tier it fetched.
 
-    ``nominal_fallback`` (from the effective per-UPS energy config) is used
-    after ``ups.realpower.nominal`` and before the less precise
-    ``ups.power.nominal`` apparent-power fallback.
+    ``nominal_fallback`` (from the effective per-UPS energy config) is the
+    operator's override: it is used before ``ups.realpower.nominal`` and the
+    less precise ``ups.power.nominal`` apparent-power fallback.
     """
     if expected_interval_s is None or expected_interval_s <= 0:
         dts = [nxt[0] - cur[0] for cur, nxt in zip(samples, samples[1:])

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Tuple, List
 
 from eneru.version import __version__
-from eneru.config import Config, RemoteServerConfig
+from eneru.config import Config, RemoteServerConfig, resolve_energy_config
 from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
@@ -167,6 +167,9 @@ class UPSGroupMonitor(
         self.state = MonitorState()
         self._shutdown_progress = ShutdownProgress("ups", config.ups.name)
         self._pending_shutdown_reason = ""
+        # (configured, reported) watt pair last checked by
+        # _check_nominal_power_override, so the warning fires once per change.
+        self._nominal_power_checked: Optional[Tuple[float, float]] = None
         self.logger: Optional[UPSLogger] = logger
         self._coordinator_mode = coordinator_mode
         self._coordinator_handoff = (
@@ -2640,6 +2643,34 @@ class UPSGroupMonitor(
 
         # If connection_state == "FAILED": already notified, nothing to do
 
+    def _check_nominal_power_override(self, ups_data: Dict[str, str]) -> None:
+        """Warn once when configured nominal_power exceeds the UPS's own rating.
+
+        The configured watt rating always wins over ``ups.realpower.nominal``
+        (it's the operator's explicit override). A value ABOVE the device's
+        rating is usually a typo or a VA figure, so say so once; a lower value
+        is a deliberate choice and stays silent. Energy-only: never touches
+        the shutdown path.
+        """
+        try:
+            configured = resolve_energy_config(self.config).nominal_power
+            reported = ups_data.get('ups.realpower.nominal', '')
+            if configured is None or not is_numeric(reported):
+                return
+            pair = (float(configured), float(reported))
+            if pair == self._nominal_power_checked:
+                return
+            self._nominal_power_checked = pair
+            if pair[1] > 0 and pair[0] > pair[1]:
+                self._log_message(
+                    f"⚠️  energy.nominal_power ({pair[0]:g} W) is above this "
+                    f"UPS's reported ups.realpower.nominal ({pair[1]:g} W). "
+                    "Energy estimates use the configured value; check it "
+                    "isn't a VA rating."
+                )
+        except Exception:
+            pass
+
     def _run_periodic_tasks(self, ups_data: Optional[Dict[str, str]] = None) -> None:
         """End-of-iteration per-UPS periodic tasks (v6.1).
 
@@ -3554,6 +3585,8 @@ class UPSGroupMonitor(
                     self.state.latest_time_on_battery = 0
                 self.state.latest_update_time = time.time()
                 self.state.previous_status = ups_status
+
+            self._check_nominal_power_override(ups_data)
 
             # v6.1: time-gated per-UPS periodic tasks (battery-health update,
             # self-test). Failure-isolated so a scheduler hiccup can never
