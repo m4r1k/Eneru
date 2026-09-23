@@ -5,6 +5,7 @@ Owns the multi-server orchestration (sequential vs parallel batching by
 followed by the final shutdown command.
 """
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
-from eneru import utils as eneru_utils
+from eneru.remote_health import build_ssh_probe_command
 from eneru.utils import run_command
 
 # Per-command wall-clock buffer added on top of the configured timeout to absorb
@@ -179,20 +180,38 @@ def select_loopback_results(
     ]
 
 
+def with_sudo(command: str, use_sudo: bool) -> str:
+    """Prefix a remote command with ``sudo -n`` when ``use_sudo`` is set.
+
+    The ONE copy of this rule: the runtime and ``eneru config check`` both
+    call it, so the check always inspects the command that really gets sent
+    (F-124). Idempotent: a command whose first word already is sudo (any
+    whitespace after it, or an absolute path like ``/usr/bin/sudo``) is left
+    as written. ``sudoedit`` is a different program and is prefixed.
+    """
+    if not use_sudo:
+        return command
+    words = (command or "").split(None, 1)
+    if words and os.path.basename(words[0]) == "sudo":
+        return command
+    return f"sudo -n {command}"
+
+
 class RemoteShutdownMixin:
     """Mixin: SSH-based remote-server orchestration and shutdown."""
 
     @staticmethod
     def _with_sudo(command: str, use_sudo: bool) -> str:
-        """Prefix a remote command with sudo -n when configured.
+        """Thin alias of the module-level :func:`with_sudo` (shared with
+        ``eneru config check``)."""
+        return with_sudo(command, use_sudo)
 
-        The check is intentionally idempotent so existing configs that
-        already spell out ``sudo shutdown ...`` keep their exact command.
-        """
-        stripped = command.lstrip()
-        if not use_sudo or stripped.startswith("sudo "):
-            return command
-        return f"sudo -n {command}"
+    @staticmethod
+    def _step_use_sudo(server: RemoteServerConfig, cmd_config: Any) -> bool:
+        """A pre-shutdown step's effective sudo: its own override, else the
+        server's ``use_sudo`` (F-098). Unset (None) means inherit."""
+        override = getattr(cmd_config, "use_sudo", None)
+        return bool(server.use_sudo if override is None else override)
 
     def _track_remote_start(self, server: RemoteServerConfig) -> Optional[int]:
         tracker = getattr(self, "_shutdown_progress", None)
@@ -356,6 +375,10 @@ class RemoteShutdownMixin:
                     result.crashed = True
 
         # Phase B: non-loopback remotes (existing parallel phased path).
+        # F-118: a crash here must not skip Phase C (the host poweroff), the
+        # same "host always goes down" discipline Phases A and C already
+        # follow. The failure is remembered and re-raised AFTER Phase C.
+        phase_b_error: Optional[BaseException] = None
         try:
             for key in sorted_regular_keys:
                 phase_idx += 1
@@ -368,16 +391,11 @@ class RemoteShutdownMixin:
                 regular_results.extend(
                     self._shutdown_servers_parallel(phase_servers))
         except Exception as exc:
-            # Loopback rows start before Phase A. If peer orchestration itself
-            # crashes, close those rows before propagating the phase failure.
-            for lb in loopbacks:
-                result = loopback_results[id(lb)]
-                result.completed = False
-                result.error = str(exc)
-                result.crashed = True
-                self._track_remote_finish(
-                    result, loopback_generations[id(lb)])
-            raise
+            self._log_message(
+                f"  ❌  Remote-server phase crashed: {exc}; continuing to the "
+                "loopback poweroff"
+            )
+            phase_b_error = exc
 
         # Phase C: loopback poweroff — host goes down LAST.
         if has_loopback_post:
@@ -404,6 +422,9 @@ class RemoteShutdownMixin:
                 finally:
                     self._track_remote_finish(
                         loopback_results[id(lb)], loopback_generations[id(lb)])
+
+        if phase_b_error is not None:
+            raise phase_b_error
 
         results: List[RemoteShutdownResult] = (
             list(loopback_results.values()) + regular_results
@@ -693,46 +714,28 @@ class RemoteShutdownMixin:
         Returns:
             Tuple of (success, error_or_note)
         """
-        display_name = server.name or server.host
-
-        ssh_cmd = ["ssh"]
-
-        if server.ssh_key_path:
-            ssh_cmd.extend(["-i", server.ssh_key_path])
-
-        # Add configured SSH options. Three cases:
-        #   1. "-o KEY=VALUE" / "-o KEY VALUE" (single string with space):
-        #      split into two argv entries so ssh's getopt parser sees
-        #      flag and value separately.
-        #   2. Any other "-flag …" form (e.g. "-i", "-p"): pass through
-        #      unchanged. Multi-token flags like "-i /path/key" must be
-        #      provided as separate ssh_options entries by the user.
-        #   3. Bare "KEY=VALUE": prepend "-o" as the implicit form.
-        for opt in [*eneru_utils.runtime_default_ssh_options(server.ssh_options),
-                    *server.ssh_options]:
-            if opt.startswith("-o "):
-                ssh_cmd.extend(opt.split(None, 1))
-            elif opt.startswith("-"):
-                ssh_cmd.append(opt)
-            else:
-                ssh_cmd.extend(["-o", opt])
-
+        # F-095: ONE argv builder for health probes, `config check` and the
+        # real shutdown. ELI5: two people reading the same shopping list must
+        # read it the same way -- this path used to read `["-i", "/key"]` as
+        # two unrelated items (so the key path became the hostname) while the
+        # health probe read it correctly, so a remote could look healthy and
+        # still never shut down. The shared builder knows which flags take a
+        # separate value and rejects a dangling one.
+        #
         # Single lowest common injection point: BOTH the final shutdown_command
         # and every pre_shutdown_commands entry (custom commands AND the
         # REMOTE_ACTIONS templates), across the normal remote path AND the
-        # loopback-to-127.0.0.1 path, funnel through here before ssh. Prepend
-        # the PATH augmentation to the ONE argv element that carries the remote
-        # command string so it stays a single element (argv structure intact:
-        # `ssh <opts> user@host "<prefix><command>"`). The LOCAL, non-SSH
-        # execution paths never reach _run_remote_command, so they are
-        # correctly left untouched.
-        #
-        ssh_cmd.extend([
-            "-o", f"ConnectTimeout={server.connect_timeout}",
-            "-o", "BatchMode=yes",  # Prevent password prompts from hanging
-            f"{server.user}@{server.host}",
-            REMOTE_PATH_PREFIX + command,
-        ])
+        # loopback-to-127.0.0.1 path, funnel through here before ssh. The PATH
+        # augmentation is prepended to the ONE argv element that carries the
+        # remote command string, so argv stays `ssh <opts> -- user@host "<cmd>"`.
+        # The LOCAL, non-SSH execution paths never reach _run_remote_command.
+        try:
+            ssh_cmd = build_ssh_probe_command(server, REMOTE_PATH_PREFIX + command)
+        except ValueError as exc:
+            # A dangling option (e.g. a trailing "-i") is a config error for
+            # this server only: fail the step, never crash the sequence.
+            # ``capture`` stays untouched: ssh never ran.
+            return False, str(exc)
 
         # Add buffer to account for SSH connection overhead, unless a
         # shutdown-phase deadline requires a tighter cap. This prevents a
@@ -909,7 +912,7 @@ class RemoteShutdownMixin:
                     path=cmd_config.path or "",
                     skip_ids=skip_ids,
                     umount_targets=umount_targets,
-                    use_sudo=server.use_sudo,
+                    use_sudo=self._step_use_sudo(server, cmd_config),
                 )
                 description = action_name
 
@@ -921,7 +924,8 @@ class RemoteShutdownMixin:
                 # Idempotent: an explicit `sudo ...` is left as written. Only
                 # the first command of a pipeline/list is prefixed, exactly
                 # like the final shutdown_command.
-                command = self._with_sudo(cmd_config.command, server.use_sudo)
+                command = self._with_sudo(
+                    cmd_config.command, self._step_use_sudo(server, cmd_config))
                 # Truncate long commands for display
                 if len(command) > 50:
                     description = command[:47] + "..."

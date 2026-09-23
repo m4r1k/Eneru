@@ -414,6 +414,10 @@ class RemoteCommandConfig:
     # Loopback delegates ignore this field and derive mounts from the local
     # filesystems.unmount config so operators declare local mounts once.
     mounts: List[Dict[str, str]] = field(default_factory=list)
+    # Per-step sudo override (F-098). None = inherit the server's use_sudo;
+    # true/false forces it for this step only (e.g. `systemctl --user` or a
+    # `cd … &&` command that must run as the SSH user itself).
+    use_sudo: Optional[bool] = None
 
 
 @dataclass
@@ -1343,6 +1347,7 @@ class ConfigLoader:
                         timeout=cmd_data.get('timeout'),
                         path=cmd_data.get('path'),
                         mounts=mounts,
+                        use_sudo=cmd_data.get('use_sudo'),
                     ))
             is_loopback_explicit = 'is_host_loopback' in server_data
             is_loopback = (
@@ -2096,7 +2101,8 @@ class ConfigLoader:
                 "is_host_loopback", "host_identity_command",
                 "expected_host_identity",
             }
-            pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts"}
+            pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts",
+                                 "use_sudo"}
             depletion_keys = {"window", "critical_rate", "grace_period"}
             extended_time_keys = {"enabled", "threshold"}
             messages.extend(cls._unknown_key_errors(
@@ -3206,6 +3212,32 @@ class ConfigLoader:
                         f"ERROR: Remote server '{display}': use_sudo must be "
                         f"a boolean, got {server.use_sudo!r}"
                     )
+
+                for cmd_idx, cmd in enumerate(server.pre_shutdown_commands):
+                    if cmd.use_sudo is not None and not isinstance(cmd.use_sudo, bool):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': "
+                            f"pre_shutdown_commands[{cmd_idx}].use_sudo must be "
+                            f"true, false or unset, got {cmd.use_sudo!r}"
+                        )
+
+                # F-104: ssh reads a destination that starts with "-" as an
+                # option (`user: "-oProxyCommand=…"` runs a local command as
+                # root). Whitespace/control characters are never valid there
+                # either. The ssh builder also puts `--` before the
+                # destination; this catches the mistake at validation time.
+                for field_name, value in (("user", server.user),
+                                          ("host", server.host)):
+                    if not isinstance(value, str) or not value:
+                        continue
+                    if value.startswith("-") or any(
+                            ch.isspace() or ord(ch) < 32 or ord(ch) == 127
+                            for ch in value):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': {field_name} "
+                            f"{value!r} must not start with '-' or contain "
+                            "whitespace/control characters."
+                        )
 
                 if not isinstance(server.is_host_loopback, bool):
                     messages.append(

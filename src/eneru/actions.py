@@ -83,13 +83,17 @@ REMOTE_ACTIONS: Dict[str, str] = {
     "stop_vms": (
         't={timeout}; '
         'wait={wait_interval}; '
-        '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh shutdown; '
+        # F-105: one VM name per line, read verbatim. ``xargs`` split names
+        # on spaces and aborted on quotes, skipping every remaining VM.
+        '{sudo}virsh list --name --state-running | while IFS= read -r vm; do '
+        '[ -n "$vm" ] && {sudo}virsh shutdown "$vm"; done; '
         # Bound the whole graceful-wait subprocess, including slow/hung status
         # probes. coreutils and BusyBox ``timeout`` use elapsed time, so NTP
         # wall-clock steps cannot shorten or extend the window. If ``timeout``
         # itself is absent, rc=127 falls through safely to force cleanup.
         'timeout "$t" sh -c \'while {sudo}virsh list --name --state-running | grep -q .; do sleep "$1"; done\' _ "$wait" 2>/dev/null || true; '
-        '{sudo}virsh list --name --state-running | xargs -r -n1 {sudo}virsh destroy 2>/dev/null; '
+        '{sudo}virsh list --name --state-running | while IFS= read -r vm; do '
+        '[ -n "$vm" ] && {sudo}virsh destroy "$vm" 2>/dev/null; done; '
         'true'
     ),
 

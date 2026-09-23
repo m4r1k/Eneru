@@ -608,3 +608,39 @@ class TestNoDriftBetweenInProcessAndTemplates:
                 f"in-process binary '{binary}' maps to REMOTE_ACTIONS "
                 f"template '{template}' which is missing from actions.py"
             )
+
+
+@pytest.mark.unit
+def test_stop_vms_handles_names_with_spaces_and_quotes(tmp_path):
+    """F-105: every VM name is used verbatim. `xargs` used to split
+    `web prod` into two names and abort on a quote, skipping the rest."""
+    import os
+    import subprocess
+    from eneru.actions import render_action
+
+    names = ["web prod", "o'brien", "plain"]
+    state = tmp_path / "running"
+    state.write_text("\n".join(names) + "\n")
+    log = tmp_path / "calls"
+    shim = tmp_path / "virsh"
+    # list -> print the still-running names; shutdown -> ignore (stuck VM);
+    # destroy -> record the exact argv and remove the VM.
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'state="{state}"; log="{log}"\n'
+        'case "$1" in\n'
+        '  list) cat "$state";;\n'
+        '  shutdown) printf "shutdown|%s\\n" "$2" >> "$log";;\n'
+        '  destroy) printf "destroy|%s\\n" "$2" >> "$log";\n'
+        '           grep -vxF -- "$2" "$state" > "$state.tmp"; mv "$state.tmp" "$state";;\n'
+        "esac\n")
+    shim.chmod(0o755)
+    script = render_action("stop_vms", timeout=1, wait_interval=1)
+    env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
+    subprocess.run(["sh", "-c", script], env=env, check=True, timeout=30)
+    calls = log.read_text().splitlines()
+    assert [c for c in calls if c.startswith("shutdown|")] == \
+        [f"shutdown|{n}" for n in names]
+    assert [c for c in calls if c.startswith("destroy|")] == \
+        [f"destroy|{n}" for n in names]
+    assert state.read_text() == ""

@@ -239,6 +239,39 @@ In list-form `ups:`, only `cost_per_kwh` and `nominal_power` may appear in a
 per-UPS `energy:` block. Missing keys inherit the global value; explicit `null`
 clears it. See [Energy tracking](energy-tracking.md) for calculation details.
 
+## Battery health
+
+`battery_health` computes a 0-100 battery score and predicts when the battery
+is due for replacement. Global defaults can be overridden per UPS. Full
+explanation: [Battery health](battery-health.md).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Compute the score and prediction |
+| `update_interval` | `3600` | Seconds between score updates |
+| `nominal_runtime_seconds` | `null` | Expected full-charge runtime; `null` learns it at the first 100% reading |
+| `battery_install_date` | `null` | `YYYY-MM-DD`; `null` leaves the age term unavailable |
+| `expected_life_years` | `5.0` | Expected battery life |
+| `warn_score` / `critical_score` | `30.0` / `15.0` | Alert once when the score drops below each; `null` disables a tier |
+| `replacement.threshold_score` | `50.0` | Score at which the battery counts as due |
+| `replacement.horizon_days` | `90` | Warn when the due date is within this many days |
+| `replacement.min_history_days` | `14` | History needed before predicting |
+
+## Self-test
+
+Eneru always records the results of tests the UPS runs itself. `self_test`
+adds scheduled tests that Eneru issues (a write surface that needs API
+authentication). Overridable per UPS. Full explanation:
+[Self-test](self-test.md).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Issue a self-test on the schedule below |
+| `schedule` | `monthly` | `daily`, `weekly`, `monthly`, or `every <N>d/h/m` |
+| `time` | `"03:00"` | Wall-clock time for calendar schedules |
+| `command` | `test.battery.start` | Instant command to issue; must be listed by `upscmd -l` |
+| `result_poll_after` | `60` | Seconds after issuing before reading the result |
+
 ## Triggers
 
 | Key | Default | Description |
@@ -524,6 +557,7 @@ mounts:
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
 | `ssh_options` | `[]` | Extra SSH options. Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
+| `pre_shutdown_commands[].use_sudo` | unset | Per-step sudo: unset follows the server's `use_sudo`; `false` runs the step as the SSH user (e.g. `systemctl --user`, a `cd … &&` command), `true` forces `sudo -n` |
 | `pre_shutdown_commands[].mounts` | `[]` | Mounts for `action: unmount_filesystems` on ordinary remote servers. Loopback entries derive mounts from `filesystems.unmount.mounts` |
 | `shutdown_order` | unset | Explicit phase. Same value runs in parallel; higher values run later |
 | `parallel` | unset | Legacy mode. `false` runs before the default parallel batch. Mutually exclusive with `shutdown_order` |

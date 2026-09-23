@@ -79,6 +79,39 @@ that command. For the v5.5 host-loopback delegate, leave `mounts` unset:
 Eneru derives them from the local `filesystems.unmount.mounts` config so the
 host's local mounts are declared once.
 
+### `use_sudo` per step
+
+With `use_sudo: true` on the server, every step (predefined actions and
+custom commands) and the final shutdown command run through `sudo -n`. A
+command that already starts with `sudo` (or `/usr/bin/sudo`) is left as
+written, and only the first command of a pipeline or list is prefixed.
+
+Some steps must run as the SSH user itself: `systemctl --user`, `podman`
+for that user's containers, or a command that starts with a shell builtin
+or compound like `cd /opt/app && …`, `(a; b)`, `{ a; }` or `if …; fi`
+(`sudo -n cd` cannot work, since sudo only runs programs). Set `use_sudo`
+on that step to override the server's value:
+
+```yaml
+remote_servers:
+  - name: "App host"
+    enabled: true
+    host: "192.168.1.60"
+    user: "deploy"
+    use_sudo: true                      # default for every step below
+    pre_shutdown_commands:
+      - command: "systemctl --user stop app.service"
+        use_sudo: false                 # this one runs as `deploy`
+      - command: "cd /opt/app && docker compose down"
+        use_sudo: false                 # a shell builtin can't run under sudo
+      - action: "sync"                  # inherits use_sudo: true
+    shutdown_command: "shutdown -h now" # sent as `sudo -n shutdown -h now`
+```
+
+`eneru config check` applies the same rules: it checks each step's sudo rule
+with `sudo -n -l`, and flags a shell builtin or compound that would run
+under sudo.
+
 ## Ordering
 
 Use `shutdown_order` for dependencies. Servers with the same order run in parallel. Lower orders run first.

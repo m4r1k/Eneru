@@ -94,7 +94,11 @@ def is_safe_probe_command(command: str) -> bool:
 
 def build_ssh_probe_command(server: RemoteServerConfig,
                             probe_command: str) -> List[str]:
-    """Build an SSH argv for a remote health probe.
+    """Build the SSH argv for ``server`` running ``probe_command``.
+
+    The ONE builder: remote health probes, the loopback identity probe,
+    `eneru config check` and the real shutdown path (F-095) all use it, so
+    they can never disagree about how ``ssh_options`` are split.
 
     Raises:
         ValueError: If ``server.ssh_options`` ends with a flag that
@@ -129,6 +133,9 @@ def build_ssh_probe_command(server: RemoteServerConfig,
     ssh_cmd.extend([
         "-o", f"ConnectTimeout={server.connect_timeout}",
         "-o", "BatchMode=yes",
+        # F-104: `--` ends option parsing, so a user/host that starts with
+        # "-" (e.g. "-oProxyCommand=...") can never be read as an ssh option.
+        "--",
         f"{server.user}@{server.host}",
         probe_command,
     ])

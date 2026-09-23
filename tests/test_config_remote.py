@@ -249,6 +249,50 @@ remote_servers:
 
         assert any("use_sudo: true" in m for m in messages)
 
+    @staticmethod
+    def _sudo_messages(temp_config_file, raw):
+        temp_config_file.write_text(yaml.safe_dump(raw))
+        config = ConfigLoader.load(str(temp_config_file))
+        return ConfigLoader.validate_config(config, raw_data=raw)
+
+    @pytest.mark.unit
+    def test_use_sudo_must_be_a_boolean(self, temp_config_file):
+        """F-138/V1: a quoted "true" is not silently accepted as sudo."""
+        msgs = self._sudo_messages(temp_config_file, {"remote_servers": [{
+            "name": "NAS", "enabled": True, "host": "h", "user": "root",
+            "use_sudo": "true"}]})
+        assert any(m.startswith("ERROR") and "use_sudo must be a boolean" in m
+                   for m in msgs), msgs
+
+    @pytest.mark.unit
+    def test_absolute_sudo_path_counts_as_inline_sudo(self, temp_config_file):
+        """F-138/V3: `/usr/bin/sudo shutdown` covers the final command."""
+        msgs = self._sudo_messages(temp_config_file, {"remote_servers": [{
+            "name": "NAS", "enabled": True, "host": "h", "user": "ups",
+            "shutdown_command": "/usr/bin/sudo shutdown -h now"}]})
+        assert not any("Non-root users typically need" in m for m in msgs), msgs
+
+    @pytest.mark.unit
+    def test_disabled_non_root_server_does_not_warn(self, temp_config_file):
+        """F-138/V5: a disabled server never runs, so no sudo warning."""
+        msgs = self._sudo_messages(temp_config_file, {"remote_servers": [{
+            "name": "NAS", "enabled": False, "host": "h", "user": "ups",
+            "shutdown_command": "shutdown -h now"}]})
+        assert not any("Non-root users typically need" in m for m in msgs), msgs
+
+    @pytest.mark.unit
+    def test_redundancy_group_non_root_server_warns(self, temp_config_file):
+        """F-138/V6: redundancy-group remotes get the same sudo warning."""
+        msgs = self._sudo_messages(temp_config_file, {
+            "ups": [{"name": "A@h"}, {"name": "B@h"}],
+            "redundancy_groups": [{
+                "name": "rack", "ups_sources": ["A@h", "B@h"],
+                "remote_servers": [{"name": "NAS", "enabled": True, "host": "h",
+                                    "user": "ups",
+                                    "shutdown_command": "shutdown -h now"}]}]})
+        assert any("rack/NAS" in m and "Non-root users typically need" in m
+                   for m in msgs), msgs
+
     @pytest.mark.unit
     def test_non_root_shutdown_command_with_inline_sudo_does_not_warn(self, temp_config_file):
         """Inline sudo covers the configured final shutdown command."""
@@ -1388,3 +1432,50 @@ class TestHostLoopbackValidation:
         assert any(
             m.startswith("ERROR:") and "nonsense_key" in m for m in messages
         )
+
+
+@pytest.mark.unit
+class TestReleaseReviewRemoteValidation:
+    """6.2.0 release review: F-098 per-step use_sudo, F-104 destinations."""
+
+    def _messages(self, server):
+        from eneru.config import ConfigLoader
+        data = {"ups": {"name": "u@h"}, "remote_servers": [server]}
+        config = ConfigLoader._parse_config(data)
+        return ConfigLoader.validate_config(config, raw_data=data)
+
+    def test_step_use_sudo_is_parsed_and_validated(self):
+        from eneru.config import ConfigLoader
+        data = {"ups": {"name": "u@h"}, "remote_servers": [{
+            "name": "s", "enabled": True, "host": "h", "user": "u",
+            "pre_shutdown_commands": [
+                {"command": "a", "use_sudo": False},
+                {"command": "b"},
+                {"command": "c", "use_sudo": "yes-please"}]}]}
+        config = ConfigLoader._parse_config(data)
+        cmds = config.ups_groups[0].remote_servers[0].pre_shutdown_commands
+        assert [c.use_sudo for c in cmds] == [False, None, "yes-please"]
+        msgs = ConfigLoader.validate_config(config, raw_data=data)
+        errors = [m for m in msgs if m.startswith("ERROR")]
+        assert len(errors) == 1 and "pre_shutdown_commands[2].use_sudo" in errors[0]
+        assert not [m for m in msgs if "unknown config key" in m]
+
+    @pytest.mark.parametrize("field,value", [
+        ("user", "-oProxyCommand=touch /tmp/x"),
+        ("host", "-oProxyCommand=x"),
+        ("user", "bad user"),
+        ("host", "host\nname"),
+        ("host", "tab\there"),
+    ])
+    def test_option_like_or_whitespace_destinations_are_rejected(self, field, value):
+        server = {"name": "s", "enabled": True, "host": "h", "user": "u"}
+        server[field] = value
+        errors = [m for m in self._messages(server) if m.startswith("ERROR")]
+        assert any(f"{field} " in m and "must not start with '-'" in m
+                   for m in errors), errors
+
+    def test_normal_destinations_pass(self):
+        server = {"name": "s", "enabled": True, "host": "nas-1.lan",
+                  "user": "admin_user"}
+        assert not [m for m in self._messages(server)
+                    if "must not start with '-'" in m]
