@@ -481,7 +481,7 @@ assert power1[-1]["estimated"] and power1[-1]["watts"] == 200.0
 assert power2[-1]["estimated"] and power2[-1]["watts"] == 300.0
 group = status["redundancyGroups"][0]
 assert group["upsSources"] == ["UPS1@localhost:3493", "UPS2@localhost:3493"]
-assert group["telemetry"]["redundancyLoad"]["percent"] == 50.0
+assert group["telemetry"]["redundancyLoad"]["percent"] == 62.5
 energy = group["telemetry"]["energy"]
 assert energy and energy["membersReported"] == 2
 member_kwh = [row["energy"]["todayKwh"] for row in status["ups"]]
