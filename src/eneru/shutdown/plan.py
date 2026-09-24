@@ -15,7 +15,8 @@ the planner walks exactly this order so the two cannot silently diverge.
 """
 from typing import Any, Dict, List, Optional
 
-__all__ = ["PHASE_ORDER", "build_shutdown_plan"]
+__all__ = ["PHASE_ORDER", "build_shutdown_plan", "remote_phase_groups",
+           "pre_shutdown_label"]
 
 # Canonical phase order — mirrors monitor._execute_shutdown_sequence. Keep in
 # sync (test_shutdown_plan asserts the built plan follows this order).
@@ -56,6 +57,48 @@ def _local_skip(is_local: bool, delegated: bool, enabled: bool) -> Optional[str]
     if not enabled:
         return "disabled"
     return None
+
+
+def remote_phase_groups(servers: List[Any]) -> Dict[str, Any]:
+    """Group remote servers the way ``_shutdown_remote_servers`` walks them.
+
+    Returns ``{"loopbackPre": [...], "phases": [(order, [...]), ...],
+    "loopbackPost": [...]}``: loopback delegates that have pre-shutdown
+    commands drain first, then the regular servers by EFFECTIVE order
+    (``compute_effective_order``, so legacy ``parallel`` behaves exactly as at
+    runtime; one entry per distinct order, ascending, members in config
+    order and shut down in parallel), then every loopback's poweroff last.
+    Disabled servers are left out, as the executor does.
+    """
+    enabled = [s for s in servers if s.enabled]
+    loopbacks = [s for s in enabled if s.is_host_loopback is True]
+    regulars = [s for s in enabled if s.is_host_loopback is not True]
+    grouped: Dict[int, List[Any]] = {}
+    if regulars:
+        from eneru.monitor import compute_effective_order
+        for order, s in compute_effective_order(regulars):
+            grouped.setdefault(order, []).append(s)
+    return {
+        "loopbackPre": [lb for lb in loopbacks
+                        if getattr(lb, "pre_shutdown_commands", None)],
+        "phases": [(order, grouped[order]) for order in sorted(grouped)],
+        "loopbackPost": loopbacks,
+    }
+
+
+def pre_shutdown_label(cmd: Any) -> str:
+    """One pre-shutdown step, short: the action name (plus its compose path
+    or mount list) or the custom command text."""
+    if getattr(cmd, "action", None):
+        label = cmd.action
+        if getattr(cmd, "path", None):
+            label += f" {cmd.path}"
+        mounts = [m.get("path") for m in (getattr(cmd, "mounts", None) or [])
+                  if isinstance(m, dict) and m.get("path")]
+        if mounts:
+            label += f" ({', '.join(mounts)})"
+        return label
+    return getattr(cmd, "command", None) or "?"
 
 
 def build_shutdown_plan(config: Any, *, is_local: bool = True,

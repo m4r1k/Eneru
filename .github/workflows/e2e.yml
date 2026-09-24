@@ -263,6 +263,7 @@ jobs:
           grep -q "Test 69: remote shutdown with split ssh_options (-i/-p)" tests/e2e/groups/cli.sh
           grep -q 'docker exec eneru-e2e-ssh test -e /tmp/eneru-split-opts' tests/e2e/groups/cli.sh
           grep -q "Pinned Custom: sudo refuses it without a password: sudo allows 'touch /tmp/eneru-pinned-custom' without a password" tests/e2e/groups/cli.sh
+          grep -q 'expect "== Shutdown order =="' tests/e2e/groups/cli.sh
           grep -q 'docker exec eneru-e2e-ssh test -e /tmp/shutdown-invoked' tests/e2e/groups/cli.sh
           grep -q 'touch /tmp/shutdown-invoked' tests/e2e/ssh-target/Dockerfile
           grep -q '\[1/1\] touch /root/eneru-custom-nosudo failed:' tests/e2e/groups/cli.sh

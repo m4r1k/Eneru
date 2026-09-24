@@ -504,6 +504,10 @@ expect "Probe Target: 'eneru-path-probe' is installed"
 expect "Probe Target: failed: listing containers works"
 expect "Missing Tool: 'synoshutdown' is NOT installed"
 expect "What happens on power loss"
+# U8: the phased shutdown-order tree (who waits for whom).
+expect "== Shutdown order =="
+expect "Phase 2: 2 servers in parallel (no shutdown_order, default batch)  [waits for phase 1]"
+expect "Probe Target (testuser@localhost): sync -> stop_containers -> eneru-path-probe -> shutdown -h now"
 # Read-only guarantees: nothing custom ran, nothing was powered off.
 if docker exec eneru-e2e-ssh test -e /tmp/eneru-path-augmented; then
   echo "FAIL: config check EXECUTED a custom pre-shutdown command"; exit 1

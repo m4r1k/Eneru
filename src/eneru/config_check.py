@@ -103,6 +103,7 @@ class CheckReport:
     path: Optional[str] = None
     findings: List[Finding] = field(default_factory=list)
     plan: List[str] = field(default_factory=list)
+    order: List[str] = field(default_factory=list)
 
     def count(self, level: str) -> int:
         return sum(1 for f in self.findings if f.level == level)
@@ -1504,6 +1505,215 @@ def power_loss_plan(config: Config) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Shutdown order tree
+# ---------------------------------------------------------------------------
+#
+# ELI5: the power-loss preview above is the recipe card (every ingredient and
+# how long it takes). The order tree is the relay race: who runs which leg,
+# who runs side by side, and who must wait for the baton. Same kitchen (the
+# plan code), different card.
+
+_LOCAL_SHORT = {"vms": "stop VMs", "containers": "stop containers",
+                "filesystem-sync": "sync"}
+
+
+def _server_record(server: Any, index: int, order: Optional[int]) -> Dict[str, Any]:
+    from eneru.shutdown.plan import pre_shutdown_label
+    return {
+        "name": server.name or server.host,
+        "target": f"{server.user}@{server.host}" if server.user else server.host,
+        "index": index,
+        "order": order,
+        "shutdownOrder": server.shutdown_order,
+        "parallel": server.parallel,
+        "loopback": server.is_host_loopback is True,
+        "preShutdown": [pre_shutdown_label(c)
+                        for c in (server.pre_shutdown_commands or [])],
+        "shutdownCommand": server.shutdown_command or "shutdown",
+    }
+
+
+def _order_title(order: int, members: List[Any]) -> str:
+    if any(s.shutdown_order is not None for s in members):
+        return f"shutdown_order {order}"
+    if order < 0:
+        return "legacy parallel: false"
+    return "no shutdown_order, default batch"
+
+
+def _local_steps(plan: Dict[str, Any]) -> List[str]:
+    steps = []
+    for phase in plan["phases"]:
+        if not phase["enabled"]:
+            continue
+        if phase["id"] in _LOCAL_SHORT:
+            steps.append(_LOCAL_SHORT[phase["id"]])
+        elif phase["id"] == "filesystem-unmount" and phase["steps"]:
+            paths = [st["label"][len("Unmount "):] for st in phase["steps"]]
+            steps.append("unmount " + ", ".join(paths))
+    return steps
+
+
+def _final_title(plan: Dict[str, Any]) -> Optional[str]:
+    by_id = {p["id"]: p for p in plan["phases"]}
+    final = by_id["local-poweroff"]
+    sync = "final sync, then " if by_id["final-sync"]["enabled"] else ""
+    if final["enabled"] and plan.get("coordinatorMode"):
+        return (f"{sync}report done to the coordinator, which powers off "
+                "this host")
+    if final["enabled"]:
+        return f"{sync}this host powers off: {final['steps'][0]['detail']}"
+    if sync:
+        return "final sync"
+    return None
+
+
+def _poweroff_skip(plan: Dict[str, Any]) -> Optional[str]:
+    """Why the terminal poweroff step is skipped (None when it runs)."""
+    return next(p["skipped"] for p in plan["phases"]
+                if p["id"] == "local-poweroff")
+
+
+def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
+    """The shutdown order per group, as data (pure; the TUI order page reuses it).
+
+    Built from ``build_shutdown_plan`` (local steps, final sync, poweroff or
+    coordinator handoff) and ``remote_phase_groups`` (the executor's own
+    loopback bracket and ``compute_effective_order`` grouping). One record
+    per UPS group, then per redundancy group::
+
+        {"group": "Lab", "kind": "ups" | "redundancy",
+         "index": <position in config.ups_groups / config.redundancy_groups>,
+         "role": "protects this host" | "monitoring / remote-only"
+                 | "redundancy group",
+         "note": <plan note or None>,
+         "hostStaysOn": <True when local_shutdown.enabled is false>,
+         "disabled": [<names of enabled: false servers>],
+         "phases": [{"number": 1..N, "waitsFor": None | number - 1,
+                     "kind": "local" | "loopback-pre" | "remote"
+                             | "loopback-poweroff" | "final",
+                     "title": str, "order": <effective order> | None,
+                     "parallel": bool, "steps": [str],
+                     "servers": [{"name", "target", "index", "order",
+                                  "shutdownOrder", "parallel", "loopback",
+                                  "preShutdown": [str],
+                                  "shutdownCommand"}]}]}
+
+    Phases run strictly one after another. Servers inside a "remote" phase
+    run in parallel (``parallel`` is True when there are several); loopback
+    phases run their servers one after another. A server's ``index`` is its
+    position in that group's ``remote_servers`` list. Pass the output of
+    ``build_config`` for a 1:1 match with the file; after the ``eneru run``
+    preparation (which ``check_mapping`` applies), a container may add a
+    synthesized loopback entry and its generated pre-shutdown steps.
+    """
+    from eneru.shutdown.plan import remote_phase_groups
+    tree: List[Dict[str, Any]] = []
+    counters = {"ups": 0, "redundancy": 0}
+    for group in _all_groups(config):
+        is_ups = isinstance(group, UPSGroupConfig)
+        kind = "ups" if is_ups else "redundancy"
+        plan = _plan_for_group(config, group)
+        index_of = {id(s): i for i, s in enumerate(group.remote_servers)}
+        phases: List[Dict[str, Any]] = []
+
+        def add(pkind, title, *, servers=(), steps=(), order=None,
+                parallel=False):
+            n = len(phases) + 1
+            phases.append({
+                "number": n, "waitsFor": n - 1 if n > 1 else None,
+                "kind": pkind, "title": title, "order": order,
+                "parallel": parallel, "steps": list(steps),
+                "servers": [_server_record(s, index_of[id(s)], order)
+                            for s in servers]})
+
+        local = _local_steps(plan)
+        if local:
+            add("local", "this host", steps=local)
+        rp = remote_phase_groups(group.remote_servers)
+        if rp["loopbackPre"]:
+            add("loopback-pre", "loopback pre-actions, before any other server",
+                servers=rp["loopbackPre"])
+        for order, members in rp["phases"]:
+            add("remote", _order_title(order, members), servers=members,
+                order=order, parallel=len(members) > 1)
+        if rp["loopbackPost"]:
+            add("loopback-poweroff", "this host powers off via the loopback "
+                "delegate", servers=rp["loopbackPost"])
+        final = _final_title(plan)
+        if final:
+            add("final", final)
+        if is_ups:
+            role = ("protects this host"
+                    if (group.is_local or not config.multi_ups)
+                    else "monitoring / remote-only")
+        else:
+            role = "redundancy group"
+        tree.append({
+            "group": group.ups.label if is_ups else (group.name or "(unnamed)"),
+            "kind": kind, "index": counters[kind], "role": role,
+            "note": plan.get("note"),
+            "hostStaysOn": _poweroff_skip(plan) == "disabled",
+            "disabled": [s.name or s.host for s in group.remote_servers
+                         if not s.enabled],
+            "phases": phases})
+        counters[kind] += 1
+    return tree
+
+
+def _server_line(server: Dict[str, Any]) -> str:
+    chain = server["preShutdown"] + [server["shutdownCommand"]]
+    return f"{server['name']} ({server['target']}): {' -> '.join(chain)}"
+
+
+def format_order_tree(tree: List[Dict[str, Any]]) -> List[str]:
+    """Plain-text rendering of ``shutdown_order_tree`` (no colour needed)."""
+    lines = ["Phases run top to bottom; each waits for the one before it.",
+             "Servers in one phase shut down in parallel; each runs its "
+             "pre-shutdown steps (->) before its shutdown command."]
+    for group in tree:
+        head = "UPS" if group["kind"] == "ups" else "Redundancy group"
+        lines.append(f"{head} {group['group']} ({group['role']})")
+        if not group["phases"]:
+            lines.append("  Nothing to shut down: notify only.")
+        for phase in group["phases"]:
+            servers = phase["servers"]
+            title = phase["title"]
+            if phase["kind"] == "remote":
+                count = len(servers)
+                title = (f"{count} servers in parallel ({title})" if count > 1
+                         else f"1 server ({title})")
+            elif phase["kind"] == "local":
+                title = "this host (always first)"
+            elif phase["kind"] == "final":
+                title += " (always last)"
+            elif len(servers) > 1:
+                title += ", one after another"
+            wait = (f"  [waits for phase {phase['waitsFor']}]"
+                    if phase["waitsFor"] else "")
+            lines.append(f"  Phase {phase['number']}: {title}{wait}")
+            if phase["steps"]:
+                lines.append("      " + " -> ".join(phase["steps"]))
+            for i, server in enumerate(servers):
+                branch = "└─" if i == len(servers) - 1 else "├─"
+                if phase["kind"] == "loopback-pre":
+                    chain = " -> ".join(server["preShutdown"])
+                    text = f"{server['name']} ({server['target']}): {chain}"
+                elif phase["kind"] == "loopback-poweroff":
+                    text = (f"{server['name']} ({server['target']}): "
+                            f"{server['shutdownCommand']}")
+                else:
+                    text = _server_line(server)
+                lines.append(f"    {branch} {text}")
+        if group["hostStaysOn"]:
+            lines.append("  This host stays on (local_shutdown.enabled: false).")
+        if group["disabled"]:
+            lines.append("  Skipped (enabled: false): "
+                         + ", ".join(group["disabled"]))
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
 
@@ -1519,6 +1729,7 @@ def check_mapping(data: dict, *, path: Optional[str] = None,
     if probes:
         report.findings.extend(probe_findings(config))
     report.plan = power_loss_plan(config)
+    report.order = format_order_tree(shutdown_order_tree(config))
     return report
 
 
@@ -1573,6 +1784,10 @@ def format_report(report: CheckReport, *, color: bool = False,
         lines.append(_paint("== What happens on power loss ==", "1", color))
         # The plan quotes config commands verbatim: strip terminal escapes.
         lines.extend(f"  {clean(line)}" for line in report.plan)
+    if report.order:
+        lines.append("")
+        lines.append(_paint("== Shutdown order ==", "1", color))
+        lines.extend(f"  {clean(line)}" for line in report.order)
     lines.append("")
     errors = report.count(LEVEL_ERROR)
     warns = report.count(LEVEL_WARN)

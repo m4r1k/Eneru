@@ -924,6 +924,191 @@ class TestPlan:
 
 
 # ---------------------------------------------------------------------------
+# Shutdown order tree (U8)
+# ---------------------------------------------------------------------------
+
+def _srv(name, **kw):
+    base = {"name": name, "host": name, "user": "u", "enabled": True}
+    base.update(kw)
+    return base
+
+
+class TestOrderTree:
+    def test_legacy_parallel_matches_runtime_order(self, env):
+        from eneru.monitor import compute_effective_order
+        cfg = build({"ups": {"name": "u@h"},
+                     "remote_servers": [
+                         _srv("a"), _srv("s1", parallel=False), _srv("b"),
+                         _srv("s2", parallel=False),
+                         _srv("off", enabled=False)]})
+        (group,) = cc.shutdown_order_tree(cfg)
+        remote = [p for p in group["phases"] if p["kind"] == "remote"]
+        want = {}
+        for order, s in compute_effective_order(
+                [s for s in cfg.ups_groups[0].remote_servers if s.enabled]):
+            want.setdefault(order, []).append(s.name)
+        assert [(p["order"], [s["name"] for s in p["servers"]])
+                for p in remote] == sorted(want.items())
+        assert [p["order"] for p in remote] == [-2, -1, 0]
+        assert remote[0]["title"] == "legacy parallel: false"
+        assert remote[2]["title"] == "no shutdown_order, default batch"
+        assert remote[2]["parallel"] and not remote[0]["parallel"]
+        assert [s["index"] for s in remote[2]["servers"]] == [0, 2]
+        assert group["disabled"] == ["off"]
+        assert "  Skipped (enabled: false): off" in cc.format_order_tree([group])
+        assert group["kind"] == "ups" and group["index"] == 0
+        assert group["role"] == "protects this host"
+        # Every phase waits for the previous one; the first waits for none.
+        assert [p["waitsFor"] for p in group["phases"]] == [
+            None] + [p["number"] - 1 for p in group["phases"][1:]]
+        assert group["phases"][-1]["kind"] == "final"
+        assert "this host powers off" in group["phases"][-1]["title"]
+
+    def test_same_servers_as_dashboard_plan(self, env):
+        from eneru.shutdown.plan import build_shutdown_plan
+        cfg = build({"ups": {"name": "u@h"},
+                     "remote_servers": [
+                         _srv("z", shutdown_order=3), _srv("lb",
+                         is_host_loopback=True, pre_shutdown_commands=[
+                             {"action": "sync"}]),
+                         _srv("x", shutdown_order=1),
+                         _srv("y", shutdown_order=1)]})
+        (group,) = cc.shutdown_order_tree(cfg)
+        tree_names = [s["name"] for p in group["phases"] for s in p["servers"]]
+        plan = build_shutdown_plan(cc._group_config(cfg, cfg.ups_groups[0]))
+        remote = next(p for p in plan["phases"] if p["id"] == "remote")
+        assert tree_names == [s["label"] for s in remote["steps"]]
+        kinds = [p["kind"] for p in group["phases"]]
+        assert kinds == ["local", "loopback-pre", "remote", "remote",
+                         "loopback-poweroff", "final"]
+        assert group["phases"][2]["title"] == "shutdown_order 1"
+
+    def test_step_labels(self):
+        from eneru.shutdown.plan import pre_shutdown_label
+        assert pre_shutdown_label(RemoteCommandConfig(
+            action="stop_compose", path="/a.yml")) == "stop_compose /a.yml"
+        assert pre_shutdown_label(RemoteCommandConfig(
+            action="unmount_filesystems",
+            mounts=[{"path": "/m"}, {"options": "-l"}])) == (
+                "unmount_filesystems (/m)")
+        assert pre_shutdown_label(RemoteCommandConfig(command="echo")) == "echo"
+        assert pre_shutdown_label(RemoteCommandConfig()) == "?"
+
+    def test_render_single_host(self, env):
+        cfg = build({
+            "ups": {"name": "u@h"},
+            "virtual_machines": {"enabled": True},
+            "containers": {"enabled": True},
+            "filesystems": {"sync_enabled": True, "unmount": {
+                "enabled": True, "mounts": ["/mnt/a", {"path": "/mnt/b",
+                                                       "options": "-l"}]}},
+            "remote_servers": [
+                _srv("nas", pre_shutdown_commands=[
+                    {"action": "stop_containers"}, {"command": "echo bye"}],
+                    shutdown_command="poweroff", shutdown_order=1),
+                _srv("a", shutdown_order=2), _srv("b", shutdown_order=2)]})
+        text = "\n".join(cc.format_order_tree(cc.shutdown_order_tree(cfg)))
+        assert "UPS u@h (protects this host)" in text
+        assert ("Phase 1: this host (always first)\n      stop VMs -> stop "
+                "containers -> sync -> unmount /mnt/a, /mnt/b") in text
+        assert ("Phase 2: 1 server (shutdown_order 1)  [waits for phase 1]\n"
+                "    └─ nas (u@nas): stop_containers -> echo bye -> poweroff"
+                ) in text
+        assert ("Phase 3: 2 servers in parallel (shutdown_order 2)  "
+                "[waits for phase 2]\n    ├─ a (u@a): sudo shutdown -h now\n"
+                "    └─ b (u@b)") in text
+        assert ("Phase 4: final sync, then this host powers off: "
+                "shutdown -h now (always last)  [waits for phase 3]") in text
+        assert "\033[" not in text
+
+    def test_loopback_bracket_bare_metal(self, env):
+        cfg = build({"ups": {"name": "u@h"},
+                     "filesystems": {"sync_enabled": False},
+                     "remote_servers": [
+                         _srv("host", is_host_loopback=True,
+                              pre_shutdown_commands=[{"action": "stop_vms"}],
+                              shutdown_command="poweroff"),
+                         _srv("host2", is_host_loopback=True),
+                         _srv("nas")]})
+        text = "\n".join(cc.format_order_tree(cc.shutdown_order_tree(cfg)))
+        assert ("Phase 1: loopback pre-actions, before any other server\n"
+                "    └─ host (u@host): stop_vms") in text
+        assert "Phase 2: 1 server (no shutdown_order, default batch)" in text
+        assert ("Phase 3: this host powers off via the loopback delegate, "
+                "one after another  [waits for phase 2]\n"
+                "    ├─ host (u@host): poweroff\n"
+                "    └─ host2 (u@host2): sudo shutdown -h now") in text
+
+    def test_container_delegation_via_check_mapping(self, env, tmp_path,
+                                                    monkeypatch):
+        env.runtime = "container (Docker)"
+        report = cc.check_mapping({
+            "ups": {"name": "u@h"},
+            "virtual_machines": {"enabled": True},
+            "remote_servers": [_srv("host", host="127.0.0.1", user="root",
+                                    is_host_loopback=True,
+                                    shutdown_command="shutdown -h now")]},
+            probes=False)
+        text = "\n".join(report.order)
+        # Local work is delegated: it runs as the loopback's pre-actions.
+        assert "this host (always first)" not in text
+        assert ("Phase 1: loopback pre-actions, before any other server\n"
+                "    └─ host (root@127.0.0.1): stop_vms -> sync") in text
+        assert "Phase 2: this host powers off via the loopback delegate" in text
+        assert "Phase 3" not in text
+
+    def test_multi_ups_and_redundancy(self, env):
+        cfg = build({
+            "ups": [{"name": "a@h", "is_local": True,
+                     "remote_servers": [_srv("r1")]},
+                    {"name": "b@h"}, {"name": "c@h"}],
+            "redundancy_groups": [{
+                "name": "rg", "ups_sources": ["b@h", "c@h"], "min_healthy": 1,
+                "remote_servers": [_srv("n1", shutdown_order=1),
+                                   _srv("n2", shutdown_order=1),
+                                   _srv("sw", shutdown_order=2)]}]})
+        tree = cc.shutdown_order_tree(cfg)
+        assert [(g["kind"], g["index"], g["group"]) for g in tree] == [
+            ("ups", 0, "a@h"), ("ups", 1, "b@h"), ("ups", 2, "c@h"),
+            ("redundancy", 0, "rg")]
+        text = "\n".join(cc.format_order_tree(tree))
+        local, rest = text.split("UPS b@h")
+        assert "report done to the coordinator" in local
+        assert ("UPS b@h (monitoring / remote-only)\n"
+                "  Nothing to shut down: notify only.") in "UPS b@h" + rest
+        rg = rest.split("Redundancy group rg (redundancy group)")[1]
+        assert "Phase 1: 2 servers in parallel (shutdown_order 1)\n" in rg
+        assert "Phase 2: 1 server (shutdown_order 2)  [waits for phase 1]" in rg
+        assert "this host" not in rg
+
+    def test_host_stays_on(self, env):
+        cfg = build({"ups": {"name": "u@h"},
+                     "local_shutdown": {"enabled": False},
+                     "filesystems": {"sync_enabled": True}})
+        (group,) = cc.shutdown_order_tree(cfg)
+        assert group["hostStaysOn"]
+        assert group["phases"][-1]["title"] == "final sync"
+        text = "\n".join(cc.format_order_tree([group]))
+        assert "This host stays on (local_shutdown.enabled: false)." in text
+        cfg = build({"ups": {"name": "u@h"},
+                     "local_shutdown": {"enabled": False},
+                     "filesystems": {"sync_enabled": False}})
+        (group,) = cc.shutdown_order_tree(cfg)
+        assert group["phases"] == []
+        assert "Nothing to shut down" in "\n".join(
+            cc.format_order_tree([group]))
+
+    def test_format_report_section(self, env):
+        report = cc.CheckReport(order=["UPS x", "  Phase 1: \x1b[2Jevil"])
+        text = cc.format_report(report)
+        assert "== Shutdown order ==\n  UPS x\n  " in text
+        assert "\x1b[2J" not in text
+        assert "\033[1m== Shutdown order ==" in cc.format_report(
+            report, color=True)
+        assert "== Shutdown order ==" not in cc.format_report(cc.CheckReport())
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
