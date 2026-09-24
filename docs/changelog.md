@@ -105,6 +105,31 @@ the dashboard, and self-tests that no longer look like outages.
   - `--once` prints the same lines, leaves out readings the UPS doesn't
     report (no more `Output: V`), and graphs state their y-axis scale.
     `--events-only` keeps its raw `EVENT_TYPE:` format for scripts.
+- **The dashboard says what happens next, and how old the data is.**
+  - The banner reads the UPS's role: a monitoring-only UPS on low battery is
+    an amber note ("no action will be taken here"), never "Shutdown
+    imminent". A fired trigger reads "Shutdown triggered — Lab: critical
+    runtime (4m 40s now · fires below 5m 0s) → Shuts down this host and 1
+    remote server"; a running shutdown links to its live progress. Red
+    alerts are announced with `role="alert"`, and the browser tab title
+    follows the outage (`⚠ On battery · Lab 62%`, `⛔ Shutting down · Lab`).
+  - While on battery the UPS view lists every armed trigger with its live
+    value and ETA; fleet rows add time on battery and the next trigger. The
+    Shutdown tab lists every configured trigger instead of "low battery or
+    FSD". Redundancy cards name the failing members and say what one more
+    failure does.
+  - Badges use the shared words and green/amber/red scale: on battery is
+    amber, only a triggered or running shutdown pulses. Role tags say
+    `Powers this host` / `Remote shutdowns only` / `Monitoring only`.
+  - A failed fetch no longer shows a fresh "Updated" time: the footer and
+    error say how old the data is, each UPS shows "updated 3s ago", and after
+    three missed polls the page is greyed and marked `STALE`.
+  - Durations read `7m 0s`, not `1205s`; "Replace in" says `~4 yr` and
+    matches the chart, which points off the edge for a far date.
+  - Smaller fixes: the UPS name no longer vanishes on a phone, a compact phone
+    header and a fading tab bar, newest events first, self-tests on battery
+    are no longer red, an old "reachable" check is grey, clipped chart
+    labels, a separate % axis for load, and aligned section spacing.
 - **Redundancy groups are dashboard scopes.** The View selector focuses
   telemetry, events, remotes and shutdown details on a group.
 - **Per-step `use_sudo`** on `pre_shutdown_commands` overrides the server's

@@ -312,6 +312,10 @@ Dashboard regression tests are split by responsibility:
   colors, stale Control render rejection,
   blank fleet telemetry, readable NUT/event labels, retained custom status
   tokens, and tablet-width comparison-table access.
+- `tests/test_dashboard_outlook.py` covers the role-aware banner and tab
+  title, the next-trigger line, the status/role/freshness fallbacks for older
+  daemons, the bounded replacement estimate, redundancy-group outlook, stale
+  remote checks, and CSP-safe/newest-first/pulse-only-when-blinking guards.
 - `tests/test_dashboard_tools.py` covers the deployed-audit CLI contract,
   focused drill-down planning, authentication-aware HTTP findings, unique
   scope captures, and structural fallbacks.

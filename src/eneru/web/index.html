@@ -67,8 +67,14 @@
             aria-controls="panel-config" aria-selected="false" tabindex="-1">Config</button>
   </nav>
 
-  <div id="banner" class="banner" role="status" hidden></div>
-  <div id="error" class="error" hidden></div>
+  <!-- Visual alarm banner. Not itself a live region: its ETA text changes every
+       poll. The stable headline is announced through the two visually hidden
+       regions below (role=alert for red, role=status otherwise). -->
+  <div id="banner" class="banner" hidden></div>
+  <div id="banner-alert" class="sr-only" role="alert"></div>
+  <div id="banner-status" class="sr-only" role="status"></div>
+  <div id="error" class="error" role="status" hidden></div>
+  <div id="stale-mark" class="stale-mark" hidden></div>
 
   <main>
     <!-- Overview ------------------------------------------------------------ -->
@@ -219,12 +225,15 @@
       </div>
       <div class="event-actions">
         <button type="button" id="event-delete" hidden>Delete selected</button>
-        <button type="button" id="event-load-older">Load older</button>
       </div>
+      <!-- Newest first by default (L2); older rows page in at the bottom. -->
       <table id="events" class="events">
-        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort" aria-label="Sort by time, ascending" aria-pressed="true">Time ↑</button></th><th>Type</th><th>Detail</th></tr></thead>
+        <thead><tr id="events-head"><th><button id="event-sort-time" type="button" class="th-sort" aria-label="Sort events by time, currently descending" aria-pressed="true">Time ↓</button></th><th>Type</th><th>Detail</th></tr></thead>
         <tbody></tbody>
       </table>
+      <div class="event-actions event-actions-end">
+        <button type="button" id="event-load-older" class="secondary">Load older</button>
+      </div>
     </section>
 
     <!-- Control ------------------------------------------------------------- -->
