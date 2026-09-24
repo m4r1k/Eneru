@@ -229,6 +229,19 @@ def _reset_runtime_context_cache():
     _detect_runtime_context.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_tui_live_buffers():
+    """The TUI live-graph deques are process-global and keyed by the stats-DB
+    stem, which is the same UPS name across tests. A leftover buffer from an
+    earlier test on the same xdist worker gets blended into a later test's
+    graph (e.g. "now: 72%" instead of the 90% it wrote). Clear around every
+    test, like the other process-global resets above."""
+    from eneru import tui as _tui
+    _tui.clear_live_buffers()
+    yield
+    _tui.clear_live_buffers()
+
+
 def make_api_handler(
     config: Any,
     *,

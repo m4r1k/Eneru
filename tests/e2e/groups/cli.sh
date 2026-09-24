@@ -611,8 +611,9 @@ echo ""
 echo ">>> Running: Test 66: config editor TUI edits in place and creates new files"
 
 cp "$E2E_DIR/config-e2e.yaml" /tmp/config-e2e-tui.yaml
-# Stage 2 (Safety) -> Enter toggles dry_run -> Save (y confirms if asked) -> Quit
-python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q' -- \
+# Stage 2 (Safety) -> Enter toggles dry_run -> y answers the red dry-run
+# confirm -> Save -> y answers the "saving changes dry_run" confirm -> Quit
+python3 "$E2E_DIR/config-tui-driver.py" '2|\r|y|S|y|q' -- \
   eneru config --basic --config /tmp/config-e2e-tui.yaml >/tmp/test66a.log
 if ! grep -qE '^  dry_run: true +# Real execution for E2E tests' /tmp/config-e2e-tui.yaml; then
   grep -n dry_run /tmp/config-e2e-tui.yaml || true

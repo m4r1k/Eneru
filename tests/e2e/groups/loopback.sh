@@ -694,8 +694,9 @@ YAML
     echo "FAIL: the eneru container is not running"; exit 1
   fi
 
-  # Stage 2 (Safety) -> Enter toggles dry_run -> Save (y if asked) -> Quit
-  python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q' -- \
+  # Stage 2 (Safety) -> Enter toggles dry_run -> y answers the red dry-run
+  # confirm -> Save -> y answers the "saving changes dry_run" confirm -> Quit
+  python3 "$E2E_DIR/config-tui-driver.py" '2|\r|y|S|y|q' -- \
     docker exec -it "$name" eneru config --basic >/tmp/test68a.log || true
 
   sudo cat "$dir/config.yaml"
@@ -738,7 +739,8 @@ YAML
     docker logs "$name" 2>&1 | tail -30
     echo "FAIL: the read-only eneru container is not running"; exit 1
   fi
-  python3 "$E2E_DIR/config-tui-driver.py" '2|\r|S|y|q|y' -- \
+  # Same keys on a :ro mount: the save fails, then q + y quits without saving.
+  python3 "$E2E_DIR/config-tui-driver.py" '2|\r|y|S|y|q|y' -- \
     docker exec -it "$name" eneru config --basic >/tmp/test68b.log || true
   sudo cmp -s "$dir/ro-before.yaml" "$dir/config.yaml" || {
     echo "FAIL: a :ro config mount was modified"; exit 1; }

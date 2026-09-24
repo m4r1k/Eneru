@@ -401,8 +401,10 @@ const helpers = source.slice(
   source.indexOf("function nutStatusTokens"),
   source.indexOf("// ----- theme (light / dark / system)"),
 );
+// v6.2: statusClass() delegates to localStatusSummary() and its
+// STATUS_STATES table, so take the whole shared-vocabulary block.
 const statusClass = source.slice(
-  source.indexOf("function statusClass"),
+  source.indexOf("// v6.2 shared status vocabulary"),
   source.indexOf("// ----- rendering -----"),
 );
 const badge = source.slice(
@@ -433,8 +435,10 @@ const expected = {
   custom: "Utility power · Custom state: ECO",
   event: "Power failure",
   eventBadge: "Power failure",
-  alarmClass: "crit",
-  waitingClass: "warn",
+  // v6.2 shared vocabulary (eneru.utils.status_summary): ALARM on mains is
+  // amber, and OL outranks WAIT.
+  alarmClass: "warn",
+  waitingClass: "ok",
   customClass: "warn",
 };
 if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -442,12 +446,17 @@ if (JSON.stringify(actual) !== JSON.stringify(expected)) {
   process.exit(1);
 }
 NODE
-grep -q 'text: humanNutStatus(u.status)' /tmp/test55-app.js \
+# v6.2: badges render the shared-vocabulary label with the humanized NUT
+# flags as the detail (statusInfo -> statusBadge).
+grep -q 'text: info.label, title: info.detail' /tmp/test55-app.js \
   || { echo "FAIL: dashboard status formatter is not used for rendered labels"; exit 1; }
-API_STATUS=$(curl -fsS http://127.0.0.1:9100/api/v1/ups \
-  | python3 -c 'import json, sys; print(json.load(sys.stdin)["ups"][0]["status"])')
+curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test55-ups.json
+API_STATUS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["ups"][0]["status"])' /tmp/test55-ups.json)
 [ "$API_STATUS" = "OL CHRG" ] \
   || { echo "FAIL: API status changed from raw NUT value: '$API_STATUS'"; exit 1; }
+API_SUMMARY=$(python3 -c 'import json, sys; s = json.load(open(sys.argv[1]))["ups"][0]["statusSummary"]; print(s["label"] + "|" + s["detail"])' /tmp/test55-ups.json || true)
+[ "$API_SUMMARY" = "On mains|Utility power · Battery charging" ] \
+  || { echo "FAIL: API statusSummary not in the shared vocabulary: '$API_SUMMARY'"; exit 1; }
 echo "PASS (55a): dashboard labels are readable while API status stays raw"
 
 # Content-Type + CSP on the HTML response.
