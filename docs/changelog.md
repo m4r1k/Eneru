@@ -34,6 +34,14 @@ the dashboard, and self-tests that no longer look like outages.
     anything added can be deleted from its own page, and an untouched new
     item is discarded. Switching `dry_run` in either direction asks first, in
     red, and Review & save lists that change first.
+  - In a multi-UPS file, per-UPS rows show the value that really applies,
+    tagged `(this UPS)`, `(global)` or `(default)`. Before, a UPS without its
+    own `self_test:` showed self-test as disabled even with the global one
+    enabled. Editing writes an override for that UPS only; `D` removes it.
+  - Legacy `remote_servers[].parallel` is converted on open to the
+    `shutdown_order` numbers that keep the same phases (written on save).
+    A **Shutdown order** page shows the phases per group; `Left`/`Right`
+    moves a server to the previous or next phase.
   - The container image ships it: `docker exec -it eneru eneru config` saves
     through the config bind mount (the backup goes to the state volume) and
     `docker kill -s HUP eneru` applies it. For a first setup without Eneru on

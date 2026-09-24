@@ -577,7 +577,8 @@ class TestLists:
         m = _model(tmp_path, "config-dual-ups.yaml")
         goto(m, "remote")
         rows = m.rows()
-        assert all(r.kind == "list" for r in rows)
+        assert all(r.kind == "list" for r in rows[:-1])
+        assert rows[-1].kind == "order"
         assert "Main Rack UPS" in rows[0].label
         press(m, "j", ENTER)
         assert m.page.kind == "list"
@@ -2000,3 +2001,722 @@ class TestU5Search:
         press(m, "a")
         m.go_to(m.search("dry run")[0])
         assert not m.doc.get(("remote_servers",))
+
+
+# ---------------------------------------------------------------------------
+# U3 (global vs per-UPS), U6 (legacy `parallel`), U7 (shutdown order page)
+# ---------------------------------------------------------------------------
+
+# Sanitized shape of a real upgraded multi-UPS config: Lab has NO per-UPS
+# self_test while the global self_test is enabled; its NAS still uses the
+# legacy `parallel: false`; APC overrides a few self-test/battery keys.
+PROD_SHAPE_YAML = """\
+ups:
+  - name: "lab@10.0.0.1"
+    display_name: "Lab"
+    is_local: true
+    virtual_machines:
+      enabled: true
+    filesystems:
+      unmount:
+        enabled: true
+        mounts:
+          - "/mnt/media"
+    remote_servers:
+      - name: "NAS"
+        enabled: true
+        host: 10.0.0.2
+        user: admin
+        shutdown_command: "synoshutdown -s"
+        parallel: false
+  - name: "apc@10.0.0.3"
+    display_name: "APC"
+    is_local: false
+    self_test:
+      enabled: true
+      command: test.battery.start.quick
+      result_poll_after: 60
+    battery_health:
+      battery_install_date: 2026-06-25
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 300
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 90
+  extended_time:
+    enabled: true
+    threshold: 1200
+behavior:
+  dry_run: false
+api:
+  enabled: true
+  auth:
+    enabled: true
+nut_control:
+  enabled: true
+  username: monuser
+  password: pw
+  allowed_commands:
+    - test.battery.start
+battery_health:
+  enabled: true
+  battery_install_date: "2025-10-20"
+energy:
+  enabled: true
+  cost_per_kwh: 0.35
+  currency: EUR
+self_test:
+  enabled: true
+  schedule: monthly
+  time: "03:00"
+  command: test.battery.start
+local_shutdown:
+  enabled: true
+"""
+
+# Every override shape the loader merges: nested trigger sections, a
+# per-UPS nut_control (with a list), energy with an explicit null, and a
+# redundancy group's own triggers.
+OVERRIDES_YAML = PROD_SHAPE_YAML.replace('''    battery_health:
+      battery_install_date: 2026-06-25
+''', '''    battery_health:
+      battery_install_date: 2026-06-25
+      replacement:
+        horizon_days: 30
+    triggers:
+      low_battery_threshold: 40
+      depletion:
+        window: 120
+      extended_time:
+        enabled: false
+    nut_control:
+      username: apcuser
+      allowed_commands: []
+    energy:
+      cost_per_kwh: null
+      nominal_power: 900
+''') + """\
+redundancy_groups:
+  - name: rack
+    ups_sources: ["lab@10.0.0.1", "apc@10.0.0.3"]
+    min_healthy: 1
+    triggers:
+      critical_runtime_threshold: 900
+      depletion:
+        critical_rate: 5.0
+"""
+
+
+def _open_section(m, base, spec):
+    m.pages.append(tui.Page(spec.title, "section", tuple(base), spec))
+    m.cursor = 0
+
+
+def _loader_value(config, kind, idx, rel):
+    """What ConfigLoader gives group ``idx`` for the per-group key ``rel``."""
+    if kind == "redundancy_groups":
+        obj = config.redundancy_groups[idx].triggers
+    else:
+        group = config.ups_groups[idx]
+        obj = getattr(group, rel[0])
+        if rel[0] != "triggers" and obj is None:
+            obj = getattr(config, rel[0])  # None = the global block applies
+    for key in rel[1:]:
+        obj = getattr(obj, key)
+    return obj
+
+
+def _norm(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _group_options(kind):
+    spec = tui._GROUP_SPEC[kind]
+    for section in tui._INHERITING[kind]:
+        node = cat.child(spec, section)
+        yield from cat.iter_options(node, (section,))
+
+
+def _phases(view):
+    """[(phase kind, [server names])] per group, from the plan code."""
+    config, findings = chk.build_config(view)
+    assert config is not None, findings
+    return [[(p["kind"], [s["name"] for s in p["servers"]])
+             for p in g["phases"]] for g in chk.shutdown_order_tree(config)]
+
+
+class TestU3Inheritance:
+    def test_lab_self_test_shows_the_global_enabled_value(self, tmp_path):
+        # The reported bug: Lab has no per-UPS self_test, the global one is
+        # enabled, and the editor showed the per-UPS dataclass default (off).
+        m = _text_model(tmp_path, PROD_SHAPE_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 0, "self_test"),
+                      cat.child(cat.UPS_ENTRY_SECTION, "self_test"))
+        row = select(m, "enabled")
+        assert row.value == "on" and row.source == tui.SOURCE_GLOBAL
+        assert tui.source_tag(row) == "(global)" and not row.changed
+        assert row.is_default and m.delete_hint(row) == ""
+        ctx = m.row_context(row)
+        assert "default: off" in ctx and "global: on" in ctx
+        assert "override for this UPS only" in ctx
+        m.mode = tui.MODE_BASIC  # basic mode: no default/global context
+        assert m.row_context(row) == "editing sets an override for this UPS only"
+        config, _ = chk.build_config(m.view)
+        assert config.ups_groups[0].self_test is None
+        assert config.self_test.enabled is True
+
+    @pytest.mark.parametrize("text", [PROD_SHAPE_YAML, OVERRIDES_YAML])
+    def test_every_per_group_key_matches_the_loader(self, tmp_path, text):
+        m = _text_model(tmp_path, text, tui.MODE_ADVANCED)
+        config, findings = chk.build_config(m.view)
+        assert config is not None, findings
+        checked = 0
+        for kind, count in (("ups", len(config.ups_groups)),
+                            ("redundancy_groups", len(config.redundancy_groups))):
+            for idx in range(count):
+                for rel, opt in _group_options(kind):
+                    base = (kind, idx) + rel[:-1]
+                    state = m._option_state(base, opt)
+                    assert _norm(state.value) == _norm(
+                        _loader_value(config, kind, idx, rel)), (kind, idx, rel)
+                    checked += 1
+        assert checked > 50
+
+    def test_reference_example_converted_to_multi_ups_matches(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        m.doc.convert_to_multi_ups()
+        m.revalidate()
+        config, findings = chk.build_config(m.view)
+        assert config is not None, findings
+        for rel, opt in _group_options("ups"):
+            state = m._option_state(("ups", 0) + rel[:-1], opt)
+            assert _norm(state.value) == _norm(
+                _loader_value(config, "ups", 0, rel)), rel
+
+    def test_single_ups_file_has_no_per_ups_split(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        config, _ = chk.build_config(m.view)
+        assert m._inherit_from(("ups", 0, "self_test")) is None
+        goto(m, "health")
+        for row in m.rows():
+            page = m._child_page(row)
+            assert "defaults for all UPSes" not in page.title
+            m.pages.append(page)
+            for r in m.rows():
+                if r.kind == "option":
+                    assert r.source in (tui.SOURCE_FILE, tui.SOURCE_DEFAULT)
+                    assert not r.overridden_by and not r.global_text
+            m.pages.pop()
+        # The global rows are what the loader uses for the one UPS.
+        for rel, opt in cat.iter_options(cat.SELF_TEST_SECTION, ("self_test",)):
+            assert m._option_state(rel[:-1], opt).value == _loader_value(
+                config, "ups", 0, rel)
+        goto(m, "safety")
+        assert any(r.label == "Shutdown triggers" for r in m.rows())
+
+    def test_override_rows_are_marked_and_d_goes_back_to_global(self, tmp_path):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 1, "self_test"),
+                      cat.child(cat.UPS_ENTRY_SECTION, "self_test"))
+        row = select(m, "command")
+        assert row.value == "test.battery.start.quick" and row.changed
+        assert tui.source_tag(row) == "(this UPS)"
+        assert row.global_text == "test.battery.start"
+        assert m.delete_hint(row) == "remove override"
+        assert "D removes it (back to global)" in m.row_context(row)
+        assert ("D", "remove override") in tui.keybar_keys(m)
+        press(m, "D")
+        assert "back to global" in m.message
+        assert not m.doc.has(("ups", 1, "self_test", "command"))
+        row = select(m, "command")
+        assert row.value == "test.battery.start" and row.source == tui.SOURCE_GLOBAL
+        # Removing the last override drops the now-empty section too.
+        for key in ("enabled", "result_poll_after"):
+            select(m, key)
+            press(m, "D")
+        assert not m.doc.has(("ups", 1, "self_test"))
+
+    def test_nested_override_prunes_only_empty_mappings(self, tmp_path):
+        m = _text_model(tmp_path, OVERRIDES_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 1, "triggers", "depletion"),
+                      cat.child(cat.TRIGGERS_SECTION, "depletion"))
+        select(m, "window")
+        press(m, "D")
+        assert not m.doc.has(("ups", 1, "triggers", "depletion"))
+        assert m.doc.get(("ups", 1, "triggers", "low_battery_threshold")) == 40
+
+    def test_editing_an_inherited_row_writes_an_override_only(self, tmp_path):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 0, "self_test"),
+                      cat.child(cat.UPS_ENTRY_SECTION, "self_test"))
+        select(m, "enabled")
+        press(m, ENTER)  # toggles the EFFECTIVE value (on) to off
+        assert m.doc.get(("ups", 0, "self_test")) == {"enabled": False}
+        assert m.doc.get(("self_test", "enabled")) is True
+        row = select(m, "enabled")
+        assert row.source == tui.SOURCE_UPS and row.changed
+        select(m, "schedule")
+        press(m, ENTER)
+        assert m.prompt.buffer == "monthly"  # starts from the global value
+        assert "back to global" in m.prompt.title
+        press(m, 21, "weekly", ENTER)
+        assert m.doc.get(("ups", 0, "self_test", "schedule")) == "weekly"
+        select(m, "schedule")
+        press(m, ENTER, 21, ENTER)  # empty = back to global
+        assert "back to global" in m.message
+        assert not m.doc.has(("ups", 0, "self_test", "schedule"))
+
+    def test_nullable_inherited_prompt_hint(self, tmp_path):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 0, "battery_health"),
+                      cat.child(cat.UPS_ENTRY_SECTION, "battery_health"))
+        select(m, "battery_install_date")
+        press(m, ENTER)
+        assert m.prompt.buffer == "2025-10-20"
+        assert "unset for this UPS" in m.prompt.title
+
+    def test_remove_all_overrides_row(self, tmp_path):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML, tui.MODE_ADVANCED)
+        goto(m, "ups")
+        select(m, lambda r: r.kind == "item" and r.label.startswith("APC"))
+        press(m, ENTER)
+        st = select(m, lambda r: r.path == ("ups", 1, "self_test"))
+        assert st.label.endswith("(3 overrides)")
+        bh = select(m, lambda r: r.path == ("ups", 1, "battery_health"))
+        assert bh.label.endswith("(1 override)")
+        en = select(m, lambda r: r.path == ("ups", 1, "energy"))
+        assert en.label.endswith("(inherits global)")
+        select(m, lambda r: r.path == ("ups", 1, "self_test"))
+        press(m, ENTER)
+        row = select(m, lambda r: r.action == "remove_overrides")
+        assert row.label == "✕ Remove all overrides for this UPS"
+        assert m.delete_hint(row) == "remove overrides"
+        press(m, ENTER)
+        assert "Remove all 3 override(s)" in m.prompt.title
+        press(m, "n")
+        assert m.doc.has(("ups", 1, "self_test"))
+        press(m, "D", "y")
+        assert not m.doc.has(("ups", 1, "self_test"))
+        assert "back to global" in m.message
+        assert not any(r.action == "remove_overrides" for r in m.rows())
+        # Lab's section has nothing to remove: no row.
+        m.pages.pop()
+        _open_section(m, ("ups", 0, "self_test"),
+                      cat.child(cat.UPS_ENTRY_SECTION, "self_test"))
+        assert not any(r.action == "remove_overrides" for r in m.rows())
+
+    def test_global_pages_say_defaults_and_name_the_overriders(self, tmp_path):
+        m = _text_model(tmp_path, OVERRIDES_YAML, tui.MODE_ADVANCED)
+        goto(m, "health")
+        select(m, "> Scheduled self-test")
+        press(m, ENTER)
+        assert m.page.title == "Scheduled self-test: defaults for all UPSes"
+        row = select(m, "command")
+        assert row.overridden_by == "APC overrides"
+        assert "APC overrides" in m.row_context(row)
+        assert not select(m, "schedule").overridden_by
+        press(m, ESC)
+        select(m, "> UPS control (NUT)")
+        press(m, ENTER)
+        assert not select(m, "enabled").overridden_by  # global-only key
+        assert select(m, "username").overridden_by == "APC overrides"
+        goto(m, "safety")
+        assert any(r.label == "Shutdown triggers (defaults for all UPSes)"
+                   for r in m.rows())
+        row = select(m, "critical_runtime_threshold")
+        assert row.overridden_by == "rack overrides"
+        row = select(m, "low_battery_threshold")
+        assert row.overridden_by == "APC overrides"
+        m.doc.set(("ups", 0, "triggers"), {"low_battery_threshold": 30})
+        m.revalidate()
+        assert select(m, "low_battery_threshold").overridden_by == \
+            "Lab, APC override"
+
+    def test_redundancy_group_triggers_inherit_too(self, tmp_path):
+        m = _text_model(tmp_path, OVERRIDES_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("redundancy_groups", 0, "triggers"),
+                      cat.REDUNDANCY_TRIGGERS_SECTION)
+        row = select(m, "critical_runtime_threshold")
+        assert tui.source_tag(row) == "(this group)" and row.value == "900"
+        assert "override for this group" in m.row_context(row)
+        row = select(m, "low_battery_threshold")
+        assert row.source == tui.SOURCE_GLOBAL and row.value == "20"
+        assert "Remove all overrides for this group" in m.rows()[-1].label
+
+    def test_inherited_list_note_on_the_scalars_page(self, tmp_path):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 0, "nut_control"), cat.NUT_CONTROL_OVERRIDE)
+        select(m, "allowed_commands")
+        press(m, ENTER)
+        note = m.rows()[0]
+        assert note.kind == "note"
+        assert "Inherits the global list: test.battery.start" in note.label
+        m.doc.set(("ups", 0, "nut_control", "allowed_commands"), [])
+        m.revalidate()
+        assert m.rows()[0].kind == "add"  # an override: no note
+
+    def test_render_shows_source_tags(self, tmp_path, colors):
+        m = _text_model(tmp_path, OVERRIDES_YAML, tui.MODE_ADVANCED)
+        _open_section(m, ("ups", 1, "triggers"), cat.TRIGGERS_SECTION)
+        win = FakeWindow(40, 200)
+        tui.draw(win, m)
+        out = win.dump()
+        assert "(this UPS)" in out and "(global)" in out and "(default)" in out
+        goto(m, "safety")
+        win = FakeWindow(40, 200)
+        tui.draw(win, m)
+        assert "(APC overrides)" in win.dump()
+
+
+LEGACY_SERVERS = {
+    "one_sequential": [{"parallel": False}],
+    "mixed": [{"parallel": False}, {}, {"parallel": False}, {"parallel": True}],
+    "only_true": [{"parallel": True}, {}, {"parallel": None}],
+    "with_explicit": [{"parallel": False}, {"shutdown_order": 2}, {},
+                      {"shutdown_order": 1}],
+    "loopback": [{"parallel": False},
+                 {"is_host_loopback": True, "parallel": False,
+                  "pre_shutdown_commands": [{"action": "sync"}]},
+                 {}],
+    "disabled": [{"parallel": False, "enabled": False}, {"parallel": False},
+                 {"parallel": True}],
+}
+
+
+def _servers_yaml(servers, multi):
+    import yaml
+    import copy
+    full = [dict({"name": f"s{i}", "enabled": True,
+                  "host": f"10.0.0.{i + 10}", "user": "root"},
+                 **s) for i, s in enumerate(servers)]
+    if multi:
+        data = {"ups": [{"name": "a@h", "is_local": True},
+                        {"name": "b@h", "remote_servers": full}],
+                "redundancy_groups": [{"name": "rg", "ups_sources": ["a@h", "b@h"],
+                                       "remote_servers": copy.deepcopy(full)}]}
+    else:
+        data = {"ups": {"name": "a@h"}, "remote_servers": full}
+    return yaml.safe_dump(data, sort_keys=False)
+
+
+class TestU6LegacyParallel:
+    def test_prod_shape_is_converted_with_identical_phases(self, tmp_path):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML)
+        before = _phases(m.doc.saved_view())
+        assert m.doc.get(("ups", 0, "remote_servers", 0, "shutdown_order")) == 1
+        assert not m.doc.has(("ups", 0, "remote_servers", 0, "parallel"))
+        assert _phases(m.view) == before
+        assert m.doc.modified
+        assert "converted legacy `parallel` on 1 server(s)" in m.message
+        assert m.migration_notice
+        assert m.changes() == [
+            "- ups[0].remote_servers[0].parallel (was false)",
+            "+ ups[0].remote_servers[0].shutdown_order: 1"]
+        # Not on disk until saved; saving writes it and clears the notice.
+        assert "parallel: false" in (tmp_path / "c.yaml").read_text()
+        m.save()
+        assert "parallel" not in (tmp_path / "c.yaml").read_text()
+        assert not m.migration_notice
+
+    @pytest.mark.parametrize("multi", [False, True])
+    @pytest.mark.parametrize("shape", sorted(LEGACY_SERVERS))
+    def test_shapes_keep_the_same_phases(self, tmp_path, shape, multi):
+        m = _text_model(tmp_path, _servers_yaml(LEGACY_SERVERS[shape], multi))
+        before = _phases(m.doc.saved_view())
+        assert _phases(m.view) == before
+        assert "parallel" not in m.doc.dumps()
+        n = sum(1 for s in LEGACY_SERVERS[shape] if "parallel" in s)
+        assert f"on {n * (2 if multi else 1)} server(s)" in m.migration_notice
+        orders = [s.get("shutdown_order") for s in (
+            m.view["ups"][1]["remote_servers"] if multi
+            else m.view["remote_servers"])]
+        if shape == "only_true":
+            assert orders == [None, None, None]  # batch 0 stays as is
+        else:
+            assert all(o is None or o >= 1 for o in orders)
+
+    def test_mixed_shape_numbers(self, tmp_path):
+        m = _text_model(tmp_path, _servers_yaml(LEGACY_SERVERS["mixed"], False))
+        orders = [s.get("shutdown_order") for s in m.view["remote_servers"]]
+        assert orders == [1, 3, 2, 3]
+
+    @pytest.mark.parametrize("server", [
+        {"parallel": False, "shutdown_order": 1},  # mutually exclusive
+        {"parallel": "maybe"},                     # not a bool
+    ])
+    def test_unconvertible_parallel_is_shown_as_legacy(self, tmp_path, server):
+        m = _text_model(tmp_path, _servers_yaml([server, {"shutdown_order": 0}], False))
+        assert not m.migration_notice
+        assert m.doc.has(("remote_servers", 0, "parallel"))
+        m.mode = tui.MODE_ADVANCED
+        goto(m, "remote")
+        select(m, lambda r: r.kind == "item")
+        press(m, ENTER)
+        row = select(m, "parallel (legacy)")
+        assert "could not be converted" in row.help
+        # Setting shutdown_order removes the legacy key.
+        select(m, "shutdown_order")
+        press(m, ENTER, 21, "2", ENTER)
+        assert m.doc.get(("remote_servers", 0, "shutdown_order")) == 2
+        assert not m.doc.has(("remote_servers", 0, "parallel"))
+        assert not any(r.label.startswith("parallel") for r in m.rows())
+
+    def test_parallel_row_is_hidden_when_absent(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        goto(m, "remote")
+        select(m, lambda r: r.kind == "item")
+        press(m, ENTER)
+        assert not any(r.label.startswith("parallel") for r in m.rows())
+        assert not m.migration_notice  # the reference file has no `parallel`
+
+    def test_order_helper_edge_cases(self, monkeypatch):
+        f = tui.EditorModel._parallel_as_orders
+        assert f(None) is None and f([]) is None
+        assert f(["x", {"parallel": False}]) is None
+        assert f([{"host": "h"}]) is None  # nothing legacy
+        assert f([{"parallel": False}, {"shutdown_order": True}]) is None
+        from eneru.config import ConfigLoader
+
+        def boom(_servers):
+            raise ValueError("bad")
+        monkeypatch.setattr(ConfigLoader, "_parse_remote_servers", boom)
+        assert f([{"parallel": False}]) is None
+
+    def test_review_lists_the_conversion(self, tmp_path, colors):
+        m = _text_model(tmp_path, PROD_SHAPE_YAML)
+        goto(m, "review")
+        win = FakeWindow(60, 200)
+        tui.draw(win, m)
+        out = win.dump()
+        assert "i converted legacy `parallel` on 1 server(s)" in out
+        assert "- ups[0].remote_servers[0].parallel (was false)" in out
+
+
+ORDER_YAML = """\
+ups:
+  - name: "lab@10.0.0.1"
+    display_name: "Lab"
+    is_local: true
+    remote_servers:
+      - {name: A, enabled: true, host: 10.0.0.2, user: root, shutdown_order: 1}
+      - {name: B, enabled: true, host: 10.0.0.3, user: root, shutdown_order: 1}
+      - {name: C, enabled: true, host: 10.0.0.4, user: root, shutdown_order: 2}
+      - {name: Idle, host: 10.0.0.5, user: root, enabled: false}
+      - name: Loop
+        enabled: true
+        host: 127.0.0.1
+        user: root
+        is_host_loopback: true
+        pre_shutdown_commands:
+          - action: sync
+  - name: "apc@10.0.0.9"
+    display_name: "APC"
+redundancy_groups:
+  - name: rack
+    ups_sources: ["lab@10.0.0.1", "apc@10.0.0.9"]
+    min_healthy: 1
+    remote_servers:
+      - {name: R, enabled: true, host: 10.0.0.7, user: root}
+local_shutdown:
+  enabled: true
+"""
+
+
+def _order_page(m):
+    goto(m, "remote")
+    select(m, lambda r: r.kind == "order")
+    press(m, ENTER)
+    assert m.page.kind == "order" and m.page.title == "Shutdown order"
+
+
+def _server(m, name):
+    return select(m, lambda r: r.kind == "server" and r.label.strip()
+                  .startswith(f"{name} "))
+
+
+def _labels(m):
+    return [r.label for r in m.rows()]
+
+
+class TestU7OrderPage:
+    def test_order_page_shows_the_plan_per_group(self, tmp_path):
+        m = _text_model(tmp_path, ORDER_YAML)
+        _order_page(m)
+        labels = _labels(m)
+        assert "UPS Lab (protects this host)" in labels
+        assert "UPS APC (monitoring / remote-only)" in labels
+        assert "Redundancy group rack (redundancy group)" in labels
+        text = "\n".join(labels)
+        assert "Loopback pre-actions, before any other server" in text
+        assert "Phase 1  ── in parallel ──   (shutdown_order 1)" in text
+        assert "Phase 2   (shutdown_order 2)" in text
+        assert "powers off via the loopback delegate" in text
+        assert "(always last)" in text
+        assert "Nothing to shut down: notify only." in text
+        assert "Skipped (not enabled):" in text
+        a = _server(m, "A")
+        assert a.path == ("ups", 0, "remote_servers", 0) and a.action == "move"
+        assert _server(m, "R").path == ("redundancy_groups", 0, "remote_servers", 0)
+        assert m.selectable() and all(
+            m.rows()[i].kind == "server" for i in m.selectable())
+        assert ("Left/Right", "phase") in tui.keybar_keys(m)
+        assert "Lower phases shut down first" in a.help
+        assert "Left/Right" in m.row_context(a)
+
+    def test_single_ups_order_row_and_local_phase(self, tmp_path):
+        m = _text_model(tmp_path, _servers_yaml([{"shutdown_order": 1}], False)
+                        + "virtual_machines:\n  enabled: true\n")
+        goto(m, "remote")
+        assert m.rows()[-1].kind == "order"
+        _order_page(m)
+        labels = _labels(m)
+        assert not any(r.kind == "heading" for r in m.rows())
+        assert labels[0].startswith(" 1. This host: stop VMs")
+        assert labels[0].endswith("(local, always first)")
+
+    def test_move_right_makes_a_new_phase_and_renumbers(self, tmp_path):
+        m = _text_model(tmp_path, ORDER_YAML)
+        _order_page(m)
+        _server(m, "B")
+        press(m, curses.KEY_RIGHT)  # joins C in phase 2
+        assert m.doc.get(("ups", 0, "remote_servers", 1, "shutdown_order")) == 2
+        assert "B  (root@10.0.0.3) -> phase 2" in m.message
+        assert m.rows()[m.cursor].label.strip().startswith("B ")
+        press(m, ">")  # B alone at the end: a new phase 3
+        assert m.doc.get(("ups", 0, "remote_servers", 1, "shutdown_order")) == 3
+        assert m.doc.get(("ups", 0, "remote_servers", 2, "shutdown_order")) == 2
+        press(m, curses.KEY_RIGHT)  # already alone in the last phase
+        assert "already on its own in the last phase" in m.message
+        _server(m, "A")
+        press(m, curses.KEY_LEFT)  # alone in phase 1
+        assert "first phase" in m.message
+        _server(m, "C")
+        press(m, "<")  # C joins A in phase 1; B's phase renumbers 3 -> 2
+        orders = [m.doc.get(("ups", 0, "remote_servers", i, "shutdown_order"))
+                  for i in range(3)]
+        assert orders == [1, 2, 1]
+
+    def test_move_left_at_the_start_creates_phase_one(self, tmp_path):
+        m = _text_model(tmp_path, ORDER_YAML)
+        _order_page(m)
+        _server(m, "B")
+        press(m, curses.KEY_LEFT)
+        orders = [m.doc.get(("ups", 0, "remote_servers", i, "shutdown_order"))
+                  for i in range(3)]
+        assert orders == [2, 1, 3]
+
+    def test_only_changed_servers_are_written(self, tmp_path):
+        m = _text_model(tmp_path, _servers_yaml(
+            [{"shutdown_order": 1}, {"shutdown_order": 1}, {}], False))
+        _order_page(m)
+        _server(m, "s2")  # default batch (0) comes first
+        press(m, curses.KEY_RIGHT)  # joins phase with s0/s1 ... renumbered
+        view = m.view["remote_servers"]
+        assert [s.get("shutdown_order") for s in view] == [1, 1, 1]
+        m2 = _text_model(tmp_path, _servers_yaml(
+            [{"shutdown_order": 1}, {"shutdown_order": 2},
+             {"shutdown_order": 3}], False))
+        _order_page(m2)
+        _server(m2, "s2")
+        text_before = m2.doc.dumps()
+        press(m2, curses.KEY_LEFT)
+        assert [s.get("shutdown_order") for s in m2.view["remote_servers"]] == \
+            [1, 2, 2]
+        changed = [a for a, b in zip(text_before.splitlines(),
+                                     m2.doc.dumps().splitlines()) if a != b]
+        assert len(changed) == 1
+
+    def test_moving_drops_legacy_parallel(self, tmp_path):
+        m = _text_model(tmp_path, _servers_yaml(
+            [{"parallel": False, "shutdown_order": 1}, {"shutdown_order": 2}],
+            False))
+        _order_page(m)
+        _server(m, "s1")
+        press(m, curses.KEY_LEFT)
+        assert not m.doc.has(("remote_servers", 0, "parallel"))
+        assert [s.get("shutdown_order") for s in m.view["remote_servers"]] == [1, 1]
+
+    def test_fixed_rows_and_enter(self, tmp_path):
+        m = _text_model(tmp_path, ORDER_YAML)
+        _order_page(m)
+        _server(m, "Loop")
+        press(m, curses.KEY_RIGHT)
+        assert "loopback delegate" in m.message
+        _server(m, "Idle")
+        press(m, curses.KEY_LEFT)
+        assert "disabled" in m.message
+        assert m.page.kind == "order"  # Left didn't leave the page
+        _server(m, "C")
+        with patch.object(chk, "probe_remote", return_value=[]) as probe:
+            press(m, "T")
+            m.run_pending()
+        assert probe.called
+        press(m, ENTER)
+        assert m.page.path == ("ups", 0, "remote_servers", 2)
+        press(m, ESC)
+        assert m.page.kind == "order"
+        m.move_phase(1)  # the cursor row is still a server: fine
+        m.pages[-1] = tui.Page("x", "order")
+        m.cursor = 0
+        with patch.object(m, "current_row", return_value=None):
+            m.move_phase(1)  # nothing selected: no-op
+
+    def test_config_errors_show_a_note(self, tmp_path):
+        m = _text_model(tmp_path, "ups: [1, 2]\n")
+        _order_page(m)
+        rows = m.rows()
+        assert len(rows) == 1 and rows[0].kind == "note"
+        assert "Fix the config errors first" in rows[0].label
+        assert ("Left/Right", "phase") not in tui.keybar_keys(m)
+        press(m, curses.KEY_RIGHT)  # no server: nothing happens
+
+    def test_search_finds_the_order_page(self, tmp_path):
+        m = _text_model(tmp_path, ORDER_YAML)
+        hits = m.search("shutdown order")
+        order = [h for h in hits if h.row.kind == "order"]
+        assert order and order[0].crumbs == "Remote servers › Shutdown order ▸"
+        m.go_to(order[0])
+        press(m, ENTER)
+        assert m.page.kind == "order"
+        # The walk doesn't descend into the order page (its servers are
+        # already reachable from the remote-server lists).
+        assert not any("Shutdown order ▸ ›" in h.crumbs
+                       for h in m._walk(tui.MODE_ADVANCED))
+
+    def test_order_page_renders(self, tmp_path, colors):
+        m = _text_model(tmp_path, ORDER_YAML)
+        _order_page(m)
+        win = FakeWindow(50, 160)
+        tui.draw(win, m)
+        out = win.dump()
+        assert "Phase 1  ── in parallel ──" in out
+        assert "A  (root@10.0.0.2)" in out
+        assert "<Left/Right> phase" in out
+
+
+def test_migration_notice_survives_the_mode_pick(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(PROD_SHAPE_YAML)
+    captured = {}
+    orig = tui.EditorModel
+
+    class Spy(orig):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            captured["m"] = self
+            captured["picked"] = []
+
+        def set_mode(self, mode):
+            super().set_mode(mode)
+            captured["picked"].append(self.mode)
+
+        def flash(self, text, level=chk.LEVEL_INFO):
+            super().flash(text, level)
+            if captured.get("picked"):
+                captured["after_pick"] = text
+    with patch.object(tui, "EditorModel", Spy):
+        _run(ConfigDocument.load(p), ["\n", "q", "y"])
+    assert "converted legacy `parallel`" in captured["after_pick"]
+    assert captured["m"].quit

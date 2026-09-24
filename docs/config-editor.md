@@ -142,6 +142,9 @@ Press `M` at any time to switch modes.
 
 Each row shows the current value, marked `(default)` when the key isn't in
 your file. A `*` before an option means its value differs from the default.
+In a multi-UPS file, the per-UPS sections (triggers, NUT login, battery
+health, self-test, energy) show the value that really applies to that UPS,
+tagged `(this UPS)`, `(global)` or `(default)`.
 The panel below it explains what the selected option does and how it affects
 the system; in advanced mode it also shows the default value. Every stage
 lists its findings. A red marker in
@@ -160,6 +163,7 @@ anyway.
 | `D` | Delete the selected item or value, or reset an option to its default. On an item's own page (a server, a UPS, a step), `D` on any row that isn't an option deletes that item |
 | `/` | Search every option by key, label or help text, in every stage |
 | `<` / `>` | Move an item up or down (order matters for compose files, mounts and steps) |
+| `Left` / `Right` | On the **Shutdown order** page: move the server under the cursor to the previous or next phase |
 | `M` | Switch between basic and advanced mode |
 | `S` | Save |
 | `Q` | Quit (asks when there are unsaved changes) |
@@ -185,6 +189,31 @@ Details worth knowing:
   matches as `stage › section › key  value`. `Enter` jumps to the row, `Esc`
   cancels. In basic mode, options that only advanced mode shows are listed
   last, marked "advanced option"; picking one switches to advanced mode.
+- **Global vs per-UPS.** A UPS without its own `self_test:` (or `triggers:`,
+  `nut_control:`, `battery_health:`, `energy:`) uses the global block, key by
+  key, exactly as the daemon does. Its rows show the global value, tagged
+  `(global)`. Editing one writes an override for that UPS only, tagged
+  `(this UPS)` and marked `*`. `D` on an override removes it ("back to
+  global"), and **Remove all overrides for this UPS** clears the whole
+  section. The global pages are titled "defaults for all UPSes" and name the
+  UPSes that override each key ("APC overrides"). Redundancy groups inherit
+  `triggers:` the same way. A single-UPS file has one set of pages.
+- **Legacy `parallel`.** On open, `remote_servers[].parallel` is converted to
+  the `shutdown_order` numbers that give the same phases (the notice says
+  how many servers), and the `parallel` key is removed. Nothing is written
+  until you save; Review & save lists the conversion. If a server combines
+  `parallel` with `shutdown_order`, or `parallel` isn't true/false, it isn't
+  converted: the row is shown as `parallel (legacy)`. Setting
+  `shutdown_order` on that server removes it.
+- **Shutdown order.** The Remote servers stage ends with **Shutdown order
+  ▸**, the same phased tree as `eneru config check` (built from the same
+  plan code), per UPS and redundancy group. Lower phases shut down first;
+  servers in the same phase shut down in parallel. `Left`/`Right` moves the
+  server under the cursor one phase earlier or later (at either end it gets
+  a phase of its own). The phases are renumbered 1..N and only the servers
+  whose `shutdown_order` changes are written. `Enter` opens the server.
+  Host-loopback delegates and disabled servers are listed but stay where
+  they are.
 
 ### How the file is written
 

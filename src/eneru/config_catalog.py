@@ -410,7 +410,8 @@ REMOTE_SERVER_SECTION = Section(
         Option("shutdown_order", "int",
                "Phase number. Lower phases shut down first; servers with the "
                "same number shut down in parallel (e.g. 1 = compute, 2 = "
-               "storage, 3 = network). Empty = legacy `parallel` behavior.",
+               "storage, 3 = network). Empty = the default batch, which runs "
+               "before every numbered phase.",
                None, nullable=True, minimum=1, tier=BASIC),
         ListSection("pre_shutdown_commands", "Pre-shutdown steps",
                     "Steps run on this server, in order, before the shutdown "
@@ -536,11 +537,13 @@ ENERGY_OVERRIDE = Section(
     "energy", "Energy (this UPS)",
     "Per-UPS tariff and watt rating; other energy settings are global.", (
         Option("cost_per_kwh", "float",
-               "Price per kWh for this UPS. Empty inherits the global value.",
+               "Price per kWh for this UPS. Unset inherits the global value "
+               "(D removes an override); empty (null) = no cost for this UPS.",
                None, nullable=True, minimum=0),
         Option("nominal_power", "float",
                "Rated WATTS (not VA) of this UPS, used to estimate power from "
-               "load %. Empty = use what NUT reports.", None, nullable=True,
+               "load %. Unset inherits the global value; empty (null) = use "
+               "what NUT reports.", None, nullable=True,
                minimum=1),
     ))
 
