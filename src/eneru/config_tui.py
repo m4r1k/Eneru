@@ -22,7 +22,7 @@ import errno
 import math
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from eneru import config_catalog as cat
@@ -99,6 +99,31 @@ class Row:
     is_default: bool = False
     help: str = ""
     action: str = ""
+    # Option rows only (see EditorModel._option_state): the value differs
+    # from what applies when the key is absent, where the shown value comes
+    # from, and the default as displayed.
+    changed: bool = False
+    source: str = ""  # SOURCE_FILE | SOURCE_DEFAULT
+    default_text: str = ""
+
+
+# Where an option row's value comes from.
+SOURCE_FILE = "file"
+SOURCE_DEFAULT = "default"
+
+
+@dataclass
+class OptionState:
+    """The one place a row's (value, default, source, changed) is decided."""
+
+    value: Any
+    default: Any
+    source: str
+    present: bool
+
+    @property
+    def changed(self) -> bool:
+        return self.present and _differs(self.value, self.default)
 
 
 @dataclass
@@ -112,6 +137,32 @@ class Page:
     # Where the cursor was on this page when a child page was opened, so
     # Esc returns to the same row instead of the top.
     cursor: int = 0
+    # A list item added by A: leaving the page while it still equals
+    # ``template`` (or is empty) removes it again.
+    fresh: bool = False
+    template: Any = None
+    # The document before the add (its YAML text): a discard restores it, so
+    # a list or comment created for the item goes away with it.
+    before_text: str = ""
+    was_modified: bool = False
+
+
+@dataclass
+class SearchHit:
+    """One `/` search result: where the option lives and how to get there."""
+
+    stage: str
+    pages: List[Page]
+    cursor: int
+    row: Row
+    crumbs: str
+    advanced_only: bool = False
+
+    @property
+    def text(self) -> str:
+        note = ("  (advanced option: switches to advanced mode)"
+                if self.advanced_only else "")
+        return f"{self.crumbs}  {self.row.value}{note}"
 
 
 @dataclass
@@ -127,6 +178,43 @@ class Prompt:
     index: int = 0
     error: str = ""
     secret: bool = False
+    # Drawn as a red box: the answer changes what happens in an outage.
+    danger: bool = False
+
+
+DRY_RUN_PATH: Tuple[str, str] = ("behavior", "dry_run")
+DRY_RUN_OFF_WARNING = ("Eneru WILL act on power loss: it will shut down VMs, "
+                       "containers, remote servers and this host. Continue?")
+DRY_RUN_ON_WARNING = ("Eneru will only LOG what it would do; nothing is shut "
+                      "down in a real outage. Continue?")
+
+
+def dry_run_warning(new: bool) -> str:
+    """The warning for switching dry-run to ``new``."""
+    return DRY_RUN_ON_WARNING if new else DRY_RUN_OFF_WARNING
+
+
+def _dry_run_of(view: Dict[str, Any]) -> bool:
+    """dry_run as the daemon reads it from a YAML 1.1 view."""
+    behavior = view.get("behavior")
+    value = behavior.get("dry_run") if isinstance(behavior, dict) else None
+    return value if isinstance(value, bool) else cat.BEHAVIOR_SECTION.children[0].default
+
+
+def _differs(value: Any, default: Any) -> bool:
+    """Does ``value`` differ from ``default``? (`""` and null both mean empty;
+    a bool never equals a number)."""
+    a = None if isinstance(value, str) and value == "" else value
+    b = None if isinstance(default, str) and default == "" else default
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is not b
+    return a != b
+
+
+def _noun(spec: Any) -> str:
+    """"Remote server" -> "remote server"; acronyms ("UPS") stay."""
+    title = getattr(spec, "title", "") or "item"
+    return title if title[:2].isupper() else title[0].lower() + title[1:]
 
 
 def _redact_urls(opt: cat.Option, value: Any) -> Any:
@@ -306,6 +394,10 @@ class EditorModel:
         return self.stages[self.stage_index]
 
     def reset_stage(self) -> None:
+        # Leaving the stage leaves every page on the stack: an untouched
+        # freshly added item must not survive that either.
+        for page in reversed(self.pages[1:]):
+            self._discard_if_untouched(page)
         title = STAGES[self.stage][0]
         self.pages = [Page(title, "stage", (), self.stage)]
         self.cursor = 0
@@ -372,8 +464,40 @@ class EditorModel:
         self.flash(text, chk.LEVEL_OK)
 
     def changes(self) -> List[str]:
-        """What differs from the file on disk, as the daemon will read it."""
-        return config_changes(self.doc.saved_view(), self.view)
+        """What differs from the file on disk, as the daemon will read it.
+
+        A dry_run change is listed first: it decides whether anything is
+        shut down at all.
+        """
+        lines = config_changes(self.doc.saved_view(), self.view)
+        dotted = ".".join(DRY_RUN_PATH)
+        return sorted(lines, key=lambda ln: not ln[2:].startswith(dotted))
+
+    def dry_run_change(self) -> Optional[str]:
+        """The warning when dry_run differs from the file on disk, else None."""
+        new = _dry_run_of(self.view)
+        if new == _dry_run_of(self.doc.saved_view()):
+            return None
+        return dry_run_warning(new)
+
+    def _guard_dry_run(self, path: Tuple[Any, ...], value: Any,
+                       apply: Callable[[], None]) -> None:
+        """Ask (in red) before ``value`` flips dry_run; otherwise apply.
+
+        Every write path (toggle, prompt, reset with D) funnels through
+        here, so the question can't be skipped by editing another way.
+        """
+        if tuple(path) != DRY_RUN_PATH:
+            apply()
+            return
+        old = _dry_run_of(self.view)
+        new = (cat.BEHAVIOR_SECTION.children[0].default if value is _RESET
+               else bool(value))
+        if new == old:
+            apply()
+            return
+        self.prompt = Prompt("confirm", dry_run_warning(new),
+                             lambda yes: yes and apply(), danger=True)
 
     def row_levels(self, rows: List[Row]) -> Dict[int, str]:
         """Mark the rows a stage finding is about (error beats warning).
@@ -445,8 +569,14 @@ class EditorModel:
             node = node[key]
         return node
 
-    def _option_row(self, base: Tuple[Any, ...], opt: cat.Option,
-                    scalar_key: str = "") -> Row:
+    def _option_state(self, base: Tuple[Any, ...], opt: cat.Option,
+                      scalar_key: str = "") -> OptionState:
+        """Effective value, default, source and "changed" for one option.
+
+        The single place that decides what a row shows; per-UPS inheritance
+        (global vs this UPS) belongs here too, so the `*` mark, the help
+        context and the value always agree.
+        """
         path = base + (opt.key,)
         item = self.vget(base) if scalar_key else None
         if scalar_key and not isinstance(item, dict):
@@ -455,8 +585,17 @@ class EditorModel:
         else:
             present = self.doc.has(path)
             value = self.vget(path) if present else opt.default
-        return Row("option", opt.key, path, opt, _fmt_value(opt, value),
-                   is_default=not present, help=opt.help)
+        return OptionState(value, opt.default,
+                           SOURCE_FILE if present else SOURCE_DEFAULT, present)
+
+    def _option_row(self, base: Tuple[Any, ...], opt: cat.Option,
+                    scalar_key: str = "") -> Row:
+        state = self._option_state(base, opt, scalar_key)
+        return Row("option", opt.key, base + (opt.key,), opt,
+                   _fmt_value(opt, state.value),
+                   is_default=state.source == SOURCE_DEFAULT, help=opt.help,
+                   changed=state.changed, source=state.source,
+                   default_text=_fmt_value(opt, state.default))
 
     def _section_rows(self, base: Tuple[Any, ...], spec: cat.Section) -> List[Row]:
         rows: List[Row] = []
@@ -650,7 +789,14 @@ class EditorModel:
         if page.kind == "stage":
             return self._stage_rows()
         if page.kind == "section":
-            return self._section_rows(page.path, page.spec)
+            rows = self._section_rows(page.path, page.spec)
+            if self.item_page() is not None:
+                noun = _noun(page.spec)
+                rows.append(Row("action", f"✕ Delete this {noun}", page.path,
+                                page.spec, help=f"Removes this {noun} from the "
+                                "file (asks first). D on any row that isn't an "
+                                "option does the same.", action="delete_item"))
+            return rows
         if page.kind == "list":
             return self._list_rows(page.path, page.spec)
         return self._scalar_rows(page.path, page.spec)
@@ -683,19 +829,33 @@ class EditorModel:
 
     # -- navigation ---------------------------------------------------
 
+    def item_page(self) -> Optional[Page]:
+        """The current page when it shows one list entry (a server, a UPS)."""
+        page = self.page
+        if page.kind == "section" and page.path and isinstance(page.path[-1], int):
+            return page
+        return None
+
+    def _child_page(self, row: Row) -> Optional[Page]:
+        """The page Enter opens for a section/list/item row (else None)."""
+        if row.kind == "section":
+            return Page(row.spec.title, "section", row.path, row.spec)
+        if row.kind == "list":
+            return Page(row.spec.title, "list", row.path, row.spec)
+        if row.kind == "item":
+            title = self._item_label(row.spec, self.doc.get(row.path), row.path[-1])
+            return Page(title, "section", row.path, row.spec)
+        return None
+
     def open_row(self) -> None:
         row = self.current_row()
         if row is None:
             return
-        if row.kind == "option":
+        child = self._child_page(row)
+        if child is not None:
+            self._push(child)
+        elif row.kind == "option":
             self.edit_option(row)
-        elif row.kind == "section":
-            self._push(Page(row.spec.title, "section", row.path, row.spec))
-        elif row.kind == "list":
-            self._push(Page(row.spec.title, "list", row.path, row.spec))
-        elif row.kind == "item":
-            title = self._item_label(row.spec, self.doc.get(row.path), row.path[-1])
-            self._push(Page(title, "section", row.path, row.spec))
         elif row.kind == "scalar":
             self.edit_scalar(row)
         elif row.kind == "add":
@@ -710,13 +870,40 @@ class EditorModel:
 
     def back(self) -> None:
         if len(self.pages) > 1:
-            self.pages.pop()
+            page = self.pages.pop()
             self.cursor = self.pages[-1].cursor
+            self._discard_if_untouched(page)
+
+    def _discard_if_untouched(self, page: Page) -> None:
+        """Drop a freshly added item nobody filled in (U1).
+
+        ELI5: taking an empty form from the pile and walking away shouldn't
+        leave a blank form in the filing cabinet.
+        """
+        if not page.fresh:
+            return
+        page.fresh = False
+        current = self.doc.to_plain_at(page.path)
+        if current not in (page.template, {}, None):
+            return
+        if not self.doc.restore(page.before_text):
+            self.doc.delete(page.path)
+        if self.doc.dumps() == page.before_text:
+            # Byte-identical to before the add: nothing is left to save.
+            self.doc.modified = page.was_modified
+        self.probe_findings = []
+        self.revalidate()
+        self.flash(f"discarded empty {_noun(page.spec)}")
 
     # -- editing ------------------------------------------------------
 
     def _write(self, path: Tuple[Any, ...], value: Any, label: str, *,
                secret: bool = False) -> None:
+        self._guard_dry_run(path, value, lambda: self._apply_write(
+            path, value, label, secret=secret))
+
+    def _apply_write(self, path: Tuple[Any, ...], value: Any, label: str, *,
+                     secret: bool = False) -> None:
         if value is _RESET:
             if self.doc.delete(path):
                 self._edited(f"{label} reset to its default")
@@ -861,16 +1048,71 @@ class EditorModel:
             self.prompt = Prompt("text", f"new {opt.key} value", done)
             return
         spec: cat.ListSection = row.spec
+        if spec.item.scalar_key:
+            self._add_scalar_item(row, spec)
+            return
+        before_text, was_modified = self.doc.dumps(), self.doc.modified
         if not self.doc.has(row.path):
             self.doc.set(row.path, [], comment_lookup=cat.help_for_path)
         new = {k: v for k, v in spec.new_item}
         if spec is cat.UPS_LIST and not self.doc.get(("ups",)):
             new["is_local"] = True
         idx = self.doc.append(row.path, new)
-        self._edited(f"added {spec.item.title.lower()}")
+        self._edited(f"added {_noun(spec.item)} (Esc on an untouched one "
+                     "discards it)")
         path = row.path + (idx,)
         self._push(Page(self._item_label(spec.item, self.doc.get(path), idx),
-                        "section", path, spec.item))
+                        "section", path, spec.item, fresh=True,
+                        template=self.doc.to_plain_at(path),
+                        before_text=before_text,
+                        was_modified=was_modified))
+
+    def _add_scalar_item(self, row: Row, spec: cat.ListSection) -> None:
+        """A on a list whose item is one value (a mount, a compose file).
+
+        Ask for the value right away; Esc adds nothing. The new entry uses
+        the form the list already uses: a bare string unless every existing
+        entry is a mapping.
+        """
+        key = spec.item.scalar_key
+        opt = cat.child(spec.item, key)
+
+        def done(text: Any) -> None:
+            _ok, value, _err = parse_input(opt, text)  # a str: always ok
+            if value is _RESET or value is None:
+                raise ValueError(f"{key} cannot be empty (Esc cancels)")
+            existing = self.doc.get(row.path, None)
+            items = existing if isinstance(existing, list) else []
+            as_map = bool(items) and all(isinstance(i, dict) for i in items)
+            if not self.doc.has(row.path):
+                self.doc.set(row.path, [], comment_lookup=cat.help_for_path)
+            idx = self.doc.append(row.path, {key: value} if as_map else value)
+            self._edited(f"added {_noun(spec.item)} {value}")
+            for i, r in enumerate(self.rows()):
+                if r.path == row.path + (idx,):
+                    self.cursor = i
+        example = f", e.g. {opt.example}" if opt.example else ""
+        self.prompt = Prompt("text", f"new {_noun(spec.item)} {key}{example}",
+                             done)
+
+    def request_delete_item(self, page: Page) -> None:
+        """Delete the list entry ``page`` shows, after a confirm (U1)."""
+        noun = _noun(page.spec)
+        label = self._item_label(page.spec, self.doc.get(page.path, None),
+                                 page.path[-1])
+
+        def done(yes: Any) -> None:
+            if not yes:
+                return
+            self.doc.delete(page.path)
+            # Leave every page inside the deleted entry; nothing to discard
+            # there any more.
+            n = len(page.path)
+            while len(self.pages) > 1 and self.pages[-1].path[:n] == page.path:
+                self.pages.pop()
+            self.cursor = self.pages[-1].cursor
+            self._edited(f"deleted {noun} '{label}'")
+        self.prompt = Prompt("confirm", f"Delete this {noun} '{label}'?", done)
 
     def delete_current(self) -> None:
         row = self.current_row()
@@ -883,12 +1125,48 @@ class EditorModel:
                     self._edited(f"deleted {row.label}")
             self.prompt = Prompt("confirm", f"Delete '{row.label}'?", done)
         elif row.kind == "option":
-            if self.doc.delete(row.path):
-                self._edited(f"{row.label} removed (default applies)")
-            else:
-                self.flash(f"{row.label} already uses its default")
+            def reset() -> None:
+                if self.doc.delete(row.path):
+                    self._edited(f"{row.label} removed (default applies)")
+                else:
+                    self.flash(f"{row.label} already uses its default")
+            self._guard_dry_run(row.path, _RESET, reset)
+        elif self.item_page() is not None:
+            self.request_delete_item(self.page)
         else:
             self.flash("nothing to delete here")
+
+    def delete_hint(self, row: Optional[Row]) -> str:
+        """What D does on ``row`` ("" = nothing); drives key bar and help."""
+        if row is None:
+            return ""
+        if row.kind == "option":
+            return "" if row.is_default else "reset"
+        if row.kind in ("item", "scalar"):
+            return "delete"
+        if self.item_page() is not None:
+            return f"delete {_noun(self.page.spec)}"
+        return ""
+
+    def row_context(self, row: Optional[Row]) -> str:
+        """One dim line under the help: the default, the `*` legend and
+        where D applies."""
+        if row is None:
+            return ""
+        parts: List[str] = []
+        if row.kind == "option":
+            if self.mode == MODE_ADVANCED:
+                parts.append(f"default: {row.default_text}")
+            parts.append("* = changed from default")
+            if not row.is_default:
+                parts.append("D resets it")
+        elif row.kind == "item":
+            parts.append(f"D deletes this {_noun(row.spec)}")
+        elif row.kind == "scalar":
+            parts.append("D deletes this value")
+        elif self.item_page() is not None:
+            parts.append(f"D deletes this {_noun(self.page.spec)}")
+        return "   ".join(parts)
 
     def move_item(self, delta: int) -> None:
         row = self.current_row()
@@ -924,6 +1202,8 @@ class EditorModel:
             self._schedule("Running every live check...", self._check_all)
         elif action == "save":
             self.request_save()
+        elif action == "delete_item" and self.item_page() is not None:
+            self.request_delete_item(self.page)
 
     def _schedule(self, busy: str, fn: Callable[[], None]) -> None:
         self.busy_text = busy
@@ -1008,6 +1288,18 @@ class EditorModel:
 
     def request_save(self) -> None:
         self.revalidate()
+        warning = self.dry_run_change() if self.doc.existed else None
+        if warning:
+            # Whatever path got it there (toggle, reset, typed YAML), a save
+            # that flips dry_run against the file on disk asks once more.
+            self.prompt = Prompt(
+                "confirm", f"Saving changes behavior.dry_run to "
+                f"{'on' if _dry_run_of(self.view) else 'off'}. {warning}",
+                lambda yes: yes and self._request_save_checked(), danger=True)
+            return
+        self._request_save_checked()
+
+    def _request_save_checked(self) -> None:
         errors = sum(1 for f in self.findings if f.level == chk.LEVEL_ERROR)
         if errors:
             self.prompt = Prompt(
@@ -1043,6 +1335,109 @@ class EditorModel:
         self.flash(f"Saved {n_changes} change(s) to {path}{where}. {reload_hint()}",
                    chk.LEVEL_OK)
 
+    # -- search (U5) ----------------------------------------------------
+
+    def _walk(self, mode: str) -> List[SearchHit]:
+        """Every option row reachable in ``mode``, with the page stack that
+        shows it. Uses the real row builders, so navigation can't drift."""
+        saved = (self.mode, self.stage_index, self.pages, self.cursor)
+        hits: List[SearchHit] = []
+        try:
+            self.mode = mode
+            for i, stage in enumerate(self.stages):
+                if stage == "review":
+                    continue
+                self.stage_index = i
+                self.pages = [Page(STAGES[stage][0], "stage", (), stage)]
+                self._walk_page(hits, [STAGES[stage][0]])
+        finally:
+            self.mode, self.stage_index, self.pages, self.cursor = saved
+        return hits
+
+    def _walk_page(self, hits: List[SearchHit], trail: List[str]) -> None:
+        heading = ""
+        for idx, row in enumerate(self.rows()):
+            if row.kind == "heading":
+                heading = row.label.split(" (")[0]
+                continue
+            here = trail + ([heading] if heading else [])
+            if row.kind == "option":
+                hits.append(SearchHit(self.stage, [replace(p) for p in self.pages],
+                                      idx, row, " › ".join(here + [row.label])))
+                continue
+            child = self._child_page(row)
+            if child is None:
+                continue
+            self.pages[-1].cursor = idx
+            self.pages.append(child)
+            self._walk_page(hits, here + [child.title])
+            self.pages.pop()
+
+    def search(self, query: str) -> List[SearchHit]:
+        """Options whose key, label or help match every word of ``query``.
+
+        Key matches rank first. In basic mode, options that only advanced
+        mode shows come last, flagged: picking one switches modes.
+        """
+        words = _search_words(query)
+        if not words:
+            return []
+        joined = "_".join(words)
+
+        def rank(hit: SearchHit) -> Optional[int]:
+            key = hit.row.spec.key.lower()
+            section = hit.crumbs.rsplit(" › ", 2)[-2]
+            text = " ".join(_search_words(
+                f"{key} {hit.row.label} {hit.row.spec.help} {section}"))
+            if not all(w in text for w in words):
+                return None
+            if key == joined:
+                return 0
+            return 1 if joined in key else 2
+
+        hits = self._walk(self.mode)
+        if self.mode == MODE_BASIC:
+            seen = {h.row.path for h in hits}
+            for hit in self._walk(MODE_ADVANCED):
+                if hit.row.path not in seen:
+                    hit.advanced_only = True
+                    hits.append(hit)
+                    seen.add(hit.row.path)
+        ranked: List[Tuple[int, int, SearchHit]] = []
+        for n, hit in enumerate(hits):
+            r = rank(hit)
+            if r is not None:
+                ranked.append((r + (10 if hit.advanced_only else 0), n, hit))
+        return [h for _, _, h in sorted(ranked, key=lambda t: (t[0], t[1]))]
+
+    def start_search(self) -> None:
+        """`/`: type a query, pick a result, land on its row."""
+        def done(text: Any) -> None:
+            query = str(text).strip()
+            if not query:
+                return
+            hits = self.search(query)[:SEARCH_LIMIT]
+            if not hits:
+                raise ValueError(f"nothing matches '{query}'")
+            prompt = Prompt("choice", f"{len(hits)} match(es) for '{query}' "
+                            "(Enter goes there, Esc cancels)",
+                            lambda _choice: self.go_to(hits[prompt.index]),
+                            options=[h.text for h in hits])
+            self.prompt = prompt
+        self.prompt = Prompt("text", "Search options (key, label or help)", done)
+
+    def go_to(self, hit: SearchHit) -> None:
+        """Navigate to a search hit: mode, stage, page stack, cursor."""
+        self.reset_stage()  # discards an untouched fresh item first
+        if hit.advanced_only:
+            self.mode = MODE_ADVANCED
+        self.stage_index = self.stages.index(hit.stage)
+        self._override_stage = None
+        self.review_scroll = 0
+        self.pages = [replace(p) for p in hit.pages]
+        self.cursor = hit.cursor
+        self.flash(("advanced mode: " if hit.advanced_only else "") + hit.crumbs)
+
     def request_quit(self) -> None:
         if not self.doc.modified:
             self.quit = True
@@ -1072,6 +1467,14 @@ def reload_hint() -> str:
         return ("Apply with `docker kill -s HUP <container>` (hot reload) or "
                 "a restart.")
     return "Apply with `systemctl reload eneru` or a restart."
+
+
+SEARCH_LIMIT = 50
+
+
+def _search_words(text: str) -> List[str]:
+    """Lower-case words; `-` and `_` split words ("self-test", "dry_run")."""
+    return text.lower().replace("-", " ").replace("_", " ").split()
 
 
 def _fmt_value_generic(value: Any) -> str:
@@ -1240,6 +1643,8 @@ def handle_key(model: EditorModel, key: int) -> None:
         model.move_item(1)
     elif key in (ord("m"), ord("M")):
         model.set_mode(MODE_ADVANCED if model.mode == MODE_BASIC else MODE_BASIC)
+    elif key == ord("/"):
+        model.start_search()
     elif key in (ord("s"), ord("S")):
         model.request_save()
     elif key in (ord("q"), ord("Q")):
@@ -1368,6 +1773,9 @@ def _draw_rows(win, model: EditorModel, x: int, top: int, bottom: int,
             safe_addstr(win, y, x, "x" if mark == chk.LEVEL_ERROR else "!",
                         curses.color_pair(C_STATUS_OB if mark == chk.LEVEL_ERROR
                                           else C_BADGE_WARN) | curses.A_BOLD)
+        if row.kind == "option" and row.changed:
+            safe_addstr(win, y, x + 1, "*",
+                        curses.color_pair(C_GOLD_KEY) | curses.A_BOLD)
         label = row.label
         safe_addstr(win, y, x + 2, truncate_to_width(label, label_w
                     if row.kind == "option" else width - 4),
@@ -1394,12 +1802,16 @@ def _draw_review(win, model: EditorModel, x: int, top: int, bottom: int,
     changes = model.changes()
     lines = [f"Changes not yet saved ({len(changes)}):" if model.doc.modified
              else f"Changes since the file was loaded ({len(changes)}):"]
+    warning = model.dry_run_change()
+    if warning:
+        lines.append(f"  ! {warning.replace(' Continue?', '')}")
     lines += [f"  {c}" for c in changes] or ["  (none)"]
     lines += ["", "What happens on power loss:"] + [f"  {ln}" for ln in model.plan]
     wrapped: List[str] = []
     for ln in lines:
         wrapped.extend(wrap(ln, width - 4))
     wrapped = wrapped[model.review_scroll:]
+    dry_run_key = ".".join(DRY_RUN_PATH)
     for ln in wrapped:
         if y >= bottom:
             break
@@ -1407,6 +1819,8 @@ def _draw_review(win, model: EditorModel, x: int, top: int, bottom: int,
         attr = gray | bold
         if ln.startswith(("  + ", "  - ", "  ~ ")):
             attr = curses.color_pair(C_GOLD_BG)  # changed options stand out
+        if ln.startswith("  ! ") or ln[4:].startswith(dry_run_key):
+            attr = curses.color_pair(C_STATUS_OB) | curses.A_BOLD
         safe_addstr(win, y, x + 2, ln, attr)
         y += 1
 
@@ -1426,7 +1840,11 @@ def _draw_bottom(win, model: EditorModel, x: int, top: int, bottom: int,
     for line in wrap(help_text, width - 4)[:3]:
         safe_addstr(win, y, x + 2, line, gold)
         y += 1
-    y = top + 3
+    context = model.row_context(row)
+    if context:
+        safe_addstr(win, top + 3, x + 2, truncate_to_width(context, width - 4),
+                    curses.color_pair(C_GOLD_DIM))
+    y = top + 4
     findings = (model.findings + model.probe_findings
                 if model.stage == "review"
                 else model.stage_findings(model.stage))
@@ -1452,6 +1870,21 @@ def _draw_bottom(win, model: EditorModel, x: int, top: int, bottom: int,
                     f"+{len(findings) - len(shown)} more", gold | curses.A_BOLD)
 
 
+def keybar_keys(model: EditorModel) -> List[Tuple[str, str]]:
+    """The key bar for the current row: A and D only where they apply."""
+    on_review = model.stage == "review" and len(model.pages) == 1
+    row = None if on_review else model.current_row()
+    keys = [("Enter", "edit/open"), ("Esc", "back"), ("/", "search"),
+            ("N/P", "stage"), ("T", "test")]
+    if any(r.kind == "add" for r in ([] if on_review else model.rows())):
+        keys.append(("A", "add"))
+    d_hint = model.delete_hint(row)
+    if d_hint:
+        keys.append(("D", d_hint))
+    keys += [("M", "mode"), ("S", "save"), ("Q", "quit")]
+    return keys
+
+
 def _draw_keybar(win, model: EditorModel, y: int, width: int) -> None:
     fill_row(win, y, curses.color_pair(C_GOLD_BG))
     if model.busy_text:
@@ -1464,9 +1897,7 @@ def _draw_keybar(win, model: EditorModel, y: int, width: int) -> None:
         safe_addstr(win, y, 0, " " * (width - 1), curses.color_pair(pair))
         safe_addstr(win, y, 1, model.message, curses.color_pair(pair) | curses.A_BOLD)
         return
-    keys = [("Enter", "edit/open"), ("Esc", "back"), ("N/P", "stage"),
-            ("T", "test"), ("A", "add"), ("D", "delete/reset"), ("M", "mode"),
-            ("S", "save"), ("Q", "quit")]
+    keys = keybar_keys(model)
     x = 1
     for key, desc in keys:
         if x + len(key) + len(desc) + 3 >= width:
@@ -1503,6 +1934,9 @@ def _draw_prompt(win, model: EditorModel, height: int, width: int) -> None:
         safe_addstr(win, top + box_h - 1, left + 1, "Up/Down, Enter pick, Esc cancel",
                     curses.color_pair(C_GRAY_DIM))
         return
+    if p.kind == "confirm" and p.danger:
+        _draw_danger(win, p, height, width)
+        return
     y = height - 3
     head = curses.color_pair(C_HEADER) | curses.A_BOLD
     fill_row(win, y, curses.color_pair(C_HEADER))
@@ -1524,6 +1958,22 @@ def _draw_prompt(win, model: EditorModel, height: int, width: int) -> None:
         win.move(y + 1, 3 + p.cursor - offset)
     except curses.error:
         pass
+
+
+def _draw_danger(win, p: Prompt, height: int, width: int) -> None:
+    """A centered red box for a question that changes outage behavior."""
+    box_w = min(width - 4, 64)
+    lines = wrap(p.title, box_w - 4)
+    box_h = min(height - 2, len(lines) + 4)
+    top = max(1, (height - box_h) // 2)
+    left = max(0, (width - box_w) // 2)
+    red = curses.color_pair(C_STATUS_OB) | curses.A_BOLD
+    for y in range(top, top + box_h):
+        safe_addstr(win, y, left, " " * box_w, red)
+    for n, line in enumerate(lines[:box_h - 4]):
+        safe_addstr(win, top + 1 + n, left + 2, line, red)
+    safe_addstr(win, top + box_h - 2, left + 2, "[y] yes   [n] no (Enter = no)",
+                red)
 
 
 def draw(win, model: EditorModel) -> None:

@@ -30,6 +30,10 @@ the dashboard, and self-tests that no longer look like outages.
     0600 and start with `dry_run: true`.
   - Review & save lists every change against the file on disk and shows what
     happens on power loss.
+  - `/` searches every option; a `*` marks values changed from their default;
+    anything added can be deleted from its own page, and an untouched new
+    item is discarded. Switching `dry_run` in either direction asks first, in
+    red, and Review & save lists that change first.
   - The container image ships it: `docker exec -it eneru eneru config` saves
     through the config bind mount (the backup goes to the state volume) and
     `docker kill -s HUP eneru` applies it. For a first setup without Eneru on
@@ -47,6 +51,8 @@ the dashboard, and self-tests that no longer look like outages.
     tool each step needs; harmless listings (`docker ps`, `virsh list`, ...);
     and `sudo -n -l <command>` to prove NOPASSWD sudo without running anything.
   - It ends with a "what happens on power loss" timeline and exits 1 on errors.
+  - A phased shutdown-order tree follows it: what runs in parallel and what
+    waits for which phase, per UPS and redundancy group.
 - **Failed self-tests protect the next outage.** A hard failure is stored across
   restarts and triggers the normal shutdown path when a later real outage lasts
   longer than `triggers.self_test_failure_shutdown_delay` (30 s by default).

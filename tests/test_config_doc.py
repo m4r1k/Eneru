@@ -1317,3 +1317,32 @@ def test_temp_file_mode_is_set_through_the_descriptor(tmp_path):
     with patch.object(cd.os, "chmod", side_effect=AssertionError("path chmod")):
         doc.save(backup=False)
     assert stat.S_IMODE(p.stat().st_mode) == 0o640
+
+
+def test_append_to_new_empty_list_keeps_the_next_heading_below(tmp_path):
+    doc = _doc(tmp_path, "ups:\n  name: a\n\n# ==== TRIGGERS ====\ntriggers:\n"
+               "  low_battery_threshold: 20\n")
+    doc.set(("ups", "remote_servers"), [])
+    doc.append(("ups", "remote_servers"), {"name": "x"})
+    text = doc.dumps()
+    assert text.index("name: x") < text.index("# ==== TRIGGERS")
+    assert doc.daemon_view()["ups"]["remote_servers"] == [{"name": "x"}]
+
+
+def test_append_to_flow_empty_list_with_eol_comment(tmp_path):
+    doc = _doc(tmp_path, "mounts: []  # none yet\n# next\nother: 1\n")
+    doc.append(("mounts",), "/mnt/a")
+    text = doc.dumps()
+    assert text.index("/mnt/a") < text.index("# next")
+    assert doc.daemon_view() == {"mounts": ["/mnt/a"], "other": 1}
+
+
+def test_restore_undoes_to_earlier_text(tmp_path):
+    doc = _doc(tmp_path, "# head\nups:\n  name: a  # eol\n")
+    before = doc.dumps()
+    doc.set(("remote_servers",), [], comment_lookup=lambda p: "Servers.")
+    doc.append(("remote_servers",), {"name": "x"})
+    assert doc.restore(before) is True
+    assert doc.dumps() == before
+    assert doc.restore("") is False and doc.restore("- a\n") is False
+    assert doc.dumps() == before

@@ -261,9 +261,11 @@ class TestEditing:
         goto(m, "safety")
         select(m, "dry_run")
         press(m, ENTER)
+        assert m.prompt.danger  # U2: dry_run asks first
+        press(m, "y")
         assert m.doc.get(("behavior", "dry_run")) is True
         assert m.doc.modified
-        press(m, " ")
+        press(m, " ", "y")
         assert m.doc.get(("behavior", "dry_run")) is False
 
     def test_bool_default_toggle_new_key(self, tmp_path):
@@ -556,6 +558,8 @@ class TestLists:
         press(m, "a")
         assert m.page.kind == "section"
         assert m.doc.get(("remote_servers", 1, "name")) == "New server"
+        select(m, "host")
+        press(m, ENTER, "10.0.0.9", ENTER)  # touched: kept on Esc
         select(m, "Test this server now (SSH, sudo, every step)")
         press(m, ESC)
         labels = [r.label for r in m.rows()]
@@ -817,8 +821,8 @@ class TestActions:
         m = _model(tmp_path, "config-minimal.yaml")
         goto(m, "safety")
         select(m, "dry_run")
-        press(m, ENTER)
-        press(m, "s")
+        press(m, ENTER, "y")
+        press(m, "s", "y")  # saving flips dry_run against the disk: confirm
         assert not m.doc.modified
         assert "Saved" in m.message and ".bak" in m.message
         assert (tmp_path / "config-minimal.yaml.bak").exists()
@@ -1264,7 +1268,7 @@ class TestYaml11View:
         assert row.value == "on" and not row.is_default
         assert not [f for f in m.stage_findings("safety")
                     if f.level == chk.LEVEL_ERROR and "dry_run" in f.message]
-        press(m, ENTER)  # toggles based on the daemon's True
+        press(m, ENTER, "y")  # toggles based on the daemon's True
         assert m.vget(("behavior", "dry_run")) is False
 
     def test_typed_time_stays_a_string_for_the_daemon(self, tmp_path):
@@ -1606,3 +1610,393 @@ def test_mqtt_broker_credentials_are_masked_in_the_editor(tmp_path):
     assert not [c for c in m.changes() if "s3cret" in c]
     press(m, ENTER, "\x15", "mqtt://bob:hunter2@h:1883", ENTER)
     assert "hunter2" not in m.message and "broker = " in m.message
+
+
+# ---------------------------------------------------------------------------
+# UX round (6.2.0): U1 remove what you add, U2 dry-run warning, U4 changed
+# marks, U5 search
+# ---------------------------------------------------------------------------
+
+MOUNTS_YAML = """\
+ups:
+  name: ups@localhost
+filesystems:
+  unmount:
+    enabled: true
+    mounts:
+      - "/mnt/media"
+      - path: "/mnt/nas"
+        options: "-l"
+"""
+
+
+def _mounts_page(m):
+    goto(m, "local")
+    select(m, "> Unmount")
+    press(m, ENTER)
+    select(m, lambda r: r.kind == "list")
+    press(m, ENTER)
+    assert m.page.title == "Mount points"
+
+
+class TestU1AddAndRemove:
+    def test_add_mount_prompts_for_the_path_and_esc_adds_nothing(self, tmp_path):
+        m = _text_model(tmp_path, MOUNTS_YAML)
+        _mounts_page(m)
+        press(m, "A")
+        assert m.prompt.kind == "text" and "path" in m.prompt.title
+        assert "/mnt/nas" in m.prompt.title  # the example
+        press(m, ESC)
+        assert m.prompt is None and not m.doc.modified
+        assert len(m.doc.get(("filesystems", "unmount", "mounts"))) == 2
+
+    def test_added_mount_is_a_bare_string_and_selected(self, tmp_path):
+        m = _text_model(tmp_path, MOUNTS_YAML)
+        _mounts_page(m)
+        press(m, "A", ENTER)
+        assert "cannot be empty" in m.prompt.error  # empty: prompt stays
+        press(m, " /mnt/x ", ENTER)
+        assert m.doc.get(("filesystems", "unmount", "mounts", 2)) == "/mnt/x"
+        assert m.current_row().label == "/mnt/x"
+        assert m.message == "added mount point /mnt/x"
+        assert m.page.kind == "list"  # no empty item page to escape from
+
+    def test_added_mount_follows_an_all_mapping_list(self, tmp_path):
+        m = _text_model(tmp_path, MOUNTS_YAML.replace(
+            '      - "/mnt/media"\n', ""))
+        _mounts_page(m)
+        press(m, "A", "/mnt/y", ENTER)
+        assert m.doc.to_plain_at(("filesystems", "unmount", "mounts", 1)) == {
+            "path": "/mnt/y"}
+
+    def test_add_compose_file_creates_the_list(self, tmp_path):
+        m = _text_model(tmp_path, "ups:\n  name: a\ncontainers:\n  enabled: true\n")
+        goto(m, "local")
+        select(m, lambda r: r.path == ("containers", "compose_files"))
+        press(m, ENTER, "A", "/opt/app/compose.yml", ENTER)
+        assert m.doc.get(("containers", "compose_files")) == ["/opt/app/compose.yml"]
+        assert "Compose stacks stopped first" in m.doc.dumps()
+
+    def test_untouched_new_item_is_discarded_on_esc(self, tmp_path):
+        m = _model(tmp_path, "config-minimal.yaml")
+        before = m.doc.dumps()
+        goto(m, "remote")
+        press(m, "a")
+        assert m.page.fresh and m.doc.modified
+        press(m, ESC)
+        assert m.message == "discarded empty remote server"
+        assert m.doc.dumps() == before  # the list and its comment went too
+        assert not m.doc.modified
+
+    def test_empty_new_item_is_discarded_and_edited_one_kept(self, tmp_path):
+        m = _model(tmp_path)
+        goto(m, "remote")
+        select(m, lambda r: r.kind == "item")
+        press(m, ENTER)
+        select(m, lambda r: r.kind == "list")
+        press(m, ENTER)
+        before = m.doc.to_plain_at(m.page.path)
+        press(m, "a")  # a pre-shutdown step: new_item is {}
+        press(m, ESC)
+        assert m.message == "discarded empty pre-shutdown step"
+        assert m.doc.to_plain_at(m.page.path) == before
+        assert m.doc.modified is False
+        press(m, "a")
+        select(m, "command")
+        press(m, ENTER, "true", ENTER, ESC)
+        assert m.doc.to_plain_at(m.page.path)[-1] == {"command": "true"}
+        assert m.doc.modified
+
+    def test_stage_and_mode_switch_discard_too(self, tmp_path):
+        m = _model(tmp_path, "config-minimal.yaml")
+        goto(m, "remote")
+        press(m, "a")
+        m.go_stage(0, validate=False)
+        assert not m.doc.get(("remote_servers",))
+        goto(m, "remote")
+        press(m, "a")
+        press(m, "m")
+        assert not m.doc.get(("remote_servers",))
+
+    def test_discard_falls_back_to_delete(self, tmp_path):
+        m = _model(tmp_path, "config-minimal.yaml")
+        goto(m, "remote")
+        press(m, "a")
+        with patch.object(m.doc, "restore", return_value=False):
+            press(m, ESC)
+        assert m.doc.get(("remote_servers",)) == []
+        assert m.doc.modified
+
+    def test_delete_row_on_every_item_page(self, tmp_path):
+        m = _model(tmp_path)
+        goto(m, "remote")
+        select(m, lambda r: r.kind == "item")
+        press(m, ENTER)
+        name = m.doc.get(m.page.path + ("name",))
+        row = m.rows()[-1]
+        assert row.label == "✕ Delete this remote server"
+        select(m, row.label)
+        press(m, ENTER)
+        assert m.prompt.kind == "confirm" and name in m.prompt.title
+        press(m, "n")
+        assert m.doc.get(("remote_servers", 0, "name")) == name
+        press(m, ENTER, "y")
+        assert m.page.kind == "stage"
+        assert m.message.startswith(f"deleted remote server '{name}")
+        assert all(s.get("name") != name for s in m.doc.get(("remote_servers",)))
+
+    def test_d_on_a_non_option_row_deletes_the_item(self, tmp_path):
+        m = _model(tmp_path, "config-dual-ups.yaml", tui.MODE_ADVANCED)
+        goto(m, "ups")
+        n = len(m.doc.get(("ups",)))
+        select(m, lambda r: r.kind == "item")
+        press(m, ENTER)
+        select(m, lambda r: r.kind == "section")
+        assert m.delete_hint(m.current_row()) == "delete UPS"
+        assert m.row_context(m.current_row()) == "D deletes this UPS"
+        press(m, "d", "y")
+        assert len(m.doc.get(("ups",))) == n - 1 and m.page.kind == "stage"
+
+    def test_delete_pops_pages_inside_the_item(self, tmp_path):
+        m = _model(tmp_path)
+        goto(m, "remote")
+        select(m, lambda r: r.kind == "item")
+        press(m, ENTER)
+        page = m.page
+        select(m, lambda r: r.kind == "list")
+        press(m, ENTER)
+        m.request_delete_item(page)  # e.g. from a nested page
+        press(m, "y")
+        assert m.page.kind == "stage"
+
+    def test_delete_item_action_off_an_item_page_is_ignored(self, tmp_path):
+        m = _model(tmp_path)
+        m.run_action(tui.Row("action", "", (), None, action="delete_item"))
+        assert m.prompt is None
+
+    def test_hints_for_every_row_kind(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        assert m.delete_hint(None) == "" and m.row_context(None) == ""
+        goto(m, "safety")
+        row = select(m, "dry_run")
+        assert m.delete_hint(row) == "reset"
+        ctx = m.row_context(row)
+        assert "default: off" in ctx and "* = changed" in ctx and "D resets" in ctx
+        row = select(m, "on_battery_stabilization_delay")
+        m.doc.delete(row.path)
+        m.revalidate()
+        row = select(m, "on_battery_stabilization_delay")
+        assert m.delete_hint(row) == "" and "D resets" not in m.row_context(row)
+        row = select(m, "> Battery depletion rate")
+        assert m.delete_hint(row) == "" and m.row_context(row) == ""
+        goto(m, "remote")
+        row = select(m, lambda r: r.kind == "item")
+        assert m.delete_hint(row) == "delete"
+        assert m.row_context(row) == "D deletes this remote server"
+        goto(m, "notifications")
+        select(m, "urls")
+        press(m, ENTER)
+        row = select(m, lambda r: r.kind == "scalar")
+        assert m.row_context(row) == "D deletes this value"
+        m.mode = tui.MODE_BASIC
+        goto(m, "safety")
+        assert "default:" not in m.row_context(select(m, "dry_run"))
+
+    def test_keybar_shows_a_and_d_only_where_they_apply(self, tmp_path):
+        m = _model(tmp_path)
+        keys = dict(tui.keybar_keys(m))  # UPS stage (single-UPS layout)
+        assert "A" not in keys and keys["/"] == "search"
+        goto(m, "remote")
+        keys = dict(tui.keybar_keys(m))
+        assert keys["A"] == "add" and keys["D"] == "delete"
+        goto(m, "review")
+        keys = dict(tui.keybar_keys(m))
+        assert "A" not in keys and "D" not in keys
+
+
+class TestU2DryRun:
+    def test_turning_it_off_warns_in_red(self, tmp_path):
+        m = _text_model(tmp_path, "ups:\n  name: a\nbehavior:\n  dry_run: true\n")
+        goto(m, "safety")
+        select(m, "dry_run")
+        press(m, ENTER)
+        assert m.prompt.danger and m.prompt.title == tui.DRY_RUN_OFF_WARNING
+        press(m, ENTER)  # Enter = no
+        assert m.vget(tui.DRY_RUN_PATH) is True
+        press(m, ENTER, "y")
+        assert m.vget(tui.DRY_RUN_PATH) is False
+
+    def test_reset_with_d_warns_and_noop_reset_does_not(self, tmp_path):
+        m = _text_model(tmp_path, "ups:\n  name: a\nbehavior:\n  dry_run: true\n")
+        goto(m, "safety")
+        select(m, "dry_run")
+        press(m, "d")
+        assert m.prompt.title == tui.DRY_RUN_OFF_WARNING
+        press(m, "y")
+        assert not m.doc.has(tui.DRY_RUN_PATH)
+        press(m, "d")  # already the default: nothing to confirm
+        assert m.prompt is None and "already uses its default" in m.message
+
+    def test_turning_it_on_warns(self, tmp_path):
+        m = _model(tmp_path, "config-minimal.yaml")
+        goto(m, "safety")
+        select(m, "dry_run")
+        press(m, ENTER)
+        assert m.prompt.title == tui.DRY_RUN_ON_WARNING
+        press(m, "y")
+        assert m.vget(tui.DRY_RUN_PATH) is True
+        # Writing the same effective value asks nothing.
+        m._write(tui.DRY_RUN_PATH, True, "dry_run")
+        assert m.prompt is None
+
+    def test_review_lists_it_first_and_save_asks(self, tmp_path):
+        m = _model(tmp_path, "config-minimal.yaml")
+        assert m.dry_run_change() is None
+        m.doc.set(("triggers", "low_battery_threshold"), 30)
+        m.doc.set(tui.DRY_RUN_PATH, True)
+        m.revalidate()
+        assert m.changes()[0].startswith("~ behavior.dry_run") or \
+            m.changes()[0].startswith("+ behavior.dry_run")
+        assert m.dry_run_change() == tui.DRY_RUN_ON_WARNING
+        press(m, "s")
+        assert m.prompt.danger and "to on" in m.prompt.title
+        press(m, "n")
+        assert m.doc.modified  # not saved
+        press(m, "s", "y")
+        assert not m.doc.modified and "Saved" in m.message
+        assert m.dry_run_change() is None
+
+    def test_new_file_save_does_not_ask(self, tmp_path):
+        doc = ConfigDocument.load(tmp_path / "new.yaml")
+        tui.seed_new_document(doc)
+        m = tui.EditorModel(doc)
+        assert m.dry_run_change() == tui.DRY_RUN_ON_WARNING  # vs no file
+        press(m, "s")
+        assert m.prompt is None and "Saved" in m.message
+
+    def test_dry_run_of_odd_shapes(self):
+        assert tui._dry_run_of({}) is False
+        assert tui._dry_run_of({"behavior": "x"}) is False
+        assert tui._dry_run_of({"behavior": {"dry_run": "yes"}}) is False
+        assert tui._dry_run_of({"behavior": {"dry_run": True}}) is True
+        assert tui.dry_run_warning(True) == tui.DRY_RUN_ON_WARNING
+
+    def test_review_and_danger_render_red(self, tmp_path, colors):
+        m = _model(tmp_path, "config-minimal.yaml")
+        m.doc.set(tui.DRY_RUN_PATH, True)
+        m.revalidate()
+        goto(m, "review")
+        win = FakeWindow(40, 160)
+        tui.draw(win, m)
+        out = win.dump()
+        assert "! Eneru will only LOG" in out
+        assert out.index("behavior.dry_run") < out.index("What happens")
+        m.prompt = tui.Prompt("confirm", tui.DRY_RUN_OFF_WARNING,
+                              lambda y: None, danger=True)
+        win = FakeWindow(40, 120)
+        tui.draw(win, m)
+        assert "Eneru WILL act on power loss" in win.dump()
+        assert "Enter = no" in win.dump()
+
+
+class TestU4ChangedMarks:
+    def test_differs(self):
+        assert not tui._differs(20, 20) and tui._differs(300, 600)
+        assert not tui._differs("", None) and not tui._differs(None, "")
+        assert tui._differs(False, None) and tui._differs(0, False)
+        assert not tui._differs(False, False) and tui._differs(True, False)
+        assert not tui._differs(15, 15.0) and not tui._differs([], [])
+
+    def test_rows_mark_changed_values_only(self, tmp_path):
+        m = _text_model(tmp_path, "ups:\n  name: a\ntriggers:\n"
+                        "  low_battery_threshold: 20\n"
+                        "  critical_runtime_threshold: 300\n")
+        goto(m, "safety")
+        same = select(m, "low_battery_threshold")
+        assert not same.changed and not same.is_default
+        assert same.source == tui.SOURCE_FILE and same.default_text == "20"
+        diff = select(m, "critical_runtime_threshold")
+        assert diff.changed
+        absent = select(m, "dry_run")
+        assert not absent.changed and absent.source == tui.SOURCE_DEFAULT
+        state = m._option_state(("triggers",), cat.TRIGGERS_SECTION.children[1])
+        assert state.changed and state.value == 300 and state.default == 600
+
+    def test_star_is_drawn(self, tmp_path, colors):
+        m = _text_model(tmp_path, "ups:\n  name: a\ntriggers:\n"
+                        "  critical_runtime_threshold: 300\n")
+        goto(m, "safety")
+        win = FakeWindow(40, 160)
+        tui.draw(win, m)
+        out = win.dump()
+        assert "*critical_runtime_threshold" in out
+        assert "*low_battery_threshold" not in out
+        assert "* = changed from default" in out
+
+
+class TestU5Search:
+    def test_slash_finds_navigates_and_esc_returns(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        press(m, "/")
+        assert m.prompt.kind == "text" and "Search" in m.prompt.title
+        press(m, "dry run", ENTER)
+        assert m.prompt.kind == "choice"
+        assert m.prompt.options[0].startswith("Safety & triggers › Behavior › dry_run")
+        press(m, ENTER)
+        assert m.stage == "safety" and m.current_row().label == "dry_run"
+        assert "dry_run" in m.message
+
+    def test_nested_hit_restores_the_page_stack(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        hits = m.search("critical_rate")
+        assert hits and all(h.row.label == "critical_rate" for h in hits)
+        m.go_to(hits[0])
+        assert m.page.title == "Battery depletion rate"
+        assert m.current_row().label == "critical_rate"
+        press(m, ESC)
+        assert m.current_row().label == "> Battery depletion rate"
+
+    def test_basic_mode_offers_advanced_options_last(self, tmp_path):
+        m = _model(tmp_path)
+        hits = m.search("battery install date")
+        assert hits and all(h.advanced_only for h in hits)
+        assert "advanced option: switches to advanced mode" in hits[0].text
+        mixed = m.search("threshold")
+        flags = [h.advanced_only for h in mixed]
+        assert flags == sorted(flags) and False in flags and True in flags
+        m.go_to(hits[0])
+        assert m.mode == tui.MODE_ADVANCED and m.stage == "health"
+        assert m.current_row().label == "battery_install_date"
+        assert m.message.startswith("advanced mode: ")
+
+    def test_exact_key_ranks_first(self, tmp_path):
+        m = _model(tmp_path, mode=tui.MODE_ADVANCED)
+        assert m.search("timeout")[0].row.label == "timeout"
+        assert m.search("   ") == []
+
+    def test_no_match_and_empty_query(self, tmp_path):
+        m = _model(tmp_path)
+        press(m, "/", "zzzqqq", ENTER)
+        assert m.prompt is not None and "nothing matches" in m.prompt.error
+        press(m, ESC)
+        state = (m.stage_index, len(m.pages), m.cursor)
+        press(m, "/", ENTER)
+        assert m.prompt is None
+        assert (m.stage_index, len(m.pages), m.cursor) == state
+
+    def test_walk_leaves_the_model_untouched(self, tmp_path):
+        m = _model(tmp_path, "config-redundancy.yaml", tui.MODE_ADVANCED)
+        goto(m, "local")
+        m.cursor = 3
+        before = (m.mode, m.stage_index, [p.title for p in m.pages], m.cursor)
+        hits = m._walk(tui.MODE_ADVANCED)
+        assert len(hits) > 100
+        assert (m.mode, m.stage_index, [p.title for p in m.pages],
+                m.cursor) == before
+
+    def test_search_discards_an_untouched_fresh_item(self, tmp_path):
+        m = _model(tmp_path, "config-minimal.yaml", tui.MODE_ADVANCED)
+        goto(m, "remote")
+        press(m, "a")
+        m.go_to(m.search("dry run")[0])
+        assert not m.doc.get(("remote_servers",))

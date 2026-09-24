@@ -222,6 +222,11 @@ def _detach_trailing_comment(node: Any) -> Any:
     container, key = _last_comment_slot(node)
     if container is None:
         return None
+    return _detach_slot_comment(container, key)
+
+
+def _detach_slot_comment(container: Any, key: Any) -> Any:
+    """Cut the block after ``container[key]``'s line (its EOL comment stays)."""
     entry = container.ca.items.get(key)
     pos = _comment_pos(container)
     if not entry or len(entry) <= pos or entry[pos] is None:
@@ -662,6 +667,12 @@ class ConfigDocument:
             self.set(path, [])
             seq = self.get(path)
         trailing = _detach_trailing_comment(seq)
+        parent = self.get(path[:-1], None) if len(path) > 1 else self.data
+        if (trailing is None and not len(seq) and isinstance(parent, CommentedMap)
+                and path[-1] in parent):
+            # An empty list (`key: []`, or one set() just created) carries the
+            # next section's heading on its own key: move it below the item.
+            trailing = _detach_slot_comment(parent, path[-1])
         item = _plain_to_commented(value)
         seq.append(item)
         if trailing is not None:
@@ -926,3 +937,16 @@ class ConfigDocument:
     def snapshot(self) -> CommentedMap:
         """Deep copy for undo/cancel of a sub-editor."""
         return copy.deepcopy(self.data)
+
+    def restore(self, text: str) -> bool:
+        """Undo back to ``text`` (an earlier ``dumps()``); False = not done.
+
+        Re-parsing keeps every comment and block style exactly (a deep copy
+        of the ruamel tree doesn't). Only a mapping document is restored.
+        """
+        data = self._yaml.load(text) if text.strip() else None
+        if not isinstance(data, CommentedMap):
+            return False
+        self.data = data
+        self._pending_trailing = []
+        return True
