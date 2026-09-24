@@ -786,6 +786,51 @@ if ! curl -fsS "$UPS_PLAN_URL" > /tmp/test43-plan.json; then
   echo "FAIL: per-UPS shutdown plan endpoint did not respond"
   exit 1
 fi
+
+# 6.2 UX contract: next-trigger outlook, role, freshness and status
+# vocabulary on the live API, plus the state-file EPOCH the TUI reads.
+if ! curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test43-ups.json || \
+   ! curl -fsS 'http://127.0.0.1:9100/api/v1/ups/TestUPS%40localhost%3A3493' \
+     > /tmp/test43-ups-one.json; then
+  echo "FAIL: /api/v1/ups did not respond"
+  exit 1
+fi
+if ! python3 - /tmp/test43-ups.json /tmp/test43-ups-one.json \
+     /tmp/test43-plan.json /tmp/eneru-e2e-state <<'PY'
+import json
+import sys
+import time
+
+fleet = json.load(open(sys.argv[1], encoding="utf-8"))
+one = json.load(open(sys.argv[2], encoding="utf-8"))
+plan = json.load(open(sys.argv[3], encoding="utf-8"))
+state = dict(line.split("=", 1)
+             for line in open(sys.argv[4], encoding="utf-8").read().splitlines())
+assert isinstance(fleet["generatedAt"], float)
+assert isinstance(one["generatedAt"], float)
+row = fleet["ups"][0]
+assert "nextTrigger" in row and row["nextTrigger"] is None, row["nextTrigger"]
+ids = [t["id"] for t in row["triggerOutlook"]["triggers"]]
+assert ids == ["fsd", "failsafe", "lowBattery", "criticalRuntime",
+               "depletionRate", "extendedTime", "selfTestFailure"], ids
+assert row["triggerOutlook"]["onBattery"] is False
+assert row["role"]["kind"] in ("local", "remote-only", "monitor-only"), row["role"]
+assert row["triggerOutlook"]["action"]["label"]
+assert row["freshness"]["stale"] is False
+assert abs(row["freshness"]["lastPollAt"] - time.time()) < 60
+assert row["statusSummary"]["state"] == "online", row["statusSummary"]
+assert row["statusSummary"]["severity"] == "ok"
+assert plan["triggers"]["conditions"][0].startswith("charge below ")
+assert plan["role"]["kind"] == row["role"]["kind"]
+assert abs(float(state["EPOCH"]) - time.time()) < 60
+assert state["TIMESTAMP_ISO"][-6] in "+-"
+print("PASS (43a): next-trigger/role/freshness contract on the live API")
+PY
+then
+  echo "FAIL: /api/v1/ups is missing the 6.2 outlook contract"
+  cat /tmp/test43-ups.json /tmp/eneru-e2e-state 2>/dev/null || true
+  exit 1
+fi
 # apply_scenario blocks until upsd serves the new state (no reload race).
 apply_scenario low-battery
 UPS_PROGRESS_SEEN=false
@@ -812,6 +857,11 @@ assert phases["vms"]["detail"] == "disabled"
 assert phases["remote"]["state"] == "succeeded"
 assert progress["remotes"]
 assert all(remote["state"] == "succeeded" for remote in progress["remotes"])
+# The TUI reads the same progress from the sidecar next to the state file.
+with open("/tmp/eneru-e2e-state.shutdown-progress.json", encoding="utf-8") as handle:
+    sidecar = json.load(handle)
+assert sidecar["runId"] == progress["runId"]
+assert sidecar["state"] == "succeeded" and sidecar["writtenAt"] > 0
 PY
   then
     UPS_PROGRESS_SEEN=true

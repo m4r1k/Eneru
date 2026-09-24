@@ -4,7 +4,7 @@ import math
 import shutil
 import subprocess
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 CONTAINER_DEFAULT_KNOWN_HOSTS_FILE = "/var/lib/eneru/ssh/known_hosts"
@@ -291,6 +291,121 @@ def humanize_event_type(event_type: Any) -> str:
             lower = word.lower()
             rendered.append(lower.capitalize() if index == 0 else lower)
     return " ".join(rendered)
+
+
+# ---------------------------------------------------------------------------
+# M1: one status vocabulary + a 3-level severity scale for every surface.
+#
+# ELI5: a traffic light, not a dictionary. NUT hands us a row of stamps
+# ("OB DISCHRG LB"); every screen used to translate them its own way, so the
+# same outage read "ON BATTERY - DISCHARGING" in the TUI and "Running on
+# battery · Battery discharging" on the web, and "on battery, fine" blinked as
+# red as "about to die". status_summary() picks ONE short word per state and
+# ONE of three colours; the long token-by-token text stays in ``detail``.
+# ---------------------------------------------------------------------------
+SEVERITY_OK = "ok"
+SEVERITY_WARN = "warn"
+SEVERITY_CRIT = "crit"
+SEVERITY_LEVELS = (SEVERITY_OK, SEVERITY_WARN, SEVERITY_CRIT)
+
+# state -> (short label, base severity). Order of the checks lives in
+# status_summary(); this table is the single wording source.
+STATUS_STATES = {
+    "shutting_down": ("Shutting down", SEVERITY_CRIT),
+    "trigger_active": ("Shutdown triggered", SEVERITY_CRIT),
+    "connection_lost": ("Connection lost", SEVERITY_WARN),
+    "stale": ("Stale data", SEVERITY_WARN),
+    "output_off": ("UPS output off", SEVERITY_CRIT),
+    "low_battery": ("Low battery", SEVERITY_CRIT),
+    "on_battery": ("On battery", SEVERITY_WARN),
+    "bypass": ("On bypass", SEVERITY_WARN),
+    "online": ("On mains", SEVERITY_OK),
+    "waiting": ("Waiting for data", SEVERITY_WARN),
+    "unknown": ("Status unknown", SEVERITY_WARN),
+}
+_BLINK_STATES = frozenset({"shutting_down", "trigger_active"})
+
+
+def status_summary(status: Any, *, trigger_active: bool = False,
+                   shutting_down: bool = False, connection_state: str = "OK",
+                   stale: bool = False) -> Dict[str, Any]:
+    """Classify a NUT status (+ Eneru context) into the shared vocabulary.
+
+    Returns ``{state, label, severity, blink, detail, tokens}``. First match
+    wins: shutting down (or FSD) > trigger active > connection lost > stale >
+    output off > low battery > on battery > bypass > on mains > waiting >
+    unknown. Only the two "the host is about to go down" states blink.
+    """
+    tokens = str(status or "").upper().split()
+    if shutting_down or "FSD" in tokens:
+        state = "shutting_down"
+    elif trigger_active:
+        state = "trigger_active"
+    elif str(connection_state or "OK").upper() == "FAILED":
+        state = "connection_lost"
+    elif stale:
+        state = "stale"
+    elif "OFF" in tokens:
+        state = "output_off"
+    elif "LB" in tokens:
+        state = "low_battery"
+    elif "OB" in tokens:
+        state = "on_battery"
+    elif "BYPASS" in tokens:
+        state = "bypass"
+    elif "OL" in tokens:
+        state = "online"
+    elif not tokens or "WAIT" in tokens:
+        state = "waiting"
+    else:
+        state = "unknown"
+    label, severity = STATUS_STATES[state]
+    if state == "connection_lost" and "OB" in tokens:
+        # Losing NUT while on battery is the FAILSAFE path, not a hiccup.
+        severity = SEVERITY_CRIT
+    if state == "online" and any(t in tokens for t in ("ALARM", "OVER", "RB")):
+        severity = SEVERITY_WARN
+    return {
+        "state": state,
+        "label": label,
+        "severity": severity,
+        "blink": state in _BLINK_STATES,
+        "detail": humanize_nut_status(status) if tokens else "Status unknown",
+        "tokens": tokens,
+    }
+
+
+def severity_rank(severity: Any) -> int:
+    """ok=0, warn=1, crit=2; anything unrecognised ranks as warn."""
+    try:
+        return SEVERITY_LEVELS.index(severity)
+    except ValueError:
+        return 1
+
+
+def worst_severity(severities: Iterable[Any]) -> str:
+    """The most severe level in ``severities`` ("ok" when empty)."""
+    worst = SEVERITY_OK
+    for sev in severities:
+        if severity_rank(sev) > severity_rank(worst):
+            worst = SEVERITY_LEVELS[severity_rank(sev)]
+    return worst
+
+
+def format_age(seconds: Any) -> str:
+    """Relative age for "updated 4s ago" / "14d ago" labels."""
+    if not is_numeric(seconds):
+        return "unknown"
+    seconds = max(0, int(float(seconds)))
+    if seconds < 2:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 def format_seconds(seconds: Any) -> str:

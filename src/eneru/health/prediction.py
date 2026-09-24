@@ -28,6 +28,10 @@ __all__ = [
     "least_squares_slope",
     "predict_replacement",
     "replacement_eta",
+    "MAX_REPLACEMENT_DAYS",
+    "bounded_replacement",
+    "bounded_replacement_eta",
+    "format_replacement_eta",
     "runtime_score",
     "self_test_score",
 ]
@@ -278,3 +282,109 @@ def replacement_eta(history: List[Tuple[float, float]], *,
             return None, None
         return installed + expected_life_years * 365.25 * 86400, "age"
     return None, None
+
+
+# ---------------------------------------------------------------------------
+# H6: keep the replacement estimate believable.
+#
+# ELI5: a tyre-wear gauge that says "replace in 560 years" is not wrong maths,
+# it's a nearly-flat line extrapolated to infinity. A tyre also has a
+# use-by date. So the estimate is the EARLIER of "the wear trend says" and
+# "the calendar says" (expected_life - age), and anything past 10 years is
+# just "> 10 yr". Days are shown as months/years once they get large.
+# ---------------------------------------------------------------------------
+MAX_REPLACEMENT_DAYS = 3652.5  # 10 years
+
+
+def format_replacement_eta(days: Optional[float]) -> str:
+    """Years-friendly label for a replacement ETA in days."""
+    if days is None:
+        return "unknown"
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        return "unknown"
+    if days != days:  # NaN
+        return "unknown"
+    if days <= 0:
+        return "now"
+    if days < 1:
+        return "<1 day"
+    if days >= MAX_REPLACEMENT_DAYS:
+        return "> 10 yr"
+    if days < 60:
+        return f"~{days:.0f} days"
+    if days < 730:
+        return f"~{days / 30.44:.0f} mo"
+    return f"~{days / 365.25:.0f} yr"
+
+
+def _age_remaining_days(age_years: Optional[float],
+                        expected_life_years: Optional[float]) -> Optional[float]:
+    if age_years is None or not expected_life_years or expected_life_years <= 0:
+        return None
+    return max(0.0, (float(expected_life_years) - float(age_years)) * 365.25)
+
+
+def bounded_replacement(days_remaining: Optional[float], *,
+                        age_years: Optional[float],
+                        expected_life_years: Optional[float]) -> Dict:
+    """Cap a trend ETA (days) at the age-based estimate and at 10 years.
+
+    Returns ``{days, years, text, source, capped, beyond}``. ``source`` is
+    ``"trend"`` when the trend value stands, ``"age"`` when the age estimate
+    is used (no trend, or the trend was later than the calendar), ``None``
+    when neither is known.
+    """
+    age_days = _age_remaining_days(age_years, expected_life_years)
+    days: Optional[float] = None
+    source: Optional[str] = None
+    capped = False
+    if days_remaining is not None:
+        days, source = max(0.0, float(days_remaining)), "trend"
+        if age_days is not None and age_days < days:
+            days, source, capped = age_days, "age", True
+    elif age_days is not None:
+        days, source = age_days, "age"
+    beyond = False
+    if days is not None and days > MAX_REPLACEMENT_DAYS:
+        days, capped, beyond = MAX_REPLACEMENT_DAYS, True, True
+    return {
+        "days": round(days, 1) if days is not None else None,
+        "years": round(days / 365.25, 2) if days is not None else None,
+        "text": format_replacement_eta(days),
+        "source": source,
+        "capped": capped,
+        "beyond": beyond,
+    }
+
+
+def bounded_replacement_eta(history: List[Tuple[float, float]], *,
+                            threshold_score: float, horizon_days: int,
+                            min_history_days: int,
+                            battery_install_date: Optional[str],
+                            expected_life_years: Optional[float],
+                            now: float) -> Dict:
+    """``replacement_eta`` with the H6 caps applied, for the chart marker.
+
+    Returns ``{etaTs, etaSource, days, years, text, capped, beyond}`` where
+    ``etaTs`` = ``now + days`` of :func:`bounded_replacement` (so the chart
+    marker and the "Replace in" label always agree).
+    """
+    pred = predict_replacement(
+        history, threshold_score=threshold_score, horizon_days=horizon_days,
+        min_history_days=min_history_days, now=now)
+    trend_days = None
+    if pred.get("eta_ts") is not None:
+        trend_days = max(0.0, (float(pred["eta_ts"]) - now) / 86400.0)
+    bounded = bounded_replacement(
+        trend_days, age_years=battery_age_years(battery_install_date, now),
+        expected_life_years=expected_life_years)
+    eta_ts = (now + bounded["days"] * 86400.0
+              if bounded["days"] is not None else None)
+    return {
+        "etaTs": eta_ts, "etaSource": bounded["source"],
+        "days": bounded["days"], "years": bounded["years"],
+        "text": bounded["text"], "capped": bounded["capped"],
+        "beyond": bounded["beyond"],
+    }

@@ -166,6 +166,9 @@ jobs:
           grep -q 'Triggering immediate shutdown. Reason: UPS signaled FSD (Forced Shutdown) flag.' tests/e2e/groups/single-ups-core.sh
           grep -q '^battery.charge: 80' tests/e2e/scenarios/fsd.dev
           grep -q "Test 70: Shutdown re-arm on POWER_RESTORED (bug #4)" tests/e2e/groups/single-ups-core.sh
+          # 6.2 UX contract: outlook/role/freshness API fields + progress sidecar.
+          grep -q "PASS (43a): next-trigger/role/freshness contract on the live API" tests/e2e/groups/single-ups-core.sh
+          grep -q "eneru-e2e-state.shutdown-progress.json" tests/e2e/groups/single-ups-core.sh
 
       - name: Verify v5.5 loopback E2E coverage is wired
         if: matrix.group == 'loopback'

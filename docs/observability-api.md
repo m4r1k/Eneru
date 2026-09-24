@@ -60,6 +60,74 @@ a remote that timed out is kept even when it arrives after the deadline. The
 dashboard shows this detail in a pop-up when you click a remote's result badge
 on the Shutdown tab.
 
+### What happens next, and how fresh is it (v6.2)
+
+Think of these fields as the car's fuel gauge rather than its engine. The
+daemon's trigger code decides when to shut down; these fields read the same
+inputs and show how close each trigger is, when it would fire, and what firing
+would do for this UPS. Nothing reads them back into a decision, and unit tests
+pin their comparisons to the trigger code.
+
+Each UPS row in `/api/v1/ups` and `/api/v1/ups/<name>` adds:
+
+| Field | Meaning |
+|-------|---------|
+| `statusSummary` | `{state, label, severity, blink, detail, tokens}`: one short label per state (`On mains`, `On battery`, `Low battery`, `Shutdown triggered`, `Shutting down`, ...) and a 3-level `severity` (`ok` / `warn` / `crit`). `blink` is true only for `shutting_down` and `trigger_active`. `detail` is the full token-by-token text. |
+| `triggerOutlook` | `{onBattery, timeOnBattery, stabilizing, stabilizationRemaining, triggers[], firing[], next, summary, action}`. `triggers[]` always lists `fsd`, `failsafe`, `lowBattery`, `criticalRuntime`, `depletionRate`, `extendedTime` and `selfTestFailure`, each with `state` (`idle` / `ok` / `held` / `fired` / `disabled` / `unknown`), `value`, `threshold`, `unit`, `margin`, `etaSeconds`, `etaBasis`, `condition` and `text`. |
+| `nextTrigger` | The closest trigger: the first one that has fired, otherwise the one with the smallest `etaSeconds`, otherwise `null`. |
+| `role` | `{kind, label, shutsDownLocalHost, localDrain, remoteServers, hasShutdownActions, redundancyGroups, dryRun}`. `kind` is `local`, `remote-only`, `monitor-only` or `redundancy-member`, derived from the same shutdown plan the Shutdown tab shows. |
+| `triggerOutlook.action` | `{kind, label, groups}`: `local-shutdown`, `remote-shutdown`, `notify-only` or `redundancy-advisory`, with a one-line label such as "Shuts down this host and 2 remote servers". |
+| `freshness` | `{lastPollAt, ageSeconds, staleAfterSeconds, stale}`. `lastPollAt` is epoch seconds. A poll is stale after `max(3 × check_interval, 30 s)`. |
+| `timeOnBatteryText`, `runtimeText` | Pre-formatted durations (`24m 50s`); `timeOnBatteryText` is `null` on mains. |
+| `batteryHealth.replacement` | `{days, years, text, source, capped, beyond}`. The trend estimate is capped at the calendar estimate (`expected_life_years` minus the battery's age) and at 10 years (`"> 10 yr"`). `replacementDaysRemaining` uses the same cap. |
+
+`/api/v1/ups` and `/api/v1/ups/<name>` both carry `generatedAt`, the server's
+epoch time when the payload was built. ETA rules: low battery uses the current
+drain rate, critical runtime assumes the runtime counts down in real time, and
+the time-based triggers use the clock. No ETA is shorter than the remaining
+on-battery stabilization hold.
+
+Redundancy-group rows add `failingMembers`, `healthyMembers`,
+`failuresTolerated` (`healthyCount - minHealthy`, negative once quorum is lost),
+`role`, and `outlook` (`{state, severity, label, action}`, where `state` is one
+of `healthy`, `at-risk`, `quorum-lost`, `deferred` or `shutting-down`). Each
+member row also gains `nextTrigger`, evaluated with the group's thresholds, and
+`healthReason` ("on battery", "no data", "Critical runtime: 4m 40s now ...").
+
+`/api/v1/ups/<name>/shutdown-plan` adds `triggers` (`conditions` as
+human-readable lines, `stabilizationDelay`, the live `outlook`, and `action`)
+and `role`. The redundancy-group plan adds `triggers.conditions` (the quorum
+rule), `triggers.memberConditions` and `role`.
+
+**Status vocabulary.** The dashboard, `eneru monitor` and the API use the same
+words:
+
+| NUT status / Eneru state | `state` | Label | Severity |
+|--------------------------|---------|-------|----------|
+| `FSD`, or a shutdown in progress | `shutting_down` | Shutting down | crit (blinks) |
+| a trigger has fired | `trigger_active` | Shutdown triggered | crit (blinks) |
+| NUT unreachable | `connection_lost` | Connection lost | crit on battery, warn otherwise |
+| data older than the stale limit | `stale` | Stale data | warn |
+| `OFF` | `output_off` | UPS output off | crit |
+| `LB` | `low_battery` | Low battery | crit |
+| `OB` | `on_battery` | On battery | warn |
+| `BYPASS` | `bypass` | On bypass | warn |
+| `OL` | `online` | On mains | ok (warn with `ALARM`, `OVER` or `RB`) |
+| `WAIT` or empty | `waiting` | Waiting for data | warn |
+| anything else | `unknown` | Status unknown | warn |
+
+**State file.** `eneru monitor` reads the per-UPS state file
+(`logging.state_file`, suffixed per UPS in multi-UPS mode). Besides the old
+keys it holds `EPOCH` (epoch seconds of the last good poll), `TIMESTAMP_ISO`
+(with the UTC offset), `CHECK_INTERVAL`, `TIME_ON_BATTERY`, `ON_BATTERY_SINCE`,
+`DEPLETION_RATE`, `TRIGGER_ACTIVE`, `TRIGGER_REASON` and
+`SELF_TEST_ATTRIBUTED`. `TIMESTAMP` keeps its old naive local-time format for
+existing scripts; use `EPOCH` to show local time or age. Shutdown progress is
+mirrored to `<state file>.shutdown-progress.json` (and
+`<state_file>.redundancy-<group>.shutdown-progress.json` for groups). Each
+mirror holds the anonymous snapshot shown above plus `writtenAt`, never
+command output, and is reset to `idle` when the daemon starts.
+
 The API is disabled by default. When enabled, the default bind address is localhost. If you set `api.bind` to a non-loopback address (e.g. `0.0.0.0`) **without** enabling authentication, Eneru warns at startup: `/api/v1/config` returns configured server hostnames and presence flags, so anyone who can reach the socket can read that. Keep the API behind SSH, a local reverse proxy, a trusted network boundary, or enable `api.auth`.
 
 **No built-in TLS — trusted-LAN by design.** Eneru serves plain HTTP and does not terminate TLS itself; this is a deliberate scope decision for a homelab-scale, trusted-LAN daemon, not an oversight. On the default loopback bind nothing leaves the host. If you must reach the API from another machine, do not expose the plain-HTTP socket directly — put it behind a reverse proxy that terminates TLS (and, ideally, adds auth), and keep the daemon itself on loopback. Bearer tokens and login passwords travel in cleartext on any non-loopback plain-HTTP bind, so treat an unproxied off-host bind as readable by anyone on the wire.

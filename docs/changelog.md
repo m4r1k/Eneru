@@ -70,6 +70,16 @@ the dashboard, and self-tests that no longer look like outages.
   visible, shows live trigger status ("now 2 of 2 healthy"), and opens each
   remote's result (timings, pre-command results, exit code, redacted response)
   in a dialog for signed-in readers.
+- **The API says what happens next.** Each UPS row lists every configured
+  trigger with its threshold, current value, time to fire and the closest one,
+  plus what firing would do for that UPS (power off this host, shut down remote
+  servers only, notify only, or vote in a redundancy group). Rows also carry one
+  status vocabulary with ok/warn/crit severity, the last poll's epoch time and
+  age, and a capped battery replacement estimate ("~4 yr", "> 10 yr").
+  Redundancy groups name their failing members and how many more failures they
+  can take. The state file gains `EPOCH`, and shutdown progress is mirrored next
+  to it so `eneru monitor` can show both. ON_BATTERY events and notifications
+  show runtime as `24m 50s`.
 - **Redundancy groups are dashboard scopes.** The View selector focuses
   telemetry, events, remotes and shutdown details on a group.
 - **Per-step `use_sudo`** on `pre_shutdown_commands` overrides the server's

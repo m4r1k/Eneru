@@ -60,7 +60,7 @@ from eneru.shutdown.remote import (
     loopback_poweroff_sent,
     select_loopback_results,
 )
-from eneru.shutdown.progress import ShutdownProgress
+from eneru.shutdown.progress import ShutdownProgress, progress_sidecar_path
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
 # ISS-017: single source of truth for the connection-retry cadence. The poll
@@ -245,6 +245,12 @@ class UPSGroupMonitor(
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
+        # UX item 7: mirror shutdown progress next to the state file so the
+        # out-of-process TUI can follow it. The idle snapshot is written on the
+        # first successful poll (see _save_state), never at construction.
+        self._shutdown_progress.sidecar_path = progress_sidecar_path(
+            self._state_file_path)
+        self._progress_sidecar_seeded = False
 
         self._container_runtime: Optional[str] = None
         self._compose_available: bool = False
@@ -721,7 +727,7 @@ class UPSGroupMonitor(
                 self._stats_store.log_event(
                     "POWER_RESTORED",
                     f"Power restored after outage-triggered shutdown "
-                    f"(downtime {downtime}s)",
+                    f"(downtime {format_seconds(downtime)})",
                 )
             except Exception:
                 pass  # never mask a startup notification on a stats hiccup
@@ -1426,6 +1432,43 @@ class UPSGroupMonitor(
             f"within {max_wait}s. Proceeding, but voltage thresholds may default."
         )
 
+    def _state_file_freshness_lines(self) -> str:
+        """H4/H5 freshness + outlook keys appended to the state file.
+
+        TIMESTAMP stays the naive daemon-local string for old readers; EPOCH is
+        the zone-free truth a reader uses to render local time and "updated Ns
+        ago" / STALE. The remaining keys let the TUI compute the same
+        next-trigger outlook the API serves. Display-only: built defensively so
+        a surprise here can never cost the poll loop its state file.
+        """
+        try:
+            if self.state.on_battery_start_mono > 0:
+                time_on_battery = int(
+                    time.monotonic() - self.state.on_battery_start_mono)
+            elif self.state.on_battery_start_time > 0:
+                time_on_battery = (
+                    int(time.time()) - self.state.on_battery_start_time)
+            else:
+                time_on_battery = 0
+            now_epoch = time.time()
+            iso = datetime.fromtimestamp(now_epoch).astimezone().isoformat(
+                timespec="seconds")
+            reason = " ".join(str(self.state.trigger_reason or "").split())
+            attributed = getattr(self, "_self_test_outage_attributed", False)
+            return (
+                f"EPOCH={now_epoch:.3f}\n"
+                f"TIMESTAMP_ISO={iso}\n"
+                f"CHECK_INTERVAL={self.config.ups.check_interval}\n"
+                f"TIME_ON_BATTERY={max(0, time_on_battery)}\n"
+                f"ON_BATTERY_SINCE={int(self.state.on_battery_start_time or 0)}\n"
+                f"DEPLETION_RATE={float(self.state.latest_depletion_rate or 0.0)}\n"
+                f"TRIGGER_ACTIVE={1 if self.state.trigger_active else 0}\n"
+                f"TRIGGER_REASON={reason}\n"
+                f"SELF_TEST_ATTRIBUTED={1 if attributed else 0}\n"
+            )
+        except Exception:
+            return ""
+
     def _save_state(self, ups_data: Dict[str, str]):
         """Save current UPS state to file + buffer one stats sample."""
         state_content = (
@@ -1436,7 +1479,12 @@ class UPSGroupMonitor(
             f"INPUT_VOLTAGE={ups_data.get('input.voltage', '')}\n"
             f"OUTPUT_VOLTAGE={ups_data.get('output.voltage', '')}\n"
             f"TIMESTAMP={datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        )
+        ) + self._state_file_freshness_lines()
+        if not getattr(self, "_progress_sidecar_seeded", True):
+            # First good poll after start: publish the idle progress snapshot
+            # so the TUI never shows a previous run's "running" as live.
+            self._progress_sidecar_seeded = True
+            self._shutdown_progress.persist()
         try:
             # with_name(name + '.tmp') appends '.tmp' to the full filename;
             # with_suffix('.tmp') would replace the per-UPS suffix
@@ -2302,6 +2350,22 @@ class UPSGroupMonitor(
     # STATUS CHECKS
     # ==========================================================================
 
+    def _on_battery_trigger_hint(self) -> str:
+        """One notification line: the configured triggers + what firing does.
+
+        Display-only (UX H3/M3): built from config, never consulted by the
+        trigger logic below, and any error just drops the line.
+        """
+        try:
+            from eneru.outlook import (
+                describe_trigger_conditions, monitor_role, trigger_action)
+            conditions = describe_trigger_conditions(self.config.triggers)
+            action = trigger_action(monitor_role(self))["label"]
+            return ("Shutdown triggers: " + " · ".join(conditions)
+                    + f" → {action}")
+        except Exception:
+            return ""
+
     def _handle_on_battery(self, ups_data: Dict[str, str]):
         """Handle the On Battery state."""
         ups_status = ups_data.get('ups.status', '')
@@ -2323,12 +2387,18 @@ class UPSGroupMonitor(
 
             event = ("SELF_TEST_ON_BATTERY"
                      if self._self_test_outage_attributed else "ON_BATTERY")
+            details = (
+                f"Battery: {battery_charge}%, Runtime: "
+                f"{format_seconds(battery_runtime)}, Load: {ups_load}%"
+                + ("; attributed to active UPS self-test"
+                   if self._self_test_outage_attributed else ""))
+            hint = self._on_battery_trigger_hint()
             self._log_power_event(
                 event,
-                f"Battery: {battery_charge}%, Runtime: {battery_runtime} seconds, Load: {ups_load}%"
-                + ("; attributed to active UPS self-test"
-                   if self._self_test_outage_attributed else ""),
+                details,
                 suppress_notification=self._self_test_outage_attributed,
+                notification_details=(
+                    details + ("\n" + hint if hint else "")),
             )
             if not self._self_test_outage_attributed and self._should_fire_wall():
                 run_command([

@@ -1309,6 +1309,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     "upsSources": list(group.ups_sources),
                     "minHealthy": group.min_healthy,
                     "plan": plan,
+                    **_redundancy_plan_extras(group, self.api_config, executor),
                 }
 
         if path.startswith("/api/v1/ups/"):
@@ -1321,6 +1322,8 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     return 404, "application/json", self._not_found("UPS not found")
                 if self._redact_for(principal):
                     row = _redact_ups_row(row)
+                # H4: one-UPS reads carry the server clock too.
+                row = dict(row, generatedAt=payload.get("generatedAt"))
                 return 200, "application/json", row
             if len(parts) == 6 and parts[5] == "history":
                 metric = (qs.get("metric") or ["charge"])[0]
@@ -1389,7 +1392,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     # config_summary(extended=True) / remote-health contract,
                     # which never reveals raw commands even to authenticated users.
                     reveal_commands=False)
-                return 200, "application/json", {"ups": ups_name, "plan": plan}
+                return 200, "application/json", {
+                    "ups": ups_name, "plan": plan,
+                    **_ups_plan_extras(mon, self.api_config)}
             if len(parts) == 6 and parts[5] == "shutdown-progress":
                 mon = self._monitor_for(ups_name)
                 if mon is None:
@@ -1447,7 +1452,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         for d, a in sorted(buckets.items())]
                 # Replacement-date projection for the red marker + threshold line.
                 replacement: Dict[str, Any] = {
-                    "etaTs": None, "etaSource": None, "thresholdScore": None}
+                    "etaTs": None, "etaSource": None, "thresholdScore": None,
+                    "days": None, "years": None, "text": "unknown",
+                    "capped": False, "beyond": False}
                 try:
                     cfg = mon._resolve_battery_health_config()
                 except Exception:
@@ -1456,7 +1463,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     rep = cfg.replacement
                     history = [(float(r["ts"]), float(r["score"]))
                                for r in rows if r.get("score") is not None]
-                    eta, src = prediction.replacement_eta(
+                    # H6: the same capped estimate the status block publishes,
+                    # so the chart marker and the "Replace in" label agree.
+                    replacement = prediction.bounded_replacement_eta(
                         history,
                         threshold_score=rep.threshold_score,
                         horizon_days=rep.horizon_days,
@@ -1464,8 +1473,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         battery_install_date=cfg.battery_install_date,
                         expected_life_years=cfg.expected_life_years,
                         now=now_ts)
-                    replacement = {"etaTs": eta, "etaSource": src,
-                                   "thresholdScore": rep.threshold_score}
+                    replacement["thresholdScore"] = rep.threshold_score
                 return 200, "application/json", {
                     "ups": ups_name, "from": start, "to": end,
                     "data": data, "replacement": replacement}
@@ -2071,6 +2079,53 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return True
 
         return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]
+
+
+def _ups_plan_extras(mon: Any, api_config: Any) -> Dict[str, Any]:
+    """H3c: the full trigger list + role next to the per-UPS shutdown plan."""
+    try:
+        from eneru.outlook import (
+            describe_trigger_conditions, monitor_outlook)
+        blocks = monitor_outlook(mon, api_config)
+        outlook = blocks["triggerOutlook"]
+        armed = any(t["id"] == "selfTestFailure" and t["enabled"]
+                    for t in outlook["triggers"])
+        triggers = mon.config.triggers
+        return {
+            "triggers": {
+                "conditions": describe_trigger_conditions(
+                    triggers, self_test_failure_armed=armed),
+                "stabilizationDelay": triggers.on_battery_stabilization_delay,
+                "outlook": outlook,
+                "action": outlook["action"],
+            },
+            "role": blocks["role"],
+        }
+    except Exception:
+        return {"triggers": None, "role": None}
+
+
+def _redundancy_plan_extras(group: Any, api_config: Any,
+                            executor: Any) -> Dict[str, Any]:
+    """H3c for redundancy groups: quorum rule + member criticality rules."""
+    try:
+        from eneru.outlook import (
+            describe_trigger_conditions, redundancy_role, trigger_action)
+        role = redundancy_role(group, api_config, executor)
+        members = len(group.ups_sources)
+        return {
+            "triggers": {
+                "conditions": [
+                    f"fewer than {group.min_healthy} of {members} members healthy",
+                ],
+                "memberConditions": describe_trigger_conditions(group.triggers),
+                "stabilizationDelay": group.triggers.on_battery_stabilization_delay,
+                "action": trigger_action(role),
+            },
+            "role": role,
+        }
+    except Exception:
+        return {"triggers": None, "role": None}
 
 
 def _parse_int_param(

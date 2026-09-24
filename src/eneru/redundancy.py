@@ -38,7 +38,7 @@ from eneru.shutdown.remote import (
     loopback_poweroff_sent,
     select_loopback_results,
 )
-from eneru.shutdown.progress import ShutdownProgress
+from eneru.shutdown.progress import ShutdownProgress, progress_sidecar_path
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
 from eneru.utils import sanitize_name
@@ -155,6 +155,10 @@ class RedundancyGroupExecutor(
         self._state_file_path = Path(
             base_config.logging.state_file + f".redundancy-{sanitized}"
         )
+        # UX item 7: the TUI follows group shutdown progress via this sidecar
+        # (seeded idle when the evaluator thread starts).
+        self._shutdown_progress.sidecar_path = progress_sidecar_path(
+            self._state_file_path)
 
         # Container-runtime detection (only relevant when is_local + containers
         # are enabled -- container shutdown is otherwise skipped).
@@ -885,6 +889,11 @@ class RedundancyGroupEvaluator(threading.Thread):
             f"min_healthy={self._group.min_healthy}, "
             f"startup_grace={self._startup_grace:.0f}s)"
         )
+        # Publish the idle progress snapshot so the TUI never reads a
+        # previous run's "running" as live (best-effort, never raises).
+        progress = getattr(self._executor, "_shutdown_progress", None)
+        if progress is not None:
+            progress.persist()
         # Startup grace: hold off the first evaluation so the per-UPS
         # monitor threads have time to publish their initial snapshots.
         if self._startup_grace > 0:
