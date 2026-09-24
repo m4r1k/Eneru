@@ -8,20 +8,37 @@ Two-panel layout:
 
 import curses
 import os
+import re
 import sys
 import time
-from collections import deque
+import unicodedata
+from collections import deque, namedtuple
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 
 from eneru.version import __version__
 from eneru.config import Config, UPSGroupConfig
 from eneru.graph import BrailleGraph
+from eneru.outlook import (
+    read_self_test_failure_armed,
+    redundancy_outlook_from_state_files,
+    stale_after_seconds,
+    state_file_outlook,
+)
 from eneru.remote_health import read_remote_health_sidecar, remote_health_sidecar_path
 from eneru.stats import StatsStore
-from eneru.status import sanitize_name
-from eneru.utils import status_has_token
+from eneru.status import sanitize_name, select_event_rows
+from eneru.utils import (
+    SEVERITY_CRIT,
+    SEVERITY_OK,
+    SEVERITY_WARN,
+    format_age,
+    format_seconds,
+    humanize_event_type,
+    is_numeric,
+    status_summary,
+)
 
 
 # Cycle order for the G key + --graph flag.
@@ -71,8 +88,9 @@ EVENTS_QUERY_LIMIT = 2000
 # electrical / UPS behavior, and daemon lifecycle rows that are useful
 # context but high-volume during testing or rapid restarts.
 #
-# POWER_EVENTS are *always* preserved within the row cap -- never
-# evicted by daemon noise. DIAGNOSTIC_EVENTS are implicit: anything
+# POWER_EVENTS keep at least half of the row cap (all of it at the default
+# verbosity) -- never crowded out by daemon noise -- while each enabled
+# lower tier still gets seats (6.2, M5). DIAGNOSTIC_EVENTS are implicit: anything
 # outside POWER_EVENTS and LIFECYCLE_EVENTS. They surface at ``-v`` /
 # first ``<V>``. LIFECYCLE_EVENTS surface last at ``-vv`` / second
 # ``<V>``.
@@ -484,18 +502,73 @@ def _sanitize_event_detail(detail: str) -> str:
     return " · ".join(parts)
 
 
+_SECONDS_RE = re.compile(r"\b(\d+) seconds\b")
+
+
+def _is_decoration(ch: str) -> bool:
+    """Emoji / pictograph / variation selector used as notification markup."""
+    cp = ord(ch)
+    if cp in (0xFE0F, 0xFE0E, 0x200D):
+        return True
+    return cp >= 0x2190 and unicodedata.category(ch) == "So"
+
+
+def clean_event_detail(detail: str, ups_name: Optional[str] = None) -> str:
+    """Readable one-line event detail for the TUI / ``--once`` (M6, M3).
+
+    On top of :func:`_sanitize_event_detail` (no ``**`` / newlines):
+    drops notification emoji ("📦  Eneru Upgraded"), drops the UPS name
+    the ``[label]`` column already shows, and turns legacy
+    "Runtime: 1490 seconds" rows into "24m 50s".
+    """
+    text = _sanitize_event_detail(detail)
+    if not text:
+        return ""
+    text = "".join(ch for ch in text if not _is_decoration(ch))
+    if ups_name:
+        text = text.replace(f" {ups_name}", "")
+    text = _SECONDS_RE.sub(lambda m: format_seconds(int(m.group(1))), text)
+    return " ".join(text.split())
+
+
 def _format_event_line(ts: int, label: str, event_type: str,
-                       detail: str, multi_ups: bool) -> str:
-    """Format one event row from the SQLite events table for display."""
+                       detail: str, multi_ups: bool, *,
+                       ups_name: Optional[str] = None,
+                       now: Optional[float] = None,
+                       compact: bool = False,
+                       raw: bool = False) -> str:
+    """Format one event row: ``time  age  [UPS] Label: detail``.
+
+    ``compact`` shortens the time to ``MM-DD HH:MM`` for narrow terminals.
+    The age column ("14d ago") says at a glance how old "recent" is (M5).
+    ``raw`` keeps the pre-6.2 script-friendly shape for ``--events-only``:
+    ``YYYY-MM-DD HH:MM:SS  [UPS] EVENT_TYPE: detail`` (stable, no age).
+    """
+    if raw:
+        try:
+            stamp = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError, OverflowError):
+            stamp = "????-??-?? ??:??:??"
+        prefix = f"[{label}] " if multi_ups else ""
+        cleaned = _sanitize_event_detail(detail)
+        if cleaned:
+            return f"{stamp}  {prefix}{event_type}: {cleaned}"
+        return f"{stamp}  {prefix}{event_type}"
+    now = time.time() if now is None else now
     try:
-        time_str = datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError, OSError):
-        time_str = "????-??-?? ??:??:??"
+        when = datetime.fromtimestamp(int(ts))
+        time_str = when.strftime("%m-%d %H:%M" if compact else "%Y-%m-%d %H:%M:%S")
+        age = format_age(now - int(ts))
+    except (TypeError, ValueError, OSError, OverflowError):
+        time_str = "??-?? ??:??" if compact else "????-??-?? ??:??:??"
+        age = "?"
     prefix = f"[{label}] " if multi_ups else ""
-    cleaned_detail = _sanitize_event_detail(detail)
+    name = humanize_event_type(event_type)
+    cleaned_detail = clean_event_detail(detail, ups_name)
+    head = f"{time_str}  {age:>8}  {prefix}{name}"
     if cleaned_detail:
-        return f"{time_str}  {prefix}{event_type}: {cleaned_detail}"
-    return f"{time_str}  {prefix}{event_type}"
+        return f"{head}: {cleaned_detail}"
+    return head
 
 
 def query_events_for_display(
@@ -504,6 +577,8 @@ def query_events_for_display(
     max_events: Optional[int] = EVENTS_MAX_ROWS_NORMAL,
     verbosity: int = EVENTS_VERBOSITY_POWER,
     grouped: bool = False,
+    compact: bool = False,
+    raw: bool = False,
 ) -> List[str]:
     """Pull events from each UPS's SQLite store, sorted by timestamp.
 
@@ -523,14 +598,17 @@ def query_events_for_display(
 
     ``max_events=None`` (or 0) disables the row cap entirely.
 
-    Trim is **3-tier**: POWER_EVENTS always survive the cap; remaining
-    slots are filled first with most-recent Diagnostics, then with
-    Lifecycle. Power events are never evicted; diagnostics outrank daemon
-    lifecycle context when the cap is hit in verbose mode.
+    Trim (M5, ``status.select_event_rows``): power events get half the cap
+    (all of it when they are the only enabled tier), every other enabled
+    tier present gets an equal slice of the rest, and spare seats go to the
+    newest rows. Before 6.2 power events took every seat, so on an install
+    with 30+ old outages ``-v`` / ``-vv`` looked like they did nothing.
+    ``compact`` shortens timestamps for narrow terminals; ``raw`` keeps the
+    script-friendly ``EVENT_TYPE: detail`` lines (``--once --events-only``).
     """
     verbosity = _events_verbosity(verbosity)
     multi_ups = config.multi_ups
-    rows: List[tuple] = []  # (ts, label, event_type, detail)
+    rows: List[tuple] = []  # (ts, label, event_type, detail, ups_name)
     any_db_seen = False
 
     for group in config.ups_groups:
@@ -562,7 +640,8 @@ def query_events_for_display(
             for ts, etype, detail in events:
                 if not _event_enabled(etype, verbosity):
                     continue
-                rows.append((int(ts), group.ups.label, etype, detail or ""))
+                rows.append((int(ts), group.ups.label, etype, detail or "",
+                             group.ups.name))
         finally:
             try:
                 conn.close()
@@ -573,51 +652,37 @@ def query_events_for_display(
         return []  # signal "no DB" so callers can fall back
 
     rows.sort(key=lambda r: r[0])
+    # ``max_events`` in (None, 0) means no cap (select_event_rows agrees).
+    tier_names = {EVENT_SECTION_POWER: "power",
+                  EVENT_SECTION_DIAGNOSTICS: "diagnostics",
+                  EVENT_SECTION_LIFECYCLE: "lifecycle"}
+    cap = max_events
+    if grouped and max_events and max_events > 1:
+        # Each section header takes a row of the panel too; reserve them
+        # up front so the grouped trim below never cuts a whole tier.
+        tiers = {_event_tier(r[2]) for r in rows}
+        cap = max(1, max_events - len(tiers))
+    rows = select_event_rows(
+        rows, max_events=cap,
+        tier_of=lambda r: tier_names[_event_tier(r[2])])
+    now = time.time()
 
-    # Three-tier trim: POWER_EVENTS always survive; if room left,
-    # Diagnostics fill next; only then Lifecycle. This matches the
-    # operator-facing hierarchy: power transitions are never evicted,
-    # electrical / UPS diagnostics explain what is happening, and daemon
-    # lifecycle context rounds out the cap at the highest verbosity.
-    # ``max_events`` in (None, 0) means no cap.
-    if max_events and len(rows) > max_events:
-        power = [r for r in rows if r[2] in POWER_EVENTS]
-        lifecycle = [r for r in rows if r[2] in LIFECYCLE_EVENTS]
-        diagnostics = [
-            r for r in rows
-            if r[2] not in POWER_EVENTS and r[2] not in LIFECYCLE_EVENTS
-        ]
-        if len(power) >= max_events:
-            # Pathological: more power events than the cap. Show the
-            # most-recent N -- still better than evicting them.
-            kept = power[-max_events:]
-        else:
-            remaining = max_events - len(power)
-            # Diagnostics fill first; lifecycle only if room remains.
-            kept_diagnostics = diagnostics[-remaining:]
-            remaining -= len(kept_diagnostics)
-            kept_lifecycle = lifecycle[-remaining:] if remaining > 0 else []
-            # Re-sort by ts so the panel never displays out-of-time-order
-            # rows after the tier merge. Python's sort is stable, so
-            # equal-timestamp rows preserve insertion order.
-            kept = sorted(power + kept_diagnostics + kept_lifecycle,
-                          key=lambda r: r[0])
-        rows = kept
+    def fmt(row) -> str:
+        ts, label, etype, detail, ups_name = row
+        return _format_event_line(ts, label, etype, detail, multi_ups,
+                                  ups_name=ups_name, now=now, compact=compact,
+                                  raw=raw)
 
     if not grouped:
-        return [_format_event_line(ts, label, etype, detail, multi_ups)
-                for ts, label, etype, detail in rows]
+        return [fmt(row) for row in rows]
 
     # Grouped mode renders one header per non-empty tier, so a section needs
     # at least 2 lines (1 header + 1 row) to display without an orphan header.
     # At max_events == 1 there is no room for both, so fall back to the single
-    # most-recent row -- the tier-priority trim above already guarantees it
-    # is the highest-priority survivor (Power before Diagnostics before
-    # Lifecycle), preserving the "Power events are never evicted within the
-    # cap" docstring contract at length=1.
+    # most-recent row -- the tier trim above gives power the first seat, so
+    # a power event still wins at length=1.
     if max_events == 1:
-        return [_format_event_line(ts, label, etype, detail, multi_ups)
-                for ts, label, etype, detail in rows]
+        return [fmt(row) for row in rows]
 
     grouped_lines: List[str] = []
     sections = (
@@ -640,10 +705,7 @@ def query_events_for_display(
                 break
             section_rows = section_rows[-(remaining_lines - 1):]
         grouped_lines.append(section)
-        grouped_lines.extend(
-            _format_event_line(ts, label, etype, detail, multi_ups)
-            for ts, label, etype, detail in section_rows
-        )
+        grouped_lines.extend(fmt(row) for row in section_rows)
     return grouped_lines
 
 
@@ -659,10 +721,20 @@ C_GRAY_DIM = 4       # dim text on gray background
 C_GOLD_BG = 5        # black text on yellow/gold background (logs panel)
 C_GOLD_KEY = 6       # bold black on yellow/gold (<Q>, <R>, <M>)
 C_GOLD_DIM = 7       # dim/gray text on yellow/gold (key descriptions)
-C_STATUS_OK = 8      # black on green (highlighted badge)
-C_STATUS_OB = 9      # white on red (on battery -- alert)
-C_STATUS_CRIT = 10   # white on red (critical/shutdown imminent, blink)
-C_STATUS_UNK = 11    # white on magenta (unknown/connection lost)
+C_STATUS_OK = 8      # black on green: severity "ok"
+C_STATUS_OB = 9      # white on red (kept for config_tui's error badge)
+C_STATUS_CRIT = 10   # white on red: severity "crit"
+C_STATUS_UNK = 11    # white on magenta (legacy; no longer used by monitor)
+C_STATUS_WARN = 12   # black on amber: severity "warn"
+
+# M1: one 3-level scale on every surface (ok = green, warn = amber,
+# crit = red). The badge TEXT always carries the meaning too, so a
+# monochrome terminal loses nothing but the colour.
+_SEVERITY_PAIRS = {
+    SEVERITY_OK: C_STATUS_OK,
+    SEVERITY_WARN: C_STATUS_WARN,
+    SEVERITY_CRIT: C_STATUS_CRIT,
+}
 
 def init_colors():
     """Initialize color scheme.
@@ -678,11 +750,13 @@ def init_colors():
         gold_bg = 178        # #D7AF00
         dim_on_gold = 241    # #626262 -- dim gray for key hint descriptions
         black_fg = 16        # true black
+        amber_bg = 214       # #FFAF00 -- warn badge, distinct from the gold panel
     else:
         gray_bg = curses.COLOR_BLACK
         gold_bg = curses.COLOR_YELLOW
         dim_on_gold = curses.COLOR_WHITE
         black_fg = curses.COLOR_BLACK
+        amber_bg = curses.COLOR_YELLOW
 
     curses.init_pair(C_BORDER, curses.COLOR_WHITE, curses.COLOR_BLACK)
     curses.init_pair(C_HEADER, curses.COLOR_WHITE, curses.COLOR_BLACK)
@@ -696,66 +770,179 @@ def init_colors():
     curses.init_pair(C_STATUS_OB, curses.COLOR_WHITE, curses.COLOR_RED)
     curses.init_pair(C_STATUS_CRIT, curses.COLOR_WHITE, curses.COLOR_RED)
     curses.init_pair(C_STATUS_UNK, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
+    curses.init_pair(C_STATUS_WARN, black_fg, amber_bg)
 
 
-def human_status(status: str) -> str:
-    """Convert NUT status codes to human-readable labels."""
-    s = status.upper().strip()
-    if status_has_token(s, "FSD"):
-        return "FORCED SHUTDOWN"
-    if status_has_token(s, "OB") and status_has_token(s, "LB"):
-        return "ON BATTERY - LOW"
-    if status_has_token(s, "OB") and status_has_token(s, "DISCHRG"):
-        return "ON BATTERY - DISCHARGING"
-    if status_has_token(s, "OB"):
-        return "ON BATTERY"
-    if status_has_token(s, "OL") and status_has_token(s, "CHRG"):
-        return "ONLINE - CHARGING"
-    if status_has_token(s, "OL"):
-        return "ONLINE"
-    if status_has_token(s, "CHRG"):
-        return "CHARGING"
-    if not s:
-        return "UNKNOWN"
-    return s
+def human_status(status: str, **context) -> str:
+    """Short shared label for a NUT status (``utils.status_summary``).
+
+    ``context`` passes through ``trigger_active`` / ``shutting_down`` /
+    ``connection_state`` / ``stale`` so the TUI says exactly what the web
+    dashboard and notifications say ("On mains", "On battery", ...).
+    """
+    return status_summary(status, **context)["label"]
 
 
-def status_color(status: str) -> int:
-    """Return color pair ID for a UPS status string."""
-    s = status.upper()
-    if status_has_token(s, "FSD") or status_has_token(s, "LB"):
-        return C_STATUS_CRIT
-    if status_has_token(s, "OB"):
-        if status_has_token(s, "DISCHRG"):
-            return C_STATUS_CRIT
-        return C_STATUS_OB
-    if status_has_token(s, "OL") or status_has_token(s, "CHRG"):
-        return C_STATUS_OK
-    return C_STATUS_UNK
+def severity_color(severity: str) -> int:
+    """Colour pair for an ``ok`` / ``warn`` / ``crit`` severity."""
+    return _SEVERITY_PAIRS.get(severity, C_STATUS_WARN)
 
 
-def status_attr(status: str) -> int:
-    """Return curses attribute for a status badge."""
-    sc = status_color(status)
-    attr = curses.color_pair(sc) | curses.A_BOLD
-    s = status.upper()
-    if (status_has_token(s, "OB") or status_has_token(s, "FSD")
-            or status_has_token(s, "LB")):
+def status_color(status: str, **context) -> int:
+    """Return the severity colour pair for a UPS status string."""
+    return severity_color(status_summary(status, **context)["severity"])
+
+
+def summary_attr(summary: Dict[str, Any]) -> int:
+    """Badge attribute for a ``status_summary`` dict.
+
+    Blink ONLY when the summary says so (shutdown triggered / shutting
+    down). "On battery, 90% left" must not flash like "about to die".
+    """
+    attr = (curses.color_pair(severity_color(summary.get("severity")))
+            | curses.A_BOLD)
+    if summary.get("blink"):
         attr |= curses.A_BLINK
     return attr
+
+
+def status_attr(status: str, **context) -> int:
+    """Return curses attribute for a status badge."""
+    return summary_attr(status_summary(status, **context))
 
 
 # ==============================================================================
 # DATA COLLECTION
 # ==============================================================================
 
-def collect_group_data(group: UPSGroupConfig, config: Config) -> Dict:
+def state_epoch(state: Optional[Dict[str, str]],
+                path: Optional[Path] = None) -> Tuple[Optional[float], str]:
+    """When the daemon last wrote this state file, as ``(epoch, source)``.
+
+    H5: ``TIMESTAMP`` is a naive daemon-local string (a container on UTC
+    and a host on CEST disagree by two hours), so it is never shown. A 6.2
+    daemon writes ``EPOCH``; an older daemon doesn't, and then the file's
+    mtime is the same fact (the file is only rewritten on a good poll).
+    Returns ``(None, "none")`` when neither is available.
+    """
+    if state and is_numeric(state.get("EPOCH")) and float(state["EPOCH"]) > 0:
+        return float(state["EPOCH"]), "epoch"
+    if state and path is not None:
+        try:
+            return Path(path).stat().st_mtime, "mtime"
+        except OSError:
+            pass
+    return None, "none"
+
+
+def missing_state_reason(path: Path) -> str:
+    """Why no state could be read at ``path`` (M8): the TUI must not claim
+    "daemon not running" when it simply can't see the daemon's files."""
+    path = Path(path)
+    if not path.parent.is_dir():
+        return "no-dir"
+    if path.exists():
+        if not os.access(path, os.R_OK):
+            return "unreadable"
+        return "empty"
+    return "missing"
+
+
+def missing_state_lines(path: Any, reason: str) -> List[str]:
+    """Plain-text explanation for a missing state file (M8)."""
+    what = {
+        "no-dir": f"State directory {Path(path).parent} does not exist here.",
+        "unreadable": f"State file {path} is not readable by this user.",
+        "empty": f"State file {path} is empty (daemon starting?).",
+    }.get(reason, f"No state file at {path}.")
+    return [
+        what,
+        "Daemon stopped, or running in a container? If so, set logging.state_file",
+        "and statistics.db_directory to the host-side paths, or run the TUI in",
+        "the container: docker exec <container> eneru monitor",
+    ]
+
+
+def _state_for_outlook(state: Optional[Dict[str, str]],
+                       epoch: Optional[float]) -> Optional[Dict[str, str]]:
+    """Copy of ``state`` with ``EPOCH`` filled from the mtime fallback."""
+    if not state:
+        return state
+    out = dict(state)
+    if epoch is not None and not is_numeric(out.get("EPOCH")):
+        out["EPOCH"] = str(epoch)
+    return out
+
+
+def _self_test_armed(group: UPSGroupConfig, config: Config,
+                     state: Dict[str, str]) -> bool:
+    """T5 latch from the stats DB, read only while on battery (cheap)."""
+    if "OB" not in str(state.get("STATUS", "")).split():
+        return False
+    conn = StatsStore.open_readonly(stats_db_path_for(group, config))
+    if conn is None:
+        return False
+    try:
+        return read_self_test_failure_armed(
+            conn, state.get("ON_BATTERY_SINCE", ""),
+            attributed=state.get("SELF_TEST_ATTRIBUTED") == "1")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def group_outlook(group: UPSGroupConfig, config: Config,
+                  state: Optional[Dict[str, str]], now: float) -> Optional[Dict]:
+    """``outlook.state_file_outlook`` for the TUI; None if it can't be built.
+
+    Display-only: a failure here must never take the dashboard down, so the
+    renderer falls back to the bare status when this returns None.
+    """
+    try:
+        armed = _self_test_armed(group, config, state) if state else False
+        return state_file_outlook(config, group, state, now=now,
+                                  self_test_failure_armed=armed)
+    except Exception:
+        return None
+
+
+def collect_redundancy_data(config: Config, groups_data: List[Dict],
+                            now: Optional[float] = None) -> List[Dict]:
+    """Per redundancy group, the M9 outlook built from member state files.
+
+    Reuses the states ``collect_group_data`` already parsed (with the mtime
+    fallback for pre-6.2 daemons) so both panels judge the same snapshot.
+    """
+    now = time.time() if now is None else now
+    states = {d["name"]: d.get("outlook_state") for d in groups_data}
+    labels = {d["name"]: d["label"] for d in groups_data}
+    out = []
+    for rg in getattr(config, "redundancy_groups", None) or []:
+        try:
+            data = redundancy_outlook_from_state_files(
+                config, rg, now=now, states=states)
+        except Exception:
+            data = {"name": rg.name, "error": True,
+                    "minHealthy": rg.min_healthy}
+        data["labels"] = {n: labels.get(n, n) for n in rg.ups_sources}
+        data["total"] = len(rg.ups_sources)
+        out.append(data)
+    return out
+
+
+def collect_group_data(group: UPSGroupConfig, config: Config,
+                       now: Optional[float] = None) -> Dict:
     """Collect display data for one UPS group."""
     label = group.ups.label
     name = group.ups.name
+    now = time.time() if now is None else now
 
     state_path = state_file_path_for(group, config)
     state = parse_state_file(state_path)
+    epoch, epoch_source = state_epoch(state, state_path)
+    outlook_state = _state_for_outlook(state, epoch)
 
     res_parts = []
     if group.is_local:
@@ -777,6 +964,12 @@ def collect_group_data(group: UPSGroupConfig, config: Config) -> Dict:
     return {
         "label": label, "name": name, "is_local": group.is_local,
         "state": state,
+        "state_path": str(state_path),
+        "missing_reason": None if state else missing_state_reason(state_path),
+        "epoch": epoch,
+        "epoch_source": epoch_source,
+        "outlook_state": outlook_state,
+        "outlook": group_outlook(group, config, outlook_state, now),
         "resources": ", ".join(res_parts) if res_parts else "none",
         "remote_health": remote_health,
         "remote_health_summary": summarize_remote_health(remote_health),
@@ -813,6 +1006,499 @@ def format_runtime(runtime: str) -> str:
             return f"{rt_sec}s"
     except (ValueError, TypeError):
         return runtime
+
+
+# ==============================================================================
+# VIEW MODEL (pure: data dicts in, text lines out)
+# ==============================================================================
+#
+# ELI5: the kitchen prepares every plate (the lines below) before the waiter
+# (curses) carries them out. Building text first means the interactive TUI and
+# ``--once`` say exactly the same words, the panel can be sized to what it
+# actually holds (no blank rows, L8), and tests can read the plates without a
+# terminal.
+
+# One display row of the status panel. ``style`` is a name ("bold", "plain",
+# "warn", "crit"), mapped to a curses attribute only at paint time.
+# ``priority``: 0 = must show, 1 = useful, 2 = dropped first on short
+# terminals. ``badge``: optional right-aligned ``(text, severity, blink)``.
+Line = namedtuple("Line", "text style priority badge")
+
+
+def _line(text: str, style: str = "plain", priority: int = 1,
+          badge: Optional[Tuple[str, str, bool]] = None) -> Line:
+    return Line(text, style, priority, badge)
+
+
+# Shutdown phases in executor order (shutdown.plan.PHASE_ORDER) -> short name.
+PHASE_SHORT = {
+    "vms": "VMs",
+    "containers": "Containers",
+    "filesystem-sync": "Sync",
+    "filesystem-unmount": "Unmount",
+    "remote": "Remotes",
+    "final-sync": "Final sync",
+    "local-poweroff": "Poweroff",
+}
+_TERMINAL_PHASE_STATES = frozenset({"succeeded", "failed", "timed-out", "skipped"})
+
+# Short trigger names for the "Shutdown when:" chips (the full rule text is
+# in the web Shutdown tab and ``eneru config check``).
+_TRIGGER_SHORT = {
+    "lowBattery": "charge",
+    "criticalRuntime": "runtime",
+    "depletionRate": "drain",
+    "extendedTime": "on battery",
+    "selfTestFailure": "failed self-test",
+}
+
+# Redundancy outlook state -> badge words (the colour repeats the severity).
+_GROUP_BADGES = {
+    "healthy": "OK",
+    "at-risk": "AT RISK",
+    "quorum-lost": "QUORUM LOST",
+    "deferred": "DEFERRED",
+    "shutting-down": "SHUTTING DOWN",
+}
+
+
+def clock_text(epoch: Optional[float], now: float) -> str:
+    """Local wall-clock time of ``epoch``; adds the date when not today."""
+    if epoch is None:
+        return "?"
+    try:
+        when = datetime.fromtimestamp(float(epoch))
+        today = datetime.fromtimestamp(float(now)).date()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "?"
+    if when.date() == today:
+        return when.strftime("%H:%M:%S")
+    return when.strftime("%Y-%m-%d %H:%M:%S")
+
+
+STALE_HINT = ("No new data: daemon stopped, NUT unreachable,"
+              " or a different state file?")
+
+
+def freshness_view(data: Dict, now: float) -> Dict[str, Any]:
+    """Age + stale verdict for one UPS (H5), from EPOCH or the mtime.
+
+    Returns ``{age, stale, stale_after, text}``; ``text`` is the
+    "Updated 3s ago (23:46:50)" line, with "-- STALE (limit 30s)" appended
+    once the daemon stopped rewriting the file.
+    """
+    epoch = data.get("epoch")
+    fresh = (data.get("outlook") or {}).get("freshness") or {}
+    stale_after = fresh.get("staleAfterSeconds") or stale_after_seconds(1)
+    if epoch is None:
+        return {"age": None, "stale": True, "stale_after": stale_after,
+                "text": "Never updated"}
+    age = max(0.0, now - float(epoch))
+    stale = age > stale_after
+    text = f"Updated {format_age(age)} ({clock_text(epoch, now)})"
+    if stale:
+        text += f" -- STALE (limit {format_seconds(stale_after)})"
+    return {"age": age, "stale": stale, "stale_after": stale_after,
+            "text": text}
+
+
+def reading_parts(state: Dict[str, str]) -> List[str]:
+    """``Battery: 100% (24m 52s)``, ``Load: 18%``, ... skipping empty
+    readings (M11: no bare ``Output: V`` when the UPS doesn't report it)."""
+    def ok(key: str) -> bool:
+        return is_numeric(state.get(key))
+
+    parts = []
+    if ok("BATTERY"):
+        text = f"Battery: {state['BATTERY']}%"
+        if ok("RUNTIME"):
+            text += f" ({format_runtime(state['RUNTIME'])})"
+        parts.append(text)
+    elif ok("RUNTIME"):
+        parts.append(f"Runtime: {format_runtime(state['RUNTIME'])}")
+    if ok("LOAD"):
+        parts.append(f"Load: {state['LOAD']}%")
+    if ok("INPUT_VOLTAGE"):
+        parts.append(f"Input: {state['INPUT_VOLTAGE']}V")
+    if ok("OUTPUT_VOLTAGE"):
+        parts.append(f"Output: {state['OUTPUT_VOLTAGE']}V")
+    return parts
+
+
+def short_duration(seconds: Any) -> str:
+    """Compact duration for tight lines: "45s", "1m 21s", "21m", "1h 5m".
+
+    Seconds are dropped (rounded down) from 10 minutes up -- nobody plans
+    around the seconds of a 20-minute countdown, and 80 columns are precious.
+    """
+    if not is_numeric(seconds):
+        return "?"
+    sec = max(0, int(round(float(seconds))))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 600:
+        return f"{sec // 60}m" + (f" {sec % 60}s" if sec % 60 else "")
+    if sec < 3600:
+        return f"{sec // 60}m"  # floor: never promise more time than left
+    return f"{sec // 3600}h {(sec % 3600) // 60}m"
+
+
+def trigger_chip(trigger: Dict[str, Any]) -> Optional[str]:
+    """One "Shutdown when:" chip, or None for triggers not worth a chip.
+
+    Examples: ``runtime < 5m: FIRED at 4m 40s``, ``charge < 20%: 45% (~20m)``,
+    ``drain > 15%/min: 1.2%/min``, ``on battery > 20m: in 13m``. ``(~20m)``
+    is the estimated time until that trigger fires.
+    """
+    tid = trigger.get("id")
+    state = trigger.get("state")
+    if tid not in _TRIGGER_SHORT or state in ("idle", "disabled", None):
+        return None
+    name = _TRIGGER_SHORT[tid]
+    threshold = trigger.get("threshold")
+    unit = trigger.get("unit") or ""
+    if unit == "s":
+        thr_text = short_duration(threshold)
+    else:
+        thr_text = f"{threshold:g}{unit}" if is_numeric(threshold) else "?"
+    op = "<" if trigger.get("comparison") == "below" else ">"
+    if tid == "selfTestFailure":
+        cond = f"{name} + {thr_text} on battery"
+    else:
+        cond = f"{name} {op} {thr_text}"
+    value = trigger.get("value")
+    if tid in ("extendedTime", "selfTestFailure") or not is_numeric(value):
+        now_text = ""
+    elif unit == "s":
+        now_text = short_duration(value)
+    else:
+        now_text = f"{value:g}{unit}"
+    eta = trigger.get("etaSeconds")
+    if state == "fired":
+        tail = "FIRED" + (f" at {now_text}" if now_text else "")
+    elif state == "held":
+        tail = "met, held " + short_duration(eta or 0)
+    elif state == "unknown":
+        tail = "no reading"
+    elif eta is not None:
+        tail = (f"{now_text} (~{short_duration(eta)})" if now_text
+                else f"in {short_duration(eta)}")
+    else:
+        tail = now_text or "ok"
+    return f"{cond}: {tail}"
+
+
+def outlook_headline(trig: Dict[str, Any]) -> str:
+    """Short "what happens next" sentence (the contract ``summary`` is too
+    long for 80 columns once "On battery for 7m 5s" leads it)."""
+    nxt = trig.get("next")
+    if nxt and nxt.get("state") == "fired":
+        text = f"Shutdown condition met: {nxt['label'].lower()}"
+    elif nxt and nxt.get("state") == "held":
+        text = (f"{nxt['label']} met, waiting "
+                f"{short_duration(nxt.get('etaSeconds') or 0)} (stabilizing)")
+    elif nxt and nxt.get("etaSeconds") is not None:
+        text = (f"Next trigger: {nxt['label'].lower()} in "
+                f"~{short_duration(nxt['etaSeconds'])}")
+    else:
+        text = "No trigger is close"
+    if trig.get("stabilizing") and not trig.get("firing") and not (
+            nxt and nxt.get("state") == "held"):
+        text += f"; stabilizing {short_duration(trig.get('stabilizationRemaining'))}"
+    return text
+
+
+def wrap_items(prefix: str, items: List[str], width: int,
+               indent: str, sep: str = " · ") -> List[str]:
+    """Greedy word-wrap of ``items`` after ``prefix`` into ``width`` cells.
+
+    Continuation lines start with ``indent``. An item wider than a line is
+    kept whole (the painter truncates it); nothing is silently dropped.
+    """
+    lines: List[str] = []
+    current = prefix
+    empty = True
+    for item in items:
+        candidate = current + ("" if empty else sep) + item
+        if empty or display_width(candidate) <= width:
+            current = candidate
+            empty = False
+            continue
+        lines.append(current)
+        current = indent + item
+    if not empty:
+        lines.append(current)
+    return lines
+
+
+PROGRESS_SILENT_AFTER = 300  # s without a progress write before we nag
+
+
+def progress_silent(progress: Optional[Dict[str, Any]], now: float,
+                    stale: bool) -> bool:
+    """A "running" sidecar nobody has touched for 5 min while the state
+    file is stale too: most likely a daemon that died mid-shutdown.
+
+    The daemon may legitimately stop polling during a long phase, so the
+    state file alone going stale is not enough -- both must be quiet.
+    """
+    if not stale or not isinstance(progress, dict):
+        return False
+    if progress.get("state") != "running":
+        return False
+    written = progress.get("writtenAt")
+    return is_numeric(written) and now - float(written) > PROGRESS_SILENT_AFTER
+
+
+def progress_lines(progress: Optional[Dict[str, Any]], now: float, *,
+                   indent: str = "   ", stale: bool = False) -> List[Line]:
+    """Shutdown progress from the §3.4 sidecar (item 7), or [] when idle.
+
+    The daemon resets the sidecar to ``idle`` on its first good poll after a
+    restart, so a "running" file from a previous run never shows as live.
+    """
+    if not isinstance(progress, dict):
+        return []
+    state = str(progress.get("state") or "idle")
+    if state == "idle":
+        return []
+    phases = [p for p in (progress.get("phases") or []) if isinstance(p, dict)]
+    lines: List[Line] = []
+    if state == "running":
+        idx = next((i for i, p in enumerate(phases)
+                    if p.get("state") not in _TERMINAL_PHASE_STATES),
+                   len(phases) - 1 if phases else 0)
+        head = "SHUTDOWN IN PROGRESS"
+        if phases:
+            cur = phases[idx]
+            head += (f": phase {idx + 1}/{len(phases)} "
+                     f"{PHASE_SHORT.get(cur.get('id'), cur.get('id'))}")
+            if cur.get("state") == "running" and is_numeric(cur.get("startedAt")):
+                head += f" (running {format_seconds(now - float(cur['startedAt']))})"
+        if is_numeric(progress.get("startedAt")):
+            head += f", started {format_age(now - float(progress['startedAt']))}"
+        lines.append(_line(indent + head, "crit", 0))
+        if progress_silent(progress, now, stale):
+            lines.append(_line(
+                f"{indent}No progress for "
+                f"{short_duration(now - float(progress['writtenAt']))}"
+                ": is the daemon still running?", "warn", 0))
+    else:
+        head = f"Last shutdown run: {state}"
+        if is_numeric(progress.get("finishedAt")):
+            head += f" {format_age(now - float(progress['finishedAt']))}"
+        lines.append(_line(indent + head,
+                           "crit" if state in ("failed", "timed-out") else "bold",
+                           0))
+    if progress.get("reason"):
+        lines.append(_line(f"{indent}Reason: {progress['reason']}", "plain", 1))
+    buckets = (("succeeded", "Done"), ("running", "Running"),
+               ("failed", "Failed"), ("timed-out", "Timed out"),
+               ("pending", "To do"), ("skipped", "Skipped"))
+    parts = []
+    for key, word in buckets:
+        names = [PHASE_SHORT.get(p.get("id"), str(p.get("id")))
+                 for p in phases if p.get("state") == key]
+        if names:
+            parts.append(f"{word}: {', '.join(names)}")
+    if parts:
+        lines.append(_line(indent + "Phases -- " + " | ".join(parts), "plain", 0))
+    remotes = [r for r in (progress.get("remotes") or []) if isinstance(r, dict)]
+    if remotes:
+        chips = [f"{r.get('server') or r.get('host')} {r.get('state')}"
+                 + (f" ({r['error']})" if r.get("error") else "")
+                 for r in remotes]
+        lines.append(_line(indent + "Remotes -- " + ", ".join(chips), "plain", 1))
+    return lines
+
+
+def ups_block_lines(data: Dict, now: float, width: int = 120) -> List[Line]:
+    """Every status-panel line for one UPS (header, readings, freshness,
+    what happens next, shutdown progress, resources)."""
+    state = data.get("state") or {}
+    ol = data.get("outlook") or {}
+    header = f"   {data['label']}"
+    if data.get("name") != data["label"]:
+        header += f"  ({data['name']})"
+    role = ol.get("role")
+    if role:
+        header += f"  · {role['label']}"
+    elif data.get("is_local"):
+        header += "  · Powers this host"
+    lines: List[Line] = []
+
+    if not state:
+        lines.append(_line(header, "bold", 0, ("NO DATA", SEVERITY_WARN, False)))
+        path = data.get("state_path") or "(unknown path)"
+        for i, text in enumerate(missing_state_lines(
+                path, data.get("missing_reason") or "missing")):
+            lines.append(_line("   " + text, "plain", 0 if i == 0 else 1))
+    else:
+        fresh = freshness_view(data, now)
+        summary = ol.get("statusSummary") or status_summary(
+            state.get("STATUS", ""), trigger_active=state.get("TRIGGER_ACTIVE") == "1",
+            stale=fresh["stale"])
+        trig = ol.get("triggerOutlook") or {}
+        acts = bool(role and (role.get("hasShutdownActions")
+                              or role.get("kind") == "redundancy-member"))
+        if (trig.get("firing") and acts and not fresh["stale"]
+                and not summary.get("blink")):
+            # A trigger condition is met and this UPS really shuts something
+            # down: say so (red, blinking) even before the daemon's progress
+            # file flips to "running". A monitoring-only UPS never escalates
+            # (H1): its outlook line says "Notification only".
+            summary = status_summary(state.get("STATUS", ""), trigger_active=True)
+        if fresh["stale"] and (not summary.get("blink") or progress_silent(
+                ol.get("shutdownProgress"), now, True)):
+            age = fresh["age"]
+            badge_text = "STALE " + (format_seconds(age).split(" ")[0]
+                                     if age is not None else "")
+            badge = (badge_text.strip(), SEVERITY_WARN, False)
+        else:
+            badge = (str(summary.get("label", "?")).upper(),
+                     summary.get("severity", SEVERITY_WARN),
+                     bool(summary.get("blink")))
+        lines.append(_line(header, "bold", 0, badge))
+        readings = "  ".join(reading_parts(state)) or "No readings reported"
+        raw = state.get("STATUS", "")
+        status_bit = f"{human_status(raw)} ({raw})" if raw else "Status unknown"
+        if fresh["stale"]:
+            lines.append(_line(f"   Last known: {status_bit}  {readings}", "bold", 0))
+            lines.append(_line("   " + fresh["text"], "warn", 0))
+            lines.append(_line("   " + STALE_HINT, "plain", 1))
+        else:
+            lines.append(_line(f"   {readings}", "bold", 0))
+            lines.append(_line("   " + fresh["text"], "plain", 1))
+        lines.extend(outlook_lines(ol, state, width, stale=fresh["stale"]))
+        lines.extend(progress_lines(ol.get("shutdownProgress"), now,
+                                    stale=fresh["stale"]))
+
+    lines.append(_line(f"   Resources: {data.get('resources', 'none')}", "plain", 2))
+    if data.get("remote_health_summary"):
+        summary_text = data["remote_health_summary"]
+        bad = any(word in summary_text for word in ("failed", "degraded"))
+        lines.append(_line(f"   Remote health: {summary_text}",
+                           "warn" if bad else "plain", 1 if bad else 2))
+    return lines
+
+
+def outlook_lines(ol: Dict, state: Dict[str, str], width: int, *,
+                  stale: bool = False) -> List[Line]:
+    """H3: while on battery (or a trigger is latched), which trigger is
+    next, how close each one is, and what firing does.
+
+    With stale data the countdowns would be guesses built on an old
+    reading, so only the action is shown (H5: never dress old data as live).
+    """
+    trig = ol.get("triggerOutlook") or {}
+    advisory = state.get("TRIGGER_ACTIVE") == "1"
+    if not trig.get("onBattery") and not trig.get("firing") and not advisory:
+        return []
+    action = (trig.get("action") or {}).get("label")
+    if stale:
+        lines = [_line("   On battery at the last update; countdowns paused"
+                       " (data is stale)", "warn", 0)]
+        if action:
+            lines.append(_line(f"   If a trigger fires: {action}", "bold", 0))
+        return lines
+    firing = bool(trig.get("firing")) or advisory
+    lines: List[Line] = []
+    lead = ""
+    if trig.get("onBattery"):
+        if "TIME_ON_BATTERY" in state:
+            lead = f"On battery {short_duration(trig.get('timeOnBattery', 0))} · "
+        else:
+            lead = "On battery · "
+    lines.append(_line(f"   {lead}{outlook_headline(trig)}",
+                       "crit" if firing else "warn", 0))
+    if advisory and state.get("TRIGGER_REASON"):
+        lines.append(_line(f"   Trigger: {state['TRIGGER_REASON']}", "crit", 0))
+    chips = [c for c in (trigger_chip(t) for t in trig.get("triggers") or []) if c]
+    if chips:
+        for text in wrap_items("   Shutdown when: ", chips, max(20, width - 4),
+                               "                  "):
+            lines.append(_line(text, "plain", 1))
+    if action:
+        verb = "Trigger fired -> " if firing else "If a trigger fires: "
+        lines.append(_line(f"   {verb}{action}", "crit" if firing else "bold", 0))
+    return lines
+
+
+def redundancy_block_lines(rg: Dict, now: float, width: int = 120) -> List[Line]:
+    """M9: one redundancy group -- who is healthy, quorum, what happens."""
+    name = rg.get("name", "?")
+    if rg.get("error"):
+        return [_line(f"   Redundancy group {name}: status unavailable", "warn", 0,
+                      ("UNKNOWN", SEVERITY_WARN, False))]
+    outlook = rg.get("outlook") or {}
+    ostate = outlook.get("state", "healthy")
+    badge = (_GROUP_BADGES.get(ostate, ostate.upper()),
+             outlook.get("severity", SEVERITY_WARN), ostate == "shutting-down")
+    head = (f"   Redundancy group {name}: {rg.get('healthyCount', 0)}/"
+            f"{rg.get('total', 0)} healthy, need {rg.get('minHealthy', '?')}")
+    style = {"crit": "crit", "warn": "warn"}.get(outlook.get("severity"), "plain")
+    lines = [_line(head, "bold", 0, badge)]
+    if outlook.get("label"):
+        lines.append(_line(f"     {outlook['label']}", style, 0))
+    labels = rg.get("labels") or {}
+    failing = set(rg.get("failingMembers") or [])
+    members = rg.get("members") or {}
+    chips = []
+    for member in labels or members:
+        info = members.get(member) or {}
+        reason = info.get("healthReason", "unknown")
+        chip = f"{labels.get(member, member)}: {reason}"
+        if member in failing:
+            chip += " (counts as failed)"
+        chips.append(chip)
+    for text in wrap_items("     Members: ", chips, max(20, width - 4),
+                           "              "):
+        lines.append(_line(text, "plain", 0 if failing else 1))
+    if outlook.get("action"):
+        lines.append(_line(f"     Group shutdown: {outlook['action']}", "plain",
+                           1 if ostate in ("quorum-lost", "at-risk") else 2))
+    lines.extend(progress_lines(rg.get("shutdownProgress"), now, indent="     "))
+    return lines
+
+
+def config_panel_lines(groups_data: List[Dict], rg_data: Optional[List[Dict]],
+                       width: int, now: Optional[float] = None) -> List[Line]:
+    """All status-panel lines: every UPS, then every redundancy group."""
+    now = time.time() if now is None else now
+    lines: List[Line] = []
+    # Blank separators are priority 1: on a short terminal the
+    # "Resources" / "Remote health" rows (priority 2) go first, so blocks
+    # stay visibly apart.
+    for i, data in enumerate(groups_data):
+        if i:
+            lines.append(_line("", "plain", 1))
+        lines.extend(ups_block_lines(data, now, width))
+    for rg in rg_data or []:
+        lines.append(_line("", "plain", 1))
+        lines.extend(redundancy_block_lines(rg, now, width))
+    return lines
+
+
+def fit_lines(lines: List[Line], max_rows: int) -> List[Line]:
+    """Drop the least important lines (highest priority number, last first)
+    until ``lines`` fits ``max_rows``; hard-cut only if priority-0 lines
+    alone overflow. Keeps a small SSH window showing what matters."""
+    lines = list(lines)
+    while lines and not lines[0].text:
+        del lines[0]
+    if max_rows <= 0:
+        return []
+    for level in (2, 1):
+        # Text rows of this level go before blank separators of it.
+        for blank in (False, True):
+            while len(lines) > max_rows:
+                idx = next((i for i in range(len(lines) - 1, -1, -1)
+                            if lines[i].priority >= level
+                            and (not lines[i].text) == blank), None)
+                if idx is None:
+                    break
+                del lines[idx]
+    return lines[:max_rows]
 
 
 # ==============================================================================
@@ -917,98 +1603,161 @@ def render_header(win, y: int, width: int, group_count: int):
     safe_addstr(win, y, 0, text, attr)
 
 
-def render_config_panel(win, y_start: int, y_end: int, width: int,
-                         groups_data: List[Dict]):
-    """Render the config/status panel with gray background, edge to edge."""
-    gray_attr = curses.color_pair(C_GRAY_BG)
-    bold_attr = gray_attr | curses.A_BOLD
+def _style_attr(style: str) -> int:
+    """curses attribute for a view-model line style (on the gray panel)."""
+    gray = curses.color_pair(C_GRAY_BG)
+    if style == "bold":
+        return gray | curses.A_BOLD
+    if style == "warn":
+        return curses.color_pair(C_STATUS_WARN) | curses.A_BOLD
+    if style == "crit":
+        return curses.color_pair(C_STATUS_CRIT) | curses.A_BOLD
+    return gray
 
-    # Fill entire panel with gray background
+
+def _ellipsize(text: str, max_cells: int) -> str:
+    """Cut ``text`` to ``max_cells`` with a trailing "…" when it overflows."""
+    if max_cells <= 0:
+        return ""
+    if display_width(text) <= max_cells:
+        return text
+    return truncate_to_width(text, max_cells - 1) + "…"
+
+
+def paint_line(win, y: int, width: int, line: Line) -> None:
+    """Paint one view-model line: text on the left, badge on the right."""
+    badge_text = f"  {line.badge[0]}  " if line.badge else ""
+    text_room = width - 4
+    if badge_text:
+        text_room = max(8, width - display_width(badge_text) - 5)
+    text = _ellipsize(line.text, text_room)
+    if line.style in ("warn", "crit"):
+        # Coloured strip only under the words; the indent stays gray.
+        stripped = text.lstrip(" ")
+        indent = len(text) - len(stripped)
+        safe_addstr(win, y, indent, stripped, _style_attr(line.style))
+    else:
+        safe_addstr(win, y, 0, text, _style_attr(line.style))
+    if badge_text:
+        severity, blink = line.badge[1], line.badge[2]
+        attr = summary_attr({"severity": severity, "blink": blink})
+        sx = max(display_width(text) + 1, width - display_width(badge_text) - 3)
+        safe_addstr(win, y, sx, badge_text, attr)
+
+
+def render_config_panel(win, y_start: int, y_end: int, width: int,
+                        groups_data: List[Dict],
+                        rg_data: Optional[List[Dict]] = None,
+                        now: Optional[float] = None) -> int:
+    """Render the status panel (gray background, edge to edge).
+
+    Lines come from :func:`config_panel_lines`; when the panel is shorter
+    than the content, :func:`fit_lines` drops the least important rows
+    first. Returns the number of content rows painted.
+    """
+    gray_attr = curses.color_pair(C_GRAY_BG)
     for row in range(y_start, y_end):
         fill_row(win, row, gray_attr)
+    lines = fit_lines(config_panel_lines(groups_data, rg_data, width, now),
+                      y_end - y_start - 1)
+    for i, line in enumerate(lines):
+        paint_line(win, y_start + 1 + i, width, line)
+    return len(lines)
 
-    y = y_start + 1  # top padding
-    for i, data in enumerate(groups_data):
-        if y >= y_end - 1:
-            break
 
-        state = data["state"]
+HELP_HINT = ("<?>", "Help")
 
-        # Group name line
-        header = f"   {data['label']}"
-        if data["name"] != data["label"]:
-            header += f"  ({data['name']})"
-        if data["is_local"]:
-            header += "  [is_local]"
-        safe_addstr(win, y, 0, header, bold_attr)
 
-        # Status badge (right-aligned, highlighted background)
-        if state:
-            status_str = state.get("STATUS", "?")
-            status_label = f"  {human_status(status_str)}  "
-            sa = status_attr(status_str)
-            sx = max(0, width - len(status_label) - 3)
-            safe_addstr(win, y, sx, status_label, sa)
-        else:
-            label = "  daemon not running  "
-            sx = max(0, width - len(label) - 3)
-            safe_addstr(win, y, sx, label,
-                        curses.color_pair(C_STATUS_UNK) | curses.A_BOLD)
-        y += 1
-        if y >= y_end:
-            break
+def key_hints(*, graph_mode: str = "off", time_range: str = "1h",
+              ups_index: int = 0, ups_total: int = 1,
+              verbosity: int = EVENTS_VERBOSITY_POWER) -> List[Tuple[str, str]]:
+    """Bottom-row key hints, most useful first, <?> Help last.
 
-        # Data line: values bold, labels regular
-        if state:
-            battery = state.get("BATTERY", "?")
-            runtime = format_runtime(state.get("RUNTIME", "?"))
-            load = state.get("LOAD", "?")
-            input_v = state.get("INPUT_VOLTAGE", "?")
-            output_v = state.get("OUTPUT_VOLTAGE", "?")
-            line = (f"   Battery: {battery}% ({runtime})  Load: {load}%  "
-                    f"Input: {input_v}V  Output: {output_v}V")
-            safe_addstr(win, y, 0, line, bold_attr)
-        else:
-            safe_addstr(win, y, 0, "   No data available", gray_attr)
-        y += 1
-        if y >= y_end:
-            break
+    G/T/U/V descriptions carry the current cycle state so an operator can
+    see "graph is on charge, 1h" without remembering the cycle order.
+    """
+    ups_descr = (f"UPS: {ups_index + 1}/{ups_total}" if ups_total > 1
+                 else "UPS")
+    return [
+        ("<Q>", "Quit"),
+        ("<R>", "Refresh"),
+        ("<M>", "More logs"),
+        ("<↑↓>", "Scroll"),
+        ("<G>", f"Graph: {graph_mode}"),
+        ("<T>", f"Time: {time_range}"),
+        ("<U>", ups_descr),
+        ("<V>", f"Events: {_events_verbosity_label(verbosity)}"),
+        HELP_HINT,
+    ]
 
-        # Timestamp
-        if state:
-            ts = state.get("TIMESTAMP", "")
-            safe_addstr(win, y, 0, f"   Last update: {ts}", gray_attr)
-        y += 1
-        if y >= y_end:
-            break
 
-        # Resources
-        safe_addstr(win, y, 0, f"   Resources: {data['resources']}", gray_attr)
-        y += 1
-        if data.get("remote_health_summary") and y < y_end:
-            safe_addstr(
-                win, y, 0,
-                f"   Remote health: {data['remote_health_summary']}",
-                gray_attr,
-            )
-            y += 1
+def _hint_width(hint: Tuple[str, str]) -> int:
+    return len(hint[0]) + 2 + len(hint[1]) + 3
 
-        # Spacing between groups
-        if i < len(groups_data) - 1 and y < y_end:
-            y += 1
+
+def layout_key_hints(hints: List[Tuple[str, str]], width: int,
+                     max_rows: int = 2) -> List[List[Tuple[str, str]]]:
+    """Pack hints into at most ``max_rows`` rows of ``width`` cells (M7).
+
+    80 columns fit every hint on two rows. When even that overflows, the
+    last row keeps ``<?> Help`` so the full key list is one press away --
+    a key is never silently undiscoverable.
+    """
+    room = max(1, width - 3)
+    rows: List[List[Tuple[str, str]]] = [[]]
+    used = 0
+    for hint in hints:
+        w = _hint_width(hint)
+        if rows[-1] and used + w > room:
+            rows.append([])
+            used = 0
+        rows[-1].append(hint)
+        used += w
+    if len(rows) <= max_rows:
+        return rows
+    rows = rows[:max_rows]
+    last = [h for h in rows[-1] if h != HELP_HINT]
+    while last and sum(_hint_width(h) for h in last) + _hint_width(HELP_HINT) > room:
+        last.pop()
+    rows[-1] = last + [HELP_HINT]
+    return rows
+
+
+def help_lines(*, graph_mode: str = "off", time_range: str = "1h",
+               ups_index: int = 0, ups_total: int = 1,
+               verbosity: int = EVENTS_VERBOSITY_POWER) -> List[str]:
+    """The <?> overlay: every key, what it does, and the current value."""
+    ups_now = f"{ups_index + 1}/{ups_total}" if ups_total > 1 else "only one"
+    return [
+        "Keys (press any key to close)",
+        "  Q / Esc     Quit",
+        "  R           Refresh now and jump to the newest event",
+        "  M           More logs: up to 500 events (scrolling turns it on)",
+        "  Up / Down   Scroll events; PgUp/PgDn by 10; Home/End jump to the ends",
+        f"  G           Graph: off > charge > load > voltage > runtime (now {graph_mode})",
+        f"  T           Graph window: 1h > 6h > 24h > 7d > 30d (now {time_range})",
+        f"  U           Which UPS the graph shows (now {ups_now})",
+        "  V           Events: power > +diagnostics > all "
+        f"(now {_events_verbosity_label(verbosity)})",
+        "  ?           Show / hide this help",
+        "Badges: green = OK, amber = warning, red = critical. Only",
+        "  'SHUTDOWN TRIGGERED' and 'SHUTTING DOWN' blink.",
+        "Events: newest at the bottom; the second column is how long ago.",
+    ]
 
 
 def render_logs_panel(win, y_start: int, y_end: int, width: int,
-                       events: List[str], show_more: bool,
-                       *, graph_mode: str = "off", time_range: str = "1h",
-                       ups_index: int = 0, ups_total: int = 1,
-                       scroll_offset: int = 0,
-                       verbosity: int = EVENTS_VERBOSITY_POWER):
+                      events: List[str], show_more: bool,
+                      *, graph_mode: str = "off", time_range: str = "1h",
+                      ups_index: int = 0, ups_total: int = 1,
+                      scroll_offset: int = 0,
+                      verbosity: int = EVENTS_VERBOSITY_POWER,
+                      show_help: bool = False):
     """Render the logs panel with yellow/gold background, edge to edge.
 
-    The bottom-row key hints reflect the *current* graph mode, time
-    range, and (in multi-UPS) the active UPS index. Static hints would
-    leave operators guessing what state the cycle keys are in.
+    The bottom key hints reflect the *current* graph mode, time range, and
+    (in multi-UPS) the active UPS index, wrapped onto two rows when one
+    doesn't fit. ``show_help`` replaces the events with the key overlay.
     """
     gold_attr = curses.color_pair(C_GOLD_BG)
     gold_bold = gold_attr | curses.A_BOLD
@@ -1019,17 +1768,33 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
     for row in range(y_start, y_end):
         fill_row(win, row, gold_attr)
 
+    state = dict(graph_mode=graph_mode, time_range=time_range,
+                 ups_index=ups_index, ups_total=ups_total, verbosity=verbosity)
+    hint_rows = layout_key_hints(key_hints(**state), width)
+    footer_lines = 1 + len(hint_rows)
+    max_cells = max(0, width - 4)
+
     y = y_start + 1  # top padding
 
-    # Title (bold)
-    safe_addstr(win, y, 0, "   Recent Events", gold_bold)
-    y += 1
+    if show_help:
+        for i, text in enumerate(help_lines(**state)):
+            if y >= y_end - footer_lines:
+                break
+            safe_addstr(win, y, 0, _ellipsize("   " + text, max_cells),
+                        gold_bold if i == 0 else gold_attr)
+            y += 1
+    else:
+        title = "   Recent Events (newest at the bottom"
+        title += ", scrolled)" if scroll_offset else ")"
+        safe_addstr(win, y, 0, title, gold_bold)
+        y += 1
 
-    if not events:
+    if show_help:
+        events = []  # the overlay owns the panel body
+    elif not events:
         safe_addstr(win, y, 0, f"   {_no_events_message(verbosity)}", gold_attr)
         y += 1
-    else:
-        footer_lines = 2
+    if events:
         available = y_end - y - footer_lines
         if available <= 0:
             display_events = []
@@ -1052,14 +1817,9 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
                 EVENT_SECTION_DIAGNOSTICS,
                 EVENT_SECTION_LIFECYCLE,
             )
-            # Account for the right-edge gutter and the leading 3-space
-            # indent. Use display-cell width (handles emoji + CJK) so
-            # lines never spill past the panel edge.
-            max_cells = max(0, width - 4)
-            display = f"   {event}"
-            if display_width(display) > max_cells:
-                # Reserve 2 cells for the trailing ellipsis.
-                display = truncate_to_width(display, max_cells - 2) + ".."
+            # Display-cell width (handles emoji + CJK) so lines never
+            # spill past the panel edge; "…" marks a cut line.
+            display = _ellipsize(f"   {event}", max_cells)
             # Pad to full row width with gold-bg spaces so the line
             # overwrites every cell of the row, not just where the text
             # ends. Mobile SSH clients often render emoji at a different
@@ -1070,35 +1830,17 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
             safe_addstr(win, y, 0, display + (" " * pad_cells), attr)
             y += 1
 
-    # Key hints at the bottom of the gold panel.
-    # G/T/U descriptions interpolate the current cycle state so an
-    # operator can see at a glance "next press of T moves from 1h to 6h"
-    # without having to remember the cycle order.
-    hint_y = y_end - 1
-    x = 2
-    ups_descr = (f"UPS: {ups_index + 1}/{ups_total}" if ups_total > 1
-                 else "UPS")
-    # Hint order: most useful keys first so narrow terminals (which drop
-    # tail hints via the width check below) keep the actionable cycles
-    # visible. <V> is shorter than "Verbose: ..." would imply -- "Verb"
-    # keeps a 120-col terminal showing every hint.
-    hints = (
-        ("<Q>", "Quit"),
-        ("<R>", "Refresh"),
-        ("<M>", "More logs"),
-        ("<↑↓>", "Scroll"),
-        ("<G>", f"Graph: {graph_mode}"),
-        ("<T>", f"Time: {time_range}"),
-        ("<U>", ups_descr),
-        ("<V>", f"Events: {_events_verbosity_label(verbosity)}"),
-    )
-    for label, descr in hints:
-        if x + len(label) + len(descr) + 6 > width:
-            break  # ran out of horizontal space; skip remaining hints
-        safe_addstr(win, hint_y, x, f" {label} ", key_attr)
-        x += len(label) + 2
-        safe_addstr(win, hint_y, x, f" {descr}   ", dim_attr)
-        x += len(descr) + 4
+    # Key hints at the bottom of the gold panel (one or two rows).
+    for r, row in enumerate(hint_rows):
+        hint_y = y_end - len(hint_rows) + r
+        x = 2
+        for label, descr in row:
+            # Advance by characters: curses moves one cell per arrow glyph,
+            # while display_width() deliberately over-counts them.
+            safe_addstr(win, hint_y, x, f" {label} ", key_attr)
+            x += len(label) + 2
+            safe_addstr(win, hint_y, x, f" {descr}  ", dim_attr)
+            x += len(descr) + 3
 
 
 # ==============================================================================
@@ -1263,7 +2005,6 @@ def render_graph_panel(stdscr, y_start: int, y_end: int, width: int,
         safe_addstr(stdscr, graph_top + i, label_w, line, gray_attr)
 
     if sparse:
-        from eneru.utils import format_seconds
         footer = (f"   data: {format_seconds(actual_span)} "
                   f"of {format_seconds(seconds)} requested")
         safe_addstr(stdscr, y_end - 1, 0, footer, gray_attr)
@@ -1283,7 +2024,7 @@ def run_tui(config: Config, interval: int = 5, *,
 
     ``verbose`` is a count-style event verbosity: 0 shows Power Events,
     1 adds Diagnostics, and 2 adds Lifecycle. The ``<V>`` key cycles this
-    in-session.
+    in-session. ``<?>`` (or ``h``) shows every key; any key closes it.
     """
     def _main(stdscr):
         init_colors()
@@ -1309,6 +2050,7 @@ def run_tui(config: Config, interval: int = 5, *,
         )
         events_verbosity = _events_verbosity(verbose)
         events_scroll = 0            # ↑/↓ scrolls events panel; 0 = bottom
+        show_help = False            # <?> key overlay (M7)
 
         while True:
             stdscr.erase()
@@ -1326,66 +2068,58 @@ def run_tui(config: Config, interval: int = 5, *,
             # Header (row 0)
             render_header(stdscr, 0, width, len(config.ups_groups))
 
-            # Calculate panel split: config panel gets what it needs,
-            # logs panel gets the rest. Add one extra row per group
-            # whenever remote-health rendering may emit its own line
-            # (the renderer at render_config_panel emits "Remote
-            # health: …" only if a summary is non-empty, but at panel-
-            # sizing time we don't know which groups will have it —
-            # budget the row anyway so panels don't get clipped on
-            # tight terminals).
-            groups_needed = 0
-            includes_remote_health = bool(
-                getattr(config, "remote_health", None)
-                and getattr(config.remote_health, "enabled", False)
-            )
-            per_group = 6 if includes_remote_health else 5
-            for group in config.ups_groups:
-                groups_needed += per_group  # data lines + 1 spacing
-            groups_needed = max(groups_needed - 1, 4)
-            groups_needed += 2  # top + bottom padding
+            # Collect data first so the status panel can be sized to what
+            # it actually holds (L8: no blank filler rows). Prefer the
+            # SQLite events tier; fall back to the log-tail parser when no
+            # DB is present. Also push a fresh state-file snapshot into
+            # each group's live buffer so the graph panel can blend SQLite
+            # + post-flush samples (spec 2.13 -- bridges the 0-10s gap).
+            now = time.time()
+            groups_data = []
+            for g in config.ups_groups:
+                groups_data.append(collect_group_data(g, config, now))
+                update_live_buffer(g, config)
+            rg_data = collect_redundancy_data(config, groups_data, now)
 
-            # Config panel starts at row 1, ends before logs panel
+            ups_total = len(config.ups_groups) or 1
+            hint_state = dict(graph_mode=graph_mode, time_range=time_range,
+                              ups_index=ups_index, ups_total=ups_total,
+                              verbosity=events_verbosity)
+            hint_rows = len(layout_key_hints(key_hints(**hint_state), width))
+            # Logs keep at least: padding + title + 3 events + gap + hints.
+            min_logs = 6 + hint_rows
+            graph_on = graph_mode != "off" and bool(config.ups_groups)
+            graph_min = 7 if graph_on else 0
+            max_config_rows = max(
+                3, height - 1 - 1 - min_logs - graph_min - 1)
+            panel_lines = fit_lines(
+                config_panel_lines(groups_data, rg_data, width, now),
+                max_config_rows)
+
+            # Config panel starts at row 1: top padding + lines (L8: no
+            # filler rows; the black spacer below already separates panels).
             config_start = 1
-            config_end = min(config_start + groups_needed, height - 8)
-            config_end = max(config_end, 6)
+            config_end = config_start + len(panel_lines) + 1
 
-            # Optional graph panel between config and logs (when graph_mode != off)
+            # Optional graph panel between config and logs.
             graph_start = config_end + 1
             graph_end = graph_start
-            if graph_mode != "off" and config.ups_groups:
+            if graph_on:
                 graph_end = graph_start + max(5, (height - config_end) // 2)
-                graph_end = min(graph_end, height - 6)
+                graph_end = min(graph_end, height - min_logs - 1)
 
             # Black spacer row between panels
-            spacer = config_end
-            fill_row(stdscr, spacer, curses.color_pair(C_BORDER))
+            fill_row(stdscr, config_end, curses.color_pair(C_BORDER))
 
             # Logs panel fills the rest (after spacer / graph)
             logs_start = (graph_end + 1) if graph_end > graph_start else config_end + 1
             logs_end = height
 
-            # Collect data. Prefer the SQLite events tier; fall back to the
-            # log-tail parser when no DB is present (single-UPS pip installs
-            # without /var/lib/eneru, fresh installs before first poll, etc.).
-            # Also push a fresh state-file snapshot into each group's live
-            # buffer so the graph panel can blend SQLite + post-flush
-            # samples (spec 2.13 -- bridges the 0-10s flush gap).
-            groups_data = []
-            for g in config.ups_groups:
-                groups_data.append(collect_group_data(g, config))
-                update_live_buffer(g, config)
-            # Couple the data cap to the visible-rows estimate. Without
-            # this, the cap is 30 but the panel only renders ~12 rows
-            # anchored at the bottom (most-recent end of the chronological
-            # list). With tier-trim placing power events at the top of
-            # the list, the visible window shows the daemon-rich tail and
-            # power events sit off-screen until the operator scrolls up.
-            # Sizing the data cap to the panel keeps power events inside
-            # the visible window in normal mode; <M> still expands to
-            # EVENTS_MAX_ROWS_MORE (500) for full scrollable history.
+            # Couple the data cap to the visible rows so the default view
+            # shows the newest rows of every enabled tier; <M> still expands
+            # to EVENTS_MAX_ROWS_MORE (500) for full scrollable history.
             visible_estimate = max(
-                3, logs_end - logs_start - 4  # title + footer + padding
+                3, logs_end - logs_start - 3 - hint_rows  # title + pads + hints
             )
             if show_more:
                 events_cap = EVENTS_MAX_ROWS_MORE
@@ -1395,6 +2129,7 @@ def run_tui(config: Config, interval: int = 5, *,
                 config, max_events=events_cap,
                 verbosity=events_verbosity,
                 grouped=True,
+                compact=width < 100,
             )
             if not log_events and not events_db_available(config):
                 log_events = parse_log_events(
@@ -1404,8 +2139,8 @@ def run_tui(config: Config, interval: int = 5, *,
 
             # Render panels edge-to-edge
             render_config_panel(stdscr, config_start, config_end, width,
-                                groups_data)
-            if graph_mode != "off" and graph_end > graph_start and config.ups_groups:
+                                groups_data, rg_data, now)
+            if graph_on and graph_end > graph_start:
                 ups_index = max(0, min(ups_index, len(config.ups_groups) - 1))
                 render_graph_panel(
                     stdscr, graph_start, graph_end, width,
@@ -1418,14 +2153,15 @@ def run_tui(config: Config, interval: int = 5, *,
             # refresh that shrinks the list doesn't strand the user on
             # an empty view.
             events_scroll = max(0, min(events_scroll, max(0, len(log_events) - 1)))
+            if show_help:
+                # The key overlay borrows the whole body so every line
+                # fits even at 80x24 with the graph on.
+                logs_start = 1
             render_logs_panel(stdscr, logs_start, logs_end, width,
                               log_events, show_more,
-                              graph_mode=graph_mode,
-                              time_range=time_range,
-                              ups_index=ups_index,
-                              ups_total=len(config.ups_groups) or 1,
                               scroll_offset=events_scroll,
-                              verbosity=events_verbosity)
+                              show_help=show_help,
+                              **hint_state)
 
             # Move cursor to bottom-right to avoid visual artifacts
             try:
@@ -1439,6 +2175,14 @@ def run_tui(config: Config, interval: int = 5, *,
             key = stdscr.getch()
             if key in (ord('q'), ord('Q'), 27):
                 break
+            if show_help:
+                # Any key (not the refresh timeout) closes the overlay.
+                if key != -1:
+                    show_help = False
+                continue
+            if key in (ord('?'), ord('h'), ord('H')):
+                show_help = True
+                continue
             elif key == ord('r'):
                 events_scroll = 0
                 continue
@@ -1516,21 +2260,19 @@ def render_graph_text(
     """Render an ASCII / Braille graph for a metric to stdout-friendly lines.
 
     Always returns a non-empty list -- callers can print it directly.
-    Used by ``run_once --graph`` and re-used by the curses panel.
+    Used by ``run_once --graph``. The footer states the real y-axis scale
+    (bottom and top value, M11) plus now/min/max, like the live panel.
     """
     seconds = TIME_RANGE_SECONDS.get(time_range, 3600)
     series = query_metric_series(config, group, metric, seconds)
     info = METRIC_INFO.get(metric)
     if info is None:
         return [f"(unknown metric: {metric})"]
-    _, unit, y_min, y_max, _ = info
-    # Reconstruct the axis label users got pre-v5.1.0 ("0-100%" /
-    # "seconds" / "V") so existing --once output stays stable; the live
-    # TUI uses richer labels (see render_graph_panel).
-    if y_min is not None and y_max is not None:
-        y_axis_label = f"{int(y_min)}-{int(y_max)}{unit}"
+    _, unit, cfg_min, cfg_max, fmt = info
+    if cfg_min is not None and cfg_max is not None:
+        y_axis_label = f"{int(cfg_min)}-{int(cfg_max)}{unit}"
     else:
-        y_axis_label = unit or "value"
+        y_axis_label = f"{unit or 'seconds'}, auto-scaled"
     title = f"{metric} -- last {time_range}  ({y_axis_label})"
     if not series:
         return [
@@ -1538,6 +2280,13 @@ def render_graph_text(
             "(no data)",
         ]
     values = [v for _, v in series]
+    lo, hi = _robust_bounds(values)
+    y_min = cfg_min if cfg_min is not None else lo
+    y_max = cfg_max if cfg_max is not None else hi
+    if y_max <= y_min:  # single sample or flat line
+        pad = max(abs(y_min) * 0.05, 1.0)
+        y_min -= pad
+        y_max += pad
     rows = BrailleGraph.plot(
         values,
         width=width,
@@ -1546,18 +2295,39 @@ def render_graph_text(
         y_max=y_max,
         force_fallback=force_fallback,
     )
-    return [title] + rows + [f"y-axis: {y_axis_label}"]
+    footer = (f"y-axis: {fmt(y_min)}{unit} (bottom) to {fmt(y_max)}{unit} (top)"
+              f"  now: {fmt(values[-1])}{unit}  min: {fmt(min(values))}{unit}"
+              f"  max: {fmt(max(values))}{unit}")
+    return [title] + rows + [footer]
+
+
+def _once_text(lines: List[Line], indent: str = "  ") -> List[str]:
+    """View-model lines as plain text for ``--once`` (badge -> "-- BADGE")."""
+    out = []
+    for i, line in enumerate(lines):
+        text = line.text
+        if i == 0:
+            text = text.strip()
+            if line.badge:
+                text += f"  --  {line.badge[0]}"
+        elif text.startswith("   "):
+            text = indent + text[3:]
+        out.append(text.rstrip())
+    return out
 
 
 def run_once(config: Config, *, graph_metric: Optional[str] = None,
              time_range: str = "1h", events_only: bool = False,
              verbose: int = EVENTS_VERBOSITY_POWER,
-             length: int = EVENTS_MAX_ROWS_NORMAL):
+             length: int = EVENTS_MAX_ROWS_NORMAL,
+             width: int = 100):
     """Print a status snapshot to stdout and exit.
 
     With ``events_only=True`` the status / resource summary and graph
     block are skipped -- only the events list (from SQLite if available,
-    otherwise the log tail) is printed. Useful for scripts and CI.
+    otherwise the log tail) is printed, in the stable raw
+    ``YYYY-MM-DD HH:MM:SS  [UPS] EVENT_TYPE: detail`` form. Useful for
+    scripts and CI.
 
     ``time_range`` is **graph-only** -- it does not affect the events
     list. Events are sparse and a fixed window made the panel silently
@@ -1567,17 +2337,22 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
     1 adds Diagnostics, and 2 adds Lifecycle.
 
     ``length`` caps the events list (default :data:`EVENTS_MAX_ROWS_NORMAL`,
-    set to 0 for no cap). Tiered preservation: power events always
-    survive the cap; diagnostics fill next, lifecycle fills last.
+    set to 0 for no cap). Power events keep at least half of the cap;
+    each other enabled tier gets a share of the rest.
+
+    The status block uses the same view model as the live TUI, so both say
+    the same words (status label, "Updated 3s ago", next trigger, shutdown
+    progress, redundancy groups).
     """
     verbose = _events_verbosity(verbose)
     # length=0 means "no cap" -- pass None through to the query.
     events_cap = None if length == 0 else length
 
     if events_only:
+        # Scripts parse this: keep the stable raw EVENT_TYPE lines.
         events = query_events_for_display(
             config, max_events=events_cap,
-            verbosity=verbose,
+            verbosity=verbose, raw=True,
         )
         if not events and not events_db_available(config):
             events = parse_log_events(config.logging.file or "",
@@ -1589,45 +2364,30 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
             print(_no_events_message(verbose))
         return
 
+    now = time.time()
     print(f"Eneru v{__version__}")
     group_count = len(config.ups_groups)
     if group_count > 1:
         print(f"Mode: multi-UPS ({group_count} groups)")
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Time: {datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
-    for i, group in enumerate(config.ups_groups):
-        data = collect_group_data(group, config)
-        header = data["label"]
-        if data["name"] != data["label"]:
-            header += f"  ({data['name']})"
-        if data["is_local"]:
-            header += "  [is_local]"
-
-        state = data["state"]
-        if state:
-            header += f"  --  Status: {state.get('STATUS', '?')}"
-        else:
-            header += "  --  daemon not running"
-        print(header)
-
-        if state:
-            battery = state.get("BATTERY", "?")
-            runtime = format_runtime(state.get("RUNTIME", "?"))
-            load = state.get("LOAD", "?")
-            input_v = state.get("INPUT_VOLTAGE", "?")
-            output_v = state.get("OUTPUT_VOLTAGE", "?")
-            ts = state.get("TIMESTAMP", "?")
-            print(f"  Battery: {battery}% ({runtime})  Load: {load}%  "
-                  f"Input: {input_v}V  Output: {output_v}V")
-            print(f"  Last update: {ts}")
-        else:
-            print("  No data available (daemon not running or no state file)")
-        print(f"  Resources: {data['resources']}")
-        if data.get("remote_health_summary"):
-            print(f"  Remote health: {data['remote_health_summary']}")
+    groups_data = [collect_group_data(g, config, now) for g in config.ups_groups]
+    for i, data in enumerate(groups_data):
+        lines = ups_block_lines(data, now, width)
+        state = data.get("state") or {}
+        text = _once_text(lines)
+        if state.get("STATUS") and lines and lines[0].badge:
+            text[0] += f" ({state['STATUS']})"
+        for row in text:
+            print(row)
         if i < group_count - 1:
             print()
+
+    for rg in collect_redundancy_data(config, groups_data, now):
+        print()
+        for row in _once_text(redundancy_block_lines(rg, now, width)):
+            print(row)
 
     # Snapshot path: same flag semantics as the events-only branch above.
     # --verbose increments enabled tiers; --length caps the row count.

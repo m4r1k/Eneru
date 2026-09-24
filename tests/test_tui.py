@@ -23,7 +23,7 @@ from eneru.tui import (
     render_config_panel,
     render_logs_panel,
     run_once,
-    C_STATUS_OK, C_STATUS_OB, C_STATUS_CRIT, C_STATUS_UNK,
+    C_STATUS_OK, C_STATUS_CRIT, C_STATUS_WARN,
 )
 
 
@@ -231,7 +231,7 @@ class TestGhosttyTerminfoFallback:
 class TestRunTuiLoop:
     """Exercise the curses event loop without requiring a real terminal."""
 
-    def _group_data(self, group, _config):
+    def _group_data(self, group, _config, _now=None):
         return {
             "label": group.ups.label,
             "name": group.ups.name,
@@ -463,9 +463,10 @@ class TestRenderConfigPanel:
             render_config_panel(win, 0, 8, 80, groups_data)
 
         assert "Rack UPS" in self._row_text(win, 1)
-        assert "daemon not running" in self._row_text(win, 1)
-        assert "No data available" in self._row_text(win, 2)
-        assert "Resources: remote servers" in self._row_text(win, 4)
+        # M8: no "daemon not running" claim; say where it looked instead.
+        assert "NO DATA" in self._row_text(win, 1)
+        assert "No state file at" in self._row_text(win, 2)
+        assert "docker exec" in self._row_text(win, 5)
 
     @pytest.mark.unit
     def test_render_config_panel_includes_local_marker_and_remote_health(self):
@@ -485,15 +486,19 @@ class TestRenderConfigPanel:
             },
             "resources": "VMs, containers",
             "remote_health_summary": "1 failed",
+            "epoch": time.time() - 3,
         }]
 
         with patch.object(curses, "color_pair", lambda n: n):
             render_config_panel(win, 0, 9, 100, groups_data)
 
-        assert "[is_local]" in self._row_text(win, 1)
-        assert "ONLINE" in self._row_text(win, 1)
+        # M4: role words instead of the old "[is_local]" jargon.
+        assert "Powers this host" in self._row_text(win, 1)
+        assert "ON MAINS" in self._row_text(win, 1)
         assert "Battery: 98% (1h 0m)" in self._row_text(win, 2)
-        assert "Last update: 2026-05-15 12:00:00" in self._row_text(win, 3)
+        # H5: relative age from EPOCH, never the naive TIMESTAMP string.
+        assert "Updated 3s ago" in self._row_text(win, 3)
+        assert "2026-05-15 12:00:00" not in self._row_text(win, 3)
         assert "Remote health: 1 failed" in self._row_text(win, 5)
 
 
@@ -746,68 +751,74 @@ class TestParseLogEvents:
 
 
 class TestHumanStatusPureLogic:
-    """Tests for NUT status to human-readable conversion."""
+    """NUT status -> the shared short label (utils.status_summary, M1)."""
 
     @pytest.mark.unit
     def test_ol_chrg(self):
-        assert human_status("OL CHRG") == "ONLINE - CHARGING"
+        assert human_status("OL CHRG") == "On mains"
 
     @pytest.mark.unit
     def test_ol_discharging_is_not_mislabeled_charging(self):
         """F-085: CHRG is not a substring match inside DISCHRG."""
-        assert human_status("OL DISCHRG") == "ONLINE"
+        assert human_status("OL DISCHRG") == "On mains"
 
     @pytest.mark.unit
     def test_ol(self):
-        assert human_status("OL") == "ONLINE"
+        assert human_status("OL") == "On mains"
 
     @pytest.mark.unit
     def test_ob(self):
-        assert human_status("OB") == "ON BATTERY"
+        assert human_status("OB") == "On battery"
 
     @pytest.mark.unit
     def test_ob_dischrg(self):
-        assert human_status("OB DISCHRG") == "ON BATTERY - DISCHARGING"
+        assert human_status("OB DISCHRG") == "On battery"
 
     @pytest.mark.unit
     def test_ob_lb(self):
-        assert human_status("OB LB") == "ON BATTERY - LOW"
+        assert human_status("OB LB") == "Low battery"
 
     @pytest.mark.unit
     def test_fsd(self):
-        assert human_status("FSD") == "FORCED SHUTDOWN"
+        assert human_status("FSD") == "Shutting down"
 
     @pytest.mark.unit
     def test_empty(self):
-        assert human_status("") == "UNKNOWN"
+        assert human_status("") == "Waiting for data"
 
     @pytest.mark.unit
-    def test_unknown_passthrough(self):
-        assert human_status("SOMETHING ELSE") == "SOMETHING ELSE"
+    def test_unknown_token(self):
+        assert human_status("SOMETHING ELSE") == "Status unknown"
+
+    @pytest.mark.unit
+    def test_context_passes_through(self):
+        assert human_status("OB", trigger_active=True) == "Shutdown triggered"
+        assert human_status("OL", stale=True) == "Stale data"
 
 
 class TestStatusColorPureLogic:
-    """Tests for status color pair selection."""
+    """One 3-level colour scale: ok green, warn amber, crit red (M1)."""
 
     @pytest.mark.unit
     def test_ol_chrg_is_ok(self):
         assert status_color("OL CHRG") == C_STATUS_OK
 
     @pytest.mark.unit
-    def test_ob_is_ob(self):
-        assert status_color("OB") == C_STATUS_OB
+    def test_ob_is_warn(self):
+        assert status_color("OB") == C_STATUS_WARN
 
     @pytest.mark.unit
-    def test_ob_dischrg_is_critical(self):
-        assert status_color("OB DISCHRG") == C_STATUS_CRIT
+    def test_ob_dischrg_is_warn_not_critical(self):
+        """Every outage reports DISCHRG; it must not look like 'about to die'."""
+        assert status_color("OB DISCHRG") == C_STATUS_WARN
 
     @pytest.mark.unit
     def test_fsd_is_critical(self):
         assert status_color("FSD") == C_STATUS_CRIT
 
     @pytest.mark.unit
-    def test_empty_is_unknown(self):
-        assert status_color("") == C_STATUS_UNK
+    def test_empty_is_warn(self):
+        assert status_color("") == C_STATUS_WARN
 
 
 class TestRunOnce:
@@ -835,13 +846,14 @@ class TestRunOnce:
 
         assert "Eneru v" in output
         assert "TestUPS@localhost" in output
-        assert "is_local" in output
-        assert "OL CHRG" in output
+        assert "Powers this host" in output  # M4: role words, not [is_local]
+        assert "(OL CHRG)" in output          # raw tokens kept for grep
         assert "100%" in output
 
     @pytest.mark.unit
     def test_once_daemon_not_running(self, tmp_path, capsys):
-        """--once shows 'daemon not running' when no state file."""
+        """--once explains a missing state file instead of claiming the
+        daemon is down (M8: it may just run in a container)."""
         config = Config(
             ups_groups=[UPSGroupConfig(
                 ups=UPSConfig(name="TestUPS@localhost"),
@@ -852,7 +864,9 @@ class TestRunOnce:
 
         run_once(config)
         output = capsys.readouterr().out
-        assert "daemon not running" in output
+        assert "NO DATA" in output
+        assert f"No state file at {tmp_path / 'nonexistent'}" in output
+        assert "docker exec <container> eneru monitor" in output
 
     @pytest.mark.unit
     def test_once_multi_ups(self, tmp_path, capsys):
@@ -1395,7 +1409,7 @@ class TestQueryEventsForDisplay:
     def test_no_db_returns_empty(self, tmp_path):
         from eneru.tui import query_events_for_display
         config = _events_config(tmp_path)
-        assert query_events_for_display(config) == []
+        assert query_events_for_display(config, raw=True) == []
 
     @pytest.mark.unit
     def test_uses_bounded_recent_query(self, tmp_path, monkeypatch):
@@ -1422,7 +1436,7 @@ class TestQueryEventsForDisplay:
         monkeypatch.setattr(StatsStore, "query_recent_events", spy_recent)
         monkeypatch.setattr(StatsStore, "query_events", boom)
 
-        lines = query_events_for_display(config)
+        lines = query_events_for_display(config, raw=True)
         assert lines and "ON_BATTERY: x" in lines[0]
         assert recent_calls, "query_recent_events was not called"
         assert recent_calls[0]["limit"] == EVENTS_QUERY_LIMIT
@@ -1457,7 +1471,7 @@ class TestQueryEventsForDisplay:
         monkeypatch.setattr(StatsStore, "query_events", spy_full)
         monkeypatch.setattr(StatsStore, "query_recent_events", boom)
 
-        lines = query_events_for_display(config, max_events=no_cap)
+        lines = query_events_for_display(config, raw=True, max_events=no_cap)
         assert lines and "ON_BATTERY: x" in lines[0]
         assert full_calls and full_calls[0][0] == 0
 
@@ -1481,7 +1495,7 @@ class TestQueryEventsForDisplay:
             return real_recent(self, **kwargs)
 
         monkeypatch.setattr(StatsStore, "query_recent_events", spy_recent)
-        query_events_for_display(config, max_events=EVENTS_QUERY_LIMIT + 500)
+        query_events_for_display(config, raw=True, max_events=EVENTS_QUERY_LIMIT + 500)
         assert recent_calls
         assert recent_calls[0]["limit"] == EVENTS_QUERY_LIMIT + 500
 
@@ -1495,7 +1509,7 @@ class TestQueryEventsForDisplay:
             (now - 60, "ON_BATTERY", "Battery: 85%"),
             (now - 30, "POWER_RESTORED", "Outage 30s"),
         ])
-        lines = query_events_for_display(config)
+        lines = query_events_for_display(config, raw=True)
         assert len(lines) == 2
         # Single-UPS configs do not prefix with [LABEL].
         assert "[" not in lines[0]
@@ -1513,7 +1527,7 @@ class TestQueryEventsForDisplay:
                      [(now - 60, "ON_BATTERY", "ups1")])
         _seed_events(config, config.ups_groups[1],
                      [(now - 30, "ON_BATTERY", "ups2")])
-        lines = query_events_for_display(config)
+        lines = query_events_for_display(config, raw=True)
         assert len(lines) == 2
         # Sorted by ts ascending, prefixed with [label].
         assert "[UPS1@host1] ON_BATTERY: ups1" in lines[0]
@@ -1532,7 +1546,7 @@ class TestQueryEventsForDisplay:
                      [(now - 100, "A", ""), (now - 20, "C", "")])
         _seed_events(config, config.ups_groups[1],
                      [(now - 60, "B", "")])
-        lines = query_events_for_display(config, verbosity=1)
+        lines = query_events_for_display(config, raw=True, verbosity=1)
         # Order: A (UPS1), B (UPS2), C (UPS1)
         assert "[UPS1@h] A" in lines[0]
         assert "[UPS2@h] B" in lines[1]
@@ -1549,7 +1563,7 @@ class TestQueryEventsForDisplay:
         ])
         # verbosity=1 — testing the row cap, not the type filter.
         lines = query_events_for_display(
-            config, max_events=3, verbosity=1,
+            config, raw=True, max_events=3, verbosity=1,
         )
         # Most recent 3 events.
         assert len(lines) == 3
@@ -1569,7 +1583,7 @@ class TestQueryEventsForDisplay:
         )
         _seed_events(config, config.ups_groups[0],
                      [(ts, "ON_BATTERY", "Battery: 90%")])
-        lines = query_events_for_display(config)
+        lines = query_events_for_display(config, raw=True)
         assert len(lines) == 1
         assert lines[0].startswith(expected_prefix), (
             f"expected line to start with {expected_prefix!r}, got {lines[0]!r}"
@@ -1603,7 +1617,7 @@ class TestQueryEventsForDisplay:
         events.append((now - 50, "DAEMON_START", "v1"))
         events.append((now - 5, "POWER_RESTORED", "Outage 12s"))
         _seed_events(config, config.ups_groups[0], events)
-        lines = query_events_for_display(config, max_events=8)
+        lines = query_events_for_display(config, raw=True, max_events=8)
         assert all("DAEMON_START" not in line for line in lines)
         assert any("POWER_RESTORED" in line for line in lines)
         assert all("VOLTAGE_FLAP_SUPPRESSED" not in line for line in lines)
@@ -1621,7 +1635,7 @@ class TestQueryEventsForDisplay:
             (now - 10, "BYPASS_MODE_INACTIVE", "resolved"),
         ])
 
-        lines = query_events_for_display(config)
+        lines = query_events_for_display(config, raw=True)
         assert any("BYPASS_MODE_ACTIVE" in line for line in lines)
         assert any("OVERLOAD_ACTIVE" in line for line in lines)
         assert all("BYPASS_MODE_INACTIVE" not in line for line in lines)
@@ -1637,7 +1651,7 @@ class TestQueryEventsForDisplay:
             (now - 100, "VOLTAGE_FLAP_SUPPRESSED", "flap"),
             (now - 50, "DAEMON_START", "v1"),
         ])
-        lines = query_events_for_display(config, verbosity=1)
+        lines = query_events_for_display(config, raw=True, verbosity=1)
         assert len(lines) == 1
         assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
         assert all("DAEMON_START" not in line for line in lines)
@@ -1654,8 +1668,8 @@ class TestQueryEventsForDisplay:
             (now - 10, "REMOTE_SSH_SLOW_RESPONSE", "ssh"),
         ])
 
-        default_lines = query_events_for_display(config)
-        verbose_lines = query_events_for_display(config, verbosity=1)
+        default_lines = query_events_for_display(config, raw=True)
+        verbose_lines = query_events_for_display(config, raw=True, verbosity=1)
 
         assert all("SLOW_NUT_RESPONSE" not in line for line in default_lines)
         assert all("REMOTE_SSH_SLOW_RESPONSE" not in line for line in default_lines)
@@ -1674,7 +1688,7 @@ class TestQueryEventsForDisplay:
             (now - 50, "DAEMON_START", "v1"),
             (now - 25, "ON_BATTERY", "outage"),
         ])
-        lines = query_events_for_display(config, verbosity=2)
+        lines = query_events_for_display(config, raw=True, verbosity=2)
         assert len(lines) == 3
         assert any("ON_BATTERY" in line for line in lines)
         assert any("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines)
@@ -1696,10 +1710,10 @@ class TestQueryEventsForDisplay:
             for i in range(600)
         ])
         # Default cap (EVENTS_MAX_ROWS_NORMAL=30) drops the oldest 570.
-        capped = query_events_for_display(config)
+        capped = query_events_for_display(config, raw=True)
         assert len(capped) == 30
         # max_events=None must surface every row.
-        full = query_events_for_display(config, max_events=None)
+        full = query_events_for_display(config, raw=True, max_events=None)
         assert len(full) == 600, (
             f"max_events=None must disable the cap; got {len(full)} rows"
         )
@@ -1729,7 +1743,7 @@ class TestQueryEventsForDisplay:
         events.append((now - 86400 * 7, "EMERGENCY_SHUTDOWN_INITIATED", "low batt"))
         _seed_events(config, config.ups_groups[0], events)
 
-        lines = query_events_for_display(config, max_events=20, verbosity=2)
+        lines = query_events_for_display(config, raw=True, max_events=20, verbosity=2)
         # All 3 power-event rows MUST survive the cap.
         assert any("ON_BATTERY: real outage" in line for line in lines), (
             f"ON_BATTERY pushed off by daemon noise -- tiered trim regressed. "
@@ -1760,7 +1774,7 @@ class TestQueryEventsForDisplay:
         ]
         _seed_events(config, config.ups_groups[0], events)
 
-        lines = query_events_for_display(config, max_events=10)
+        lines = query_events_for_display(config, raw=True, max_events=10)
         # 10 most-recent ON_BATTERY rows; daemon entirely evicted.
         assert len(lines) == 10
         assert all("ON_BATTERY" in line for line in lines)
@@ -1775,8 +1789,8 @@ class TestQueryEventsForDisplay:
         config = _events_config(tmp_path)
         now = int(_time.time())
         # 1 power event + 30 diagnostic rows + 4 lifecycle rows.
-        # Cap = 7. Result must be: 1 power + 6 diagnostics, with lifecycle
-        # evicted because it is the noisiest tier.
+        # Cap = 7 (6.2, M5 / status.select_event_rows): power keeps its row,
+        # the other 6 seats split evenly so lifecycle is still visible.
         events = [(now - 5000, "ON_BATTERY", "outage")]
         for i in range(30):
             events.append(
@@ -1789,17 +1803,17 @@ class TestQueryEventsForDisplay:
         _seed_events(config, config.ups_groups[0], events)
 
         lines = query_events_for_display(
-            config, max_events=7, verbosity=2,
+            config, raw=True, max_events=7, verbosity=2,
         )
         assert len(lines) == 7
         assert sum("ON_BATTERY" in line for line in lines) == 1, (
             f"power event must survive: {lines}"
         )
-        assert sum("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines) == 6, (
-            f"diagnostics must fill before lifecycle; got: {lines}"
+        assert sum("VOLTAGE_FLAP_SUPPRESSED" in line for line in lines) == 3, (
+            f"diagnostics get an equal share of the rest; got: {lines}"
         )
-        assert sum("DAEMON_RESTARTED" in line for line in lines) == 0, (
-            f"lifecycle should be evicted before diagnostics; got: {lines}"
+        assert sum("DAEMON_RESTARTED" in line for line in lines) == 3, (
+            f"lifecycle keeps a share too (M5: -vv must show it); got: {lines}"
         )
 
     @pytest.mark.unit
@@ -1815,7 +1829,7 @@ class TestQueryEventsForDisplay:
             (now - 10, "ON_BATTERY", "outage"),
         ])
 
-        lines = query_events_for_display(config, verbosity=2, grouped=True)
+        lines = query_events_for_display(config, raw=True, verbosity=2, grouped=True)
         assert lines[0] == "Power Events"
         assert any("ON_BATTERY" in line for line in lines[1:])
         assert lines.index("Diagnostics") < lines.index("Lifecycle")
@@ -1837,7 +1851,7 @@ class TestQueryEventsForDisplay:
         _seed_events(config, config.ups_groups[0], events)
 
         lines = query_events_for_display(
-            config, max_events=5, verbosity=1, grouped=True,
+            config, raw=True, max_events=5, verbosity=1, grouped=True,
         )
         assert len(lines) <= 5
         assert lines[0] == "Power Events"
@@ -1859,8 +1873,8 @@ class TestQueryEventsForDisplay:
             (now - 10, "DAEMON_START", "start"),
         ])
 
-        default = query_events_for_display(config)
-        verbose = query_events_for_display(config, verbosity=1)
+        default = query_events_for_display(config, raw=True)
+        verbose = query_events_for_display(config, raw=True, verbosity=1)
         assert default == []
         assert any("DAEMON_RESTARTED_AFTER_FATAL" in line for line in verbose)
         assert any("DAEMON_AFTER_CRASH" in line for line in verbose)
@@ -1884,7 +1898,7 @@ class TestQueryEventsForDisplay:
         ])
 
         out = query_events_for_display(
-            config, max_events=1, verbosity=2, grouped=True,
+            config, raw=True, max_events=1, verbosity=2, grouped=True,
         )
         assert len(out) == 1
         assert "ON_BATTERY" in out[0]
@@ -1905,7 +1919,7 @@ class TestQueryEventsForDisplay:
         ])
 
         out = query_events_for_display(
-            config, max_events=1, verbosity=2, grouped=False,
+            config, raw=True, max_events=1, verbosity=2, grouped=False,
         )
         assert len(out) == 1
         assert "ON_BATTERY" in out[0]
@@ -1927,7 +1941,7 @@ class TestQueryEventsForDisplay:
         ])
 
         out = query_events_for_display(
-            config, max_events=1, verbosity=2, grouped=True,
+            config, raw=True, max_events=1, verbosity=2, grouped=True,
         )
         assert len(out) == 1
         assert "VOLTAGE_FLAP_SUPPRESSED" in out[0]
@@ -2071,7 +2085,8 @@ class TestSanitizeEventDetail:
         )
         assert "\n" not in line
         assert "**" not in line
-        assert "DAEMON_UPGRADED:" in line
+        assert "Daemon upgraded:" in line      # M6: label, not raw type
+        assert "📦" not in line                # notification markup dropped
         assert "Service is back online" in line
 
 
@@ -2177,20 +2192,20 @@ class TestRunOnceEventsOnly:
         # Default snapshot path: diagnostics and lifecycle hidden.
         run_once(config, events_only=False)
         out_default = capsys.readouterr().out
-        assert "DAEMON_START" not in out_default
-        assert "VOLTAGE_FLAP_SUPPRESSED" not in out_default
+        assert "Daemon start" not in out_default
+        assert "Voltage flap suppressed" not in out_default
         # -v: diagnostics surface, lifecycle remains hidden.
         run_once(config, events_only=False, verbose=1)
         out_verbose = capsys.readouterr().out
-        assert "DAEMON_START" not in out_verbose
-        assert "VOLTAGE_FLAP_SUPPRESSED" in out_verbose, (
+        assert "Daemon start" not in out_verbose
+        assert "Voltage flap suppressed" in out_verbose, (
             "snapshot path must honour -v; the events tail in the snapshot "
             "block must include diagnostics"
         )
         # -vv: lifecycle joins the flat, timestamp-sorted tail.
         run_once(config, events_only=False, verbose=2)
         out_all = capsys.readouterr().out
-        assert "DAEMON_START" in out_all
+        assert "Daemon start" in out_all
 
     @pytest.mark.unit
     def test_snapshot_path_no_time_window_for_events(self, tmp_path, capsys):
@@ -2229,7 +2244,7 @@ class TestRunOnceEventsOnly:
 
         run_once(config, events_only=False, verbose=2, length=15)
         out = capsys.readouterr().out
-        lines = [line for line in out.splitlines() if "DAEMON_START" in line]
+        lines = [line for line in out.splitlines() if "Daemon start" in line]
         assert len(lines) == 15
         assert "row-5" in lines[0]
         assert "row-19" in lines[-1]
@@ -2373,90 +2388,57 @@ class _CursesStub:
 
 
 class TestHumanStatus:
-    """Translate NUT status flags into operator-friendly strings."""
+    """``human_status`` mirrors ``utils.status_summary`` labels."""
 
     @pytest.mark.unit
     def test_fsd_takes_precedence(self):
-        assert human_status("FSD OL CHRG") == "FORCED SHUTDOWN"
+        assert human_status("FSD OL CHRG") == "Shutting down"
 
     @pytest.mark.unit
-    def test_on_battery_low_takes_precedence_over_on_battery(self):
-        assert human_status("OB LB") == "ON BATTERY - LOW"
+    def test_low_battery_takes_precedence_over_on_battery(self):
+        assert human_status("OB LB") == "Low battery"
 
     @pytest.mark.unit
-    def test_on_battery_discharging(self):
-        assert human_status("OB DISCHRG") == "ON BATTERY - DISCHARGING"
+    def test_on_battery(self):
+        assert human_status("OB DISCHRG") == "On battery"
+        assert human_status("OB") == "On battery"
 
     @pytest.mark.unit
-    def test_on_battery_alone(self):
-        assert human_status("OB") == "ON BATTERY"
+    def test_online(self):
+        assert human_status("OL CHRG") == "On mains"
+        assert human_status("OL") == "On mains"
 
     @pytest.mark.unit
-    def test_online_charging(self):
-        assert human_status("OL CHRG") == "ONLINE - CHARGING"
-
-    @pytest.mark.unit
-    def test_online_alone(self):
-        assert human_status("OL") == "ONLINE"
-
-    @pytest.mark.unit
-    def test_charging_without_online_marker(self):
-        # Defensive: most NUT setups always include OL or OB; this is the
-        # fallback when only CHRG is present.
-        assert human_status("CHRG") == "CHARGING"
-
-    @pytest.mark.unit
-    def test_empty_status_is_unknown(self):
-        assert human_status("") == "UNKNOWN"
-        assert human_status("   ") == "UNKNOWN"
-
-    @pytest.mark.unit
-    def test_unrecognised_status_passes_through_uppercased(self):
-        # No rule matched — return the raw upper-cased status so
-        # operators can still see what the UPS reported.
-        assert human_status("WTF") == "WTF"
+    def test_empty_status_is_waiting(self):
+        assert human_status("") == "Waiting for data"
+        assert human_status("   ") == "Waiting for data"
 
 
 class TestStatusColor:
-    """Map status flags to color-pair IDs for the badge."""
+    """``status_color`` maps the shared severity to a colour pair."""
 
     @pytest.mark.unit
-    def test_fsd_is_critical(self):
+    def test_levels(self):
         assert status_color("FSD") == C_STATUS_CRIT
-
-    @pytest.mark.unit
-    def test_low_battery_is_critical(self):
         assert status_color("OB LB") == C_STATUS_CRIT
-
-    @pytest.mark.unit
-    def test_on_battery_discharging_is_critical(self):
-        assert status_color("OB DISCHRG") == C_STATUS_CRIT
-
-    @pytest.mark.unit
-    def test_on_battery_alone_is_warning(self):
-        assert status_color("OB") == C_STATUS_OB
-
-    @pytest.mark.unit
-    def test_online_is_ok(self):
+        assert status_color("OB DISCHRG") == C_STATUS_WARN
+        assert status_color("OB") == C_STATUS_WARN
         assert status_color("OL") == C_STATUS_OK
+        assert status_color("OL RB") == C_STATUS_WARN
+        assert status_color("?") == C_STATUS_WARN
 
     @pytest.mark.unit
-    def test_charging_alone_is_ok(self):
-        assert status_color("CHRG") == C_STATUS_OK
-
-    @pytest.mark.unit
-    def test_unknown_status_is_unknown_color(self):
-        assert status_color("?") == C_STATUS_UNK
+    def test_unknown_severity_falls_back_to_warn(self):
+        from eneru.tui import severity_color
+        assert severity_color("nonsense") == C_STATUS_WARN
 
 
 class TestStatusAttr:
-    """`status_attr` adds A_BOLD always, and A_BLINK only for warning/critical
-    states (OB, FSD, LB) — the operator's signal that the UPS needs
-    attention even at a glance.
+    """`status_attr` is always bold; it blinks ONLY for "shutdown triggered"
+    and "shutting down" (M1). On battery or low battery must not flash like
+    an imminent shutdown.
 
-    `curses.color_pair()` requires initscr() and crashes outside a real
-    curses session, so patch it to a no-op (the BLINK logic, not the
-    color_pair lookup, is what's under test)."""
+    `curses.color_pair()` requires initscr(), so it is patched out."""
 
     @pytest.mark.unit
     def test_online_status_is_bold_only(self):
@@ -2466,11 +2448,11 @@ class TestStatusAttr:
         assert not (attr & curses.A_BLINK)
 
     @pytest.mark.unit
-    def test_on_battery_status_blinks(self):
+    def test_on_battery_does_not_blink(self):
         with patch("eneru.tui.curses.color_pair", return_value=0):
             attr = status_attr("OB DISCHRG")
         assert attr & curses.A_BOLD
-        assert attr & curses.A_BLINK
+        assert not (attr & curses.A_BLINK)
 
     @pytest.mark.unit
     def test_fsd_status_blinks(self):
@@ -2479,10 +2461,16 @@ class TestStatusAttr:
         assert attr & curses.A_BLINK
 
     @pytest.mark.unit
-    def test_low_battery_status_blinks(self):
+    def test_trigger_active_blinks(self):
+        with patch("eneru.tui.curses.color_pair", return_value=0):
+            attr = status_attr("OB", trigger_active=True)
+        assert attr & curses.A_BLINK
+
+    @pytest.mark.unit
+    def test_low_battery_does_not_blink(self):
         with patch("eneru.tui.curses.color_pair", return_value=0):
             attr = status_attr("OL LB")
-        assert attr & curses.A_BLINK
+        assert not (attr & curses.A_BLINK)
 
 
 class TestFormatRuntime:
@@ -2843,7 +2831,7 @@ class TestRenderLogsPanelGroupedBreak:
             (now - 30, "DAEMON_START", "boot"),
         ])
         out = query_events_for_display(
-            config, max_events=3, verbosity=2, grouped=True,
+            config, raw=True, max_events=3, verbosity=2, grouped=True,
         )
         # Header + power row only; Lifecycle section never appears.
         assert "Power Events" in out
@@ -3230,7 +3218,8 @@ class TestRenderGraphPanelEdges:
 class TestRunTuiLogFallbackAndMove:
     """Coverage for the log-fallback events path and the move() guard."""
 
-    def _group_data(self, group: UPSGroupConfig, _config: Config) -> dict:
+    def _group_data(self, group: UPSGroupConfig, _config: Config,
+                    _now=None) -> dict:
         return {
             "label": group.ups.label,
             "name": group.ups.name,
@@ -3385,8 +3374,8 @@ class TestRenderGraphTextUnboundedAxis:
         lines = render_graph_text(
             config, config.ups_groups[0], "voltage", "1h",
         )
-        # Header contains the bare unit when y_min/y_max are unbounded.
-        assert "(V)" in lines[0]
+        # Header names the unit and says the axis is auto-scaled.
+        assert "(V, auto-scaled)" in lines[0]
 
 
 class TestRunOnceDisplayName:

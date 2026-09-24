@@ -80,6 +80,31 @@ the dashboard, and self-tests that no longer look like outages.
   can take. The state file gains `EPOCH`, and shutdown progress is mirrored next
   to it so `eneru monitor` can show both. ON_BATTERY events and notifications
   show runtime as `24m 50s`.
+- **`eneru monitor` says what happens next, and how old the data is.**
+  - While on battery each UPS shows time on battery, the trigger that fires
+    next and when, one chip per trigger (`runtime < 5m: 6m 20s (~1m 21s)`),
+    and what firing does for that UPS. A running shutdown shows its phase
+    (`phase 3/7 Sync`), finished phases and remote servers.
+  - Redundancy groups get their own block: healthy members against the
+    quorum, each member's state, and what happens if one more fails.
+  - `Updated 3s ago` comes from the poll's epoch time, so a container on UTC
+    no longer looks two hours stale. When the daemon stops writing, the badge
+    turns `STALE` and the countdowns pause. A missing state file names the
+    path it tried and how to point the TUI at a container's bind mount,
+    instead of claiming the daemon is down.
+  - Badges use the dashboard's words (`ON MAINS`, `ON BATTERY`,
+    `SHUTTING DOWN`) and its green/amber/red scale. Only a triggered or
+    running shutdown blinks, and a monitoring-only UPS never shows one.
+    `[is_local]` becomes `Powers this host` / `Monitoring only`.
+  - Event lines show how long ago they happened, readable names instead of
+    `CONNECTION_LOST`, no notification emoji, and `24m 50s` instead of
+    `1490 seconds` in old rows. `-v`/`-vv` now always show some diagnostics
+    and lifecycle rows, even with a long outage history.
+  - `?` lists every key; at 80 columns the hints wrap onto two rows instead
+    of dropping `G`/`T`/`U`/`V`. The status panel is sized to its content.
+  - `--once` prints the same lines, leaves out readings the UPS doesn't
+    report (no more `Output: V`), and graphs state their y-axis scale.
+    `--events-only` keeps its raw `EVENT_TYPE:` format for scripts.
 - **Redundancy groups are dashboard scopes.** The View selector focuses
   telemetry, events, remotes and shutdown details on a group.
 - **Per-step `use_sudo`** on `pre_shutdown_commands` overrides the server's
