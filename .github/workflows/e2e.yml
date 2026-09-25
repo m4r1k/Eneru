@@ -124,6 +124,14 @@ jobs:
               echo "::error::tests/e2e/groups/${name}.sh must end with its completion line"
               missing=1
             }
+            # A group that calls a lib.sh helper must source lib.sh, or the
+            # call dies with "command not found" mid-run.
+            helpers="$(grep -oE '^[a-z_]+\(\) \{' tests/e2e/groups/lib.sh | sed 's/() {//' | paste -sd'|')"
+            if grep -Eq "(^|[^a-z_])(${helpers})([^a-z_]|$)" "$script" \
+                && ! grep -q '^\. "\$E2E_DIR/groups/lib.sh"' "$script"; then
+              echo "::error::tests/e2e/groups/${name}.sh calls a lib.sh helper without sourcing lib.sh"
+              missing=1
+            fi
           done
           exit "$missing"
 

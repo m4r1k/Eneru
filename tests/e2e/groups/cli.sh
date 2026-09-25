@@ -18,6 +18,9 @@ set -euo pipefail
 E2E_DIR="$(cd "$E2E_DIR" && pwd)"
 export E2E_DIR
 
+# Shared E2E helpers (assert_dry_run_confirm_shown, apply_scenario, ...).
+. "$E2E_DIR/groups/lib.sh"
+
 # ======================================================================
 # Test 1: Validate E2E config
 # ======================================================================
