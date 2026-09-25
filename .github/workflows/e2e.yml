@@ -181,6 +181,11 @@ jobs:
           grep -q "PASS (43a): nextTrigger names the trigger the daemon fired" tests/e2e/groups/single-ups-core.sh
           grep -q 'assert fired\[0\] == "Battery charge 14% below threshold 20%"' tests/e2e/groups/single-ups-core.sh
           grep -q 'assert role\["kind"\] == "local", role' tests/e2e/groups/single-ups-core.sh
+          # 6.2: a one-entry ups list honours an explicit is_local: false.
+          grep -q "Test 71: One-entry ups list honours explicit is_local: false" tests/e2e/groups/single-ups-core.sh
+          grep -qF 'write_is_local_config /tmp/config-e2e-islocal-false.yaml "is_local: false"' tests/e2e/groups/single-ups-core.sh
+          grep -qF 'if grep -qF "Would execute: shutdown -h now" /tmp/test71a.log; then' tests/e2e/groups/single-ups-core.sh
+          grep -qF 'WARNING: ups[0] has no is_local; as the only UPS it powers off this host on a shutdown trigger.' tests/e2e/groups/single-ups-core.sh
 
       - name: Verify v5.5 loopback E2E coverage is wired
         if: matrix.group == 'loopback'

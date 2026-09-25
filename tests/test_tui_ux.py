@@ -419,6 +419,35 @@ class TestOutlookLines:
         assert "   Trigger: Runtime low" in text
 
     @pytest.mark.unit
+    def test_failsafe_arming_renders_amber_with_its_text(self):
+        """F-180: the FAILSAFE failed-poll countdown (``arming``) gets its own
+        chip and headline, in amber (warn), never red and never "ok"."""
+        arming = _trigger("failsafe", "arming", label="Connection lost on battery",
+                          etaSeconds=10,
+                          text="1 of 3 NUT polls failed · fires at 3")
+        assert tui.trigger_chip(arming) == \
+            "NUT lost: 1 of 3 NUT polls failed · fires at 3 (~10s)"
+        assert tui.trigger_chip(dict(arming, etaSeconds=None)) == \
+            "NUT lost: 1 of 3 NUT polls failed · fires at 3"
+        assert tui.trigger_chip(dict(arming, text="")) == \
+            "NUT lost: polls failing (~10s)"
+        # A failsafe row that is merely ``ok`` stays chip-less.
+        assert tui.trigger_chip(_trigger("failsafe", "ok")) is None
+        trig = {"onBattery": True, "timeOnBattery": 60, "triggers": [arming],
+                "firing": [], "next": arming, "action": {"label": "Shuts down this host"}}
+        assert tui.outlook_headline(trig) == (
+            "Connection lost on battery: 1 of 3 NUT polls failed · fires at 3, "
+            "in ~10s")
+        assert tui.outlook_headline({"next": dict(arming, text="",
+                                                  etaSeconds=None)}) == \
+            "Connection lost on battery: NUT polls failing, in ~0s"
+        lines = tui.outlook_lines({"triggerOutlook": trig},
+                                  {"STATUS": "OB", "TIME_ON_BATTERY": "60"}, 120)
+        assert lines[0].text.endswith("fires at 3, in ~10s")
+        assert lines[0].style == "warn"
+        assert any("NUT lost: 1 of 3" in line.text for line in lines)
+
+    @pytest.mark.unit
     def test_legacy_state_without_time_on_battery(self):
         ol = {"triggerOutlook": {"onBattery": True, "triggers": [], "next": None,
                                  "action": {"label": "X"}}}

@@ -558,7 +558,8 @@ function upcomingTriggers(u) {
   const rank = (t) => (t.state === "fired" ? -1
     : (typeof t.etaSeconds === "number" ? t.etaSeconds : Infinity));
   return o.triggers
-    .filter((t) => t && t.enabled !== false && ["fired", "held", "ok"].includes(t.state))
+    .filter((t) => t && t.enabled !== false
+      && ["fired", "held", "arming", "ok"].includes(t.state))
     .sort((a, b) => rank(a) - rank(b));
 }
 
@@ -583,6 +584,10 @@ function outlookLine(u) {
   if (first.state === "fired") head = verb + " now: " + first.condition;
   else if (first.state === "held") {
     head = verb + " after stabilization, " + triggerEta(first) + " (" + first.condition + ")";
+  } else if (first.state === "arming") {
+    // FAILSAFE countdown (failed NUT polls on battery): say how far along it is.
+    head = verb + " " + triggerEta(first) + " unless NUT answers ("
+      + (first.text || first.condition) + ")";
   } else if (typeof first.etaSeconds === "number") {
     head = verb + " " + triggerEta(first) + " (" + first.condition + ")";
   } else head = verb + " when " + first.condition;
@@ -1722,7 +1727,8 @@ function renderDetail(name) {
     if (outlook.summary) tRows.push(detailRow("Now", outlook.summary));
     outlook.triggers.filter((t) => t && t.enabled !== false).forEach((t) => {
       const eta = triggerEta(t);
-      const cls = t.state === "fired" ? "crit" : t.state === "held" ? "warn" : "";
+      const cls = t.state === "fired" ? "crit"
+        : (t.state === "held" || t.state === "arming") ? "warn" : "";
       tRows.push(el("div", { class: "row" }, [
         el("span", { text: t.label }),
         el("b", { class: cls, text: (t.state === "idle" ? t.condition : (t.text || t.condition))
@@ -1902,7 +1908,10 @@ function bannerModel(rows, groups) {
             + "; nothing is shut down here.", "On battery · " + name + pct);
         } else {
           // The banner names only the closest trigger; the hero/fleet row list the rest.
-          add(member ? 35 : 50, "warn", "On battery — " + name + " for " + timeOnBatteryText(u)
+          // An arming FAILSAFE (NUT polls failing on battery) outranks a plain
+          // on-battery notice: the countdown is seconds, not minutes.
+          const arming = (upcomingTriggers(u)[0] || {}).state === "arming";
+          add(member ? 35 : arming ? 60 : 50, "warn", "On battery — " + name + " for " + timeOnBatteryText(u)
             + (next ? ". " + next.split(" · ")[0] : ""), "On battery · " + name + pct);
         }
         break;

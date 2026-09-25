@@ -773,6 +773,7 @@ body.data-stale main, body.data-stale .fleet-strip {
 .ho-eta { text-align: right; white-space: nowrap; }
 .ho-list li.ho-fired, .ho-list li.ho-fired .ho-label { color: var(--crit); }
 .ho-list li.ho-held .ho-eta { color: var(--warn); }
+.ho-list li.ho-arming .ho-text, .ho-list li.ho-arming .ho-eta { color: var(--warn); }
 .hero-title { flex-wrap: wrap; }
 .hero-title .badge { white-space: nowrap; }
 @media (max-width: 560px) {

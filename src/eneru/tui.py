@@ -1155,6 +1155,12 @@ def trigger_chip(trigger: Dict[str, Any]) -> Optional[str]:
     """
     tid = trigger.get("id")
     state = trigger.get("state")
+    if tid == "failsafe" and state == "arming":
+        # F-180 countdown: failed NUT polls on battery, FAILSAFE fires at the
+        # tolerance. Its own chip because it has no numeric threshold.
+        eta = trigger.get("etaSeconds")
+        return ("NUT lost: " + (trigger.get("text") or "polls failing")
+                + (f" (~{short_duration(eta)})" if eta is not None else ""))
     if tid not in _TRIGGER_SHORT or state in ("idle", "disabled", None):
         return None
     name = _TRIGGER_SHORT[tid]
@@ -1200,6 +1206,9 @@ def outlook_headline(trig: Dict[str, Any]) -> str:
     elif nxt and nxt.get("state") == "held":
         text = (f"{nxt['label']} met, waiting "
                 f"{short_duration(nxt.get('etaSeconds') or 0)} (stabilizing)")
+    elif nxt and nxt.get("state") == "arming":
+        text = (f"{nxt['label']}: {nxt.get('text') or 'NUT polls failing'}, "
+                f"in ~{short_duration(nxt.get('etaSeconds') or 0)}")
     elif nxt and nxt.get("etaSeconds") is not None:
         text = (f"Next trigger: {nxt['label'].lower()} in "
                 f"~{short_duration(nxt['etaSeconds'])}")

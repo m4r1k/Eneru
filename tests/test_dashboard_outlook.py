@@ -470,6 +470,44 @@ def test_outlook_line_states(minimal_config):
 
 @pytest.mark.unit
 @pytest.mark.skipif(NODE is None, reason="needs node")
+def test_failsafe_arming_renders_amber(minimal_config):
+    """F-180: the FAILSAFE failed-poll countdown (``arming``) is a next-trigger
+    candidate, reads its own text, renders amber and lifts the banner above a
+    plain on-battery notice (but below low battery)."""
+    arming = _trigger("failsafe", "Connection lost on battery", "arming", eta=10,
+                      cond="connection to NUT lost while on battery",
+                      text="1 of 3 NUT polls failed · fires at 3")
+    later = _trigger("criticalRuntime", "Critical runtime", "ok", eta=600,
+                     cond="runtime < 5m 0s")
+    row = _row("Lab", "OB", role=ROLE_LOCAL, summary=OB, tob_text="1m 0s",
+               triggers=[later, arming])
+    body = "const row = " + json.dumps(row) + ";\n" + """
+        document.createElement = (tag) => ({tag, className: "", textContent: "",
+          children: [], setAttribute() {}, appendChild(c) { this.children.push(c); }});
+        const out = {};
+        out.line = outlookLine(row);
+        out.first = upcomingTriggers(row)[0].state;
+        const m = bannerModel([row], []);
+        out.banner = {prio: m.prio, severity: m.severity, text: m.text};
+        out.hero = heroOutlook(row).className;
+        process.stdout.write(JSON.stringify(out));
+    """
+    out = _run(minimal_config, body)
+    assert out["first"] == "arming"
+    assert out["line"] == (
+        "Shutdown in ≈10s unless NUT answers (1 of 3 NUT polls failed · fires at 3)"
+        " · or runtime < 5m 0s in ≈10m 0s")
+    assert out["banner"]["prio"] == 60 and out["banner"]["severity"] == "warn"
+    assert out["banner"]["text"].startswith("On battery — Lab for 1m 0s. Shutdown in ≈10s")
+    assert out["hero"] == "hero-outlook s-warn"
+    js = _asset(minimal_config, "/app.js")
+    assert '(t.state === "held" || t.state === "arming") ? "warn"' in js
+    css = _asset(minimal_config, "/style.css")
+    assert "li.ho-arming .ho-eta { color: var(--warn); }" in css
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
 def test_old_daemon_role_fallback(minimal_config):
     """A pre-6.2 row (no role, no isLocal) powers this host, like the loader's
     default; an explicit isLocal:false without remotes only watches."""

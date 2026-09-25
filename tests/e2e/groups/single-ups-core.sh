@@ -1356,5 +1356,128 @@ trap - EXIT
 echo "PASS: Eneru removed the Compose stack with the configured timeout"
 )
 
+# ======================================================================
+# Test 71: One-entry ups: list honours an explicit is_local: false (6.2)
+# ======================================================================
+# Since 5.0 a lone list-form UPS powered this host off on every trigger,
+# even with `is_local: false`. 6.2: an explicit false keeps the host up
+# (its remote servers still shut down); an omitted is_local keeps the old
+# poweroff and logs a warning at startup.
+(
+echo ""
+echo ">>> Running: Test 71: One-entry ups list honours explicit is_local: false"
+
+write_is_local_config() {
+  # $1 = output path, $2 = "is_local: false" line or "" (omitted)
+  local out="$1" is_local_line="$2"
+  cat >"$out" <<YAML
+ups:
+  - name: "TestUPS@localhost:3493"
+    check_interval: 1
+    ${is_local_line}
+    remote_servers:
+      - name: "E2E SSH Target"
+        enabled: true
+        host: "localhost"
+        user: "testuser"
+        connect_timeout: 5
+        command_timeout: 10
+        shutdown_command: "sudo shutdown -h now"
+        ssh_options:
+          - "-o Port=2222"
+          - "-o StrictHostKeyChecking=no"
+          - "-o UserKnownHostsFile=/dev/null"
+          - "-o IdentityFile=/tmp/e2e-ssh-key"
+triggers:
+  on_battery_stabilization_delay: 0
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+behavior:
+  dry_run: true
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-islocal-state"
+  battery_history_file: "/tmp/eneru-e2e-islocal-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-islocal-flag"
+statistics:
+  db_directory: "/tmp/eneru-e2e-islocal-stats"
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: true
+  command: "shutdown -h now"
+YAML
+}
+
+apply_scenario low-battery
+
+# --- 71a: explicit is_local: false -> remote shutdown only, host stays up.
+write_is_local_config /tmp/config-e2e-islocal-false.yaml "is_local: false"
+rm -f /tmp/eneru-e2e-islocal-flag
+set +e
+timeout 180s eneru run --config /tmp/config-e2e-islocal-false.yaml \
+  --exit-after-shutdown 2>&1 | tee /tmp/test71a.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL (71a): eneru exited with code $RC (expected 0)"
+  cat /tmp/test71a.log
+  exit 1
+fi
+if ! grep -qF "Would send command 'sudo shutdown -h now' to testuser@localhost" /tmp/test71a.log; then
+  echo "FAIL (71a): the remote server shutdown did not run"
+  cat /tmp/test71a.log
+  exit 1
+fi
+if grep -qF "Would execute: shutdown -h now" /tmp/test71a.log; then
+  echo "FAIL (71a): explicit is_local: false still powered this host off"
+  cat /tmp/test71a.log
+  exit 1
+fi
+if ! grep -qF "SHUTDOWN SEQUENCE COMPLETE (is_local: false -- this host stays up)" /tmp/test71a.log; then
+  echo "FAIL (71a): missing the host-stays-up completion line"
+  cat /tmp/test71a.log
+  exit 1
+fi
+echo "PASS (71a): explicit is_local: false shut down the remote only"
+
+# --- 71b: is_local omitted -> unchanged host poweroff, plus a warning.
+write_is_local_config /tmp/config-e2e-islocal-omitted.yaml ""
+rm -f /tmp/eneru-e2e-islocal-flag
+set +e
+timeout 180s eneru run --config /tmp/config-e2e-islocal-omitted.yaml \
+  --exit-after-shutdown 2>&1 | tee /tmp/test71b.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL (71b): eneru exited with code $RC (expected 0)"
+  cat /tmp/test71b.log
+  exit 1
+fi
+if ! grep -qF "WARNING: ups[0] has no is_local; as the only UPS it powers off this host on a shutdown trigger." /tmp/test71b.log; then
+  echo "FAIL (71b): the omitted-is_local startup warning is missing"
+  cat /tmp/test71b.log
+  exit 1
+fi
+if ! grep -qF "Would execute: shutdown -h now" /tmp/test71b.log; then
+  echo "FAIL (71b): omitted is_local no longer powers this host off"
+  cat /tmp/test71b.log
+  exit 1
+fi
+if ! grep -qF "Would send command 'sudo shutdown -h now' to testuser@localhost" /tmp/test71b.log; then
+  echo "FAIL (71b): the remote server shutdown did not run"
+  cat /tmp/test71b.log
+  exit 1
+fi
+# `eneru validate` prints the same warning.
+eneru validate --config /tmp/config-e2e-islocal-omitted.yaml >/tmp/test71b-validate.log 2>&1 || true
+if ! grep -qF "ups[0] has no is_local" /tmp/test71b-validate.log; then
+  echo "FAIL (71b): eneru validate did not warn about the omitted is_local"
+  cat /tmp/test71b-validate.log
+  exit 1
+fi
+echo "PASS (71b): omitted is_local still powers this host off and warns"
+)
+
 echo ""
 echo "=== Group 'single-ups-core' completed successfully ==="

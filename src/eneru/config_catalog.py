@@ -576,7 +576,10 @@ UPS_ENTRY_SECTION = Section(
         Option("is_local", "bool",
                "On: this UPS powers the machine running Eneru, so its "
                "shutdown also stops local VMs/containers and powers this host "
-               "off. At most one UPS (or redundancy group) may be local.",
+               "off. At most one UPS (or redundancy group) may be local. "
+               "With a single UPS, an explicit off keeps this host on (only "
+               "its remote servers shut down); leaving it out still powers "
+               "this host off.",
                False, tier=BASIC),
         NUT_CONTROL_OVERRIDE,
         TRIGGERS_SECTION,

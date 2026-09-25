@@ -260,9 +260,12 @@ def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
                    f"{tolerance}")
     else:
         fs_eta, fs_text = None, "connection OK"
+    # ``arming``: the failed-poll countdown to FAILSAFE is running (amber).
+    # Distinct from ``held`` (a met trigger waiting out stabilization).
     rows.append(_trigger(
         "failsafe",
-        state="fired" if failsafe else ("ok" if on_battery else "idle"),
+        state=("fired" if failsafe else "arming" if counting
+               else "ok" if on_battery else "idle"),
         comparison="flag", value=failsafe, threshold=None, unit="",
         eta=fs_eta, eta_basis="clock" if fs_eta is not None else None,
         condition="connection to NUT lost while on battery",
@@ -395,7 +398,7 @@ def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
     else:
         candidates = [row for row in rows
                       if row["etaSeconds"] is not None
-                      and row["state"] in ("ok", "held")]
+                      and row["state"] in ("ok", "held", "arming")]
         if candidates:
             nxt = min(candidates, key=lambda row: row["etaSeconds"])
     if nxt is not None and nxt["state"] == "fired":

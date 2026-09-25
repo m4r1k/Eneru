@@ -216,7 +216,7 @@ In single-UPS mode this is `ups:`. In multi-UPS mode each list entry accepts the
 | `display_name` | `null` | Human label for logs, notifications, and TUI |
 | `check_interval` | `1` | Poll interval in seconds |
 | `max_stale_data_tolerance` | `3` | Failed or stale polls before connection handling starts |
-| `is_local` | `false` | Multi-UPS only. This group powers the Eneru host and may own local resources |
+| `is_local` | `false` | List form only. This group powers the Eneru host and may own local resources. With a one-entry list, an explicit `false` means this host is never powered off by that UPS (only its remote servers shut down); leaving it out still powers the host off and logs a warning. See [Local shutdown](#local-shutdown) |
 | `connection_loss_grace_period.enabled` | `true` | Suppress notifications for brief NUT outages while the UPS is on line power |
 | `connection_loss_grace_period.duration` | `60` | Seconds to wait before sending `CONNECTION_LOST` |
 | `connection_loss_grace_period.flap_threshold` | `5` | Warning threshold for repeated grace-period recoveries within 24 hours |
@@ -607,6 +607,21 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | `drain_on_local_shutdown` | `false` | Multi-UPS. Drain all groups before powering off the local host |
 | `trigger_on` | `any` | Multi-UPS. `any` means any group can trigger local shutdown; `none` disables cross-group local shutdown |
 | `wall` | `false` | Broadcast shutdown warnings to logged-in TTYs |
+
+### Which UPS powers this host off
+
+Think of each UPS as a house's main breaker. Eneru only flips the breaker of
+the house it lives in.
+
+| Config | Does a trigger power this host off? |
+|---|---|
+| `ups:` as a mapping (classic single-UPS form) | Yes |
+| `ups:` list with one entry, `is_local: true` | Yes |
+| `ups:` list with one entry, `is_local` left out | Yes, and Eneru warns at startup, in `eneru validate` and in `eneru config check` so you can set `is_local` explicitly |
+| `ups:` list with one entry, `is_local: false` | No. Its `remote_servers` still shut down and notifications still go out; this host stays on (since 6.2) |
+| `ups:` list with several entries | The `is_local: true` group powers the host off. With no local group, `trigger_on: any` lets any group power it off and `none` never does. `eneru config check` reports an error when every entry says `is_local: false` yet `trigger_on` is `any` |
+
+`local_shutdown.enabled: false` keeps the host on in every row.
 
 ## Redundancy groups
 

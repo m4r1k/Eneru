@@ -531,6 +531,10 @@ class UPSGroupConfig:
     containers: ContainersConfig = field(default_factory=ContainersConfig)
     filesystems: FilesystemsConfig = field(default_factory=FilesystemsConfig)
     is_local: bool = False  # Does this UPS power the Eneru host?
+    # 6.2: True when the YAML entry spelled `is_local` out (true OR false).
+    # A lone list-form UPS with an EXPLICIT `is_local: false` must never power
+    # the host off; an omitted key keeps the old (host powers off) behaviour.
+    is_local_explicit: bool = False
     # v6.0: optional per-group UPS-control override (creds/allowlists) for
     # deployments where this UPS lives on a different upsd. None => use global.
     nut_control: Optional[NutControlConfig] = None
@@ -662,6 +666,66 @@ class Config:
         if self.ups_groups:
             return self.ups_groups[0].filesystems
         return FilesystemsConfig()
+
+
+SINGLE_UPS_IS_LOCAL_UNSET_WARNING = (
+    "ups[0] has no is_local; as the only UPS it powers off this host on a "
+    "shutdown trigger. Set is_local: true to confirm, or is_local: false to "
+    "only monitor it / shut down its remote servers."
+)
+
+
+# Skip reason shared by the runtime progress sidecar and the shutdown plan.
+NOT_LOCAL_SKIP = "this host is not on this UPS (is_local: false)"
+
+
+def single_ups_owns_host(group: Any) -> bool:
+    """Single-UPS runtime rule: does this (only) group's shutdown power the host off?
+
+    ELI5: one UPS, one house. If you never said whose house it is, we assume
+    it is ours (the pre-6.2 behaviour). Only an explicit "not my house"
+    (``is_local: false`` written in the YAML) keeps the lights on here.
+    The legacy mapping form is always ``is_local=True``. Multi-UPS/coordinator
+    configs never ask this: the coordinator has its own is_local/trigger_on rule.
+    """
+    if group is None:
+        return True
+    return (bool(getattr(group, "is_local", False))
+            or not getattr(group, "is_local_explicit", False))
+
+
+def host_poweroff_possible(config: Config) -> bool:
+    """Can any shutdown path power this host off? (root / readiness checks)
+
+    Mirrors the runtime: a local owner, the implicit no-groups mode, or
+    ``trigger_on: any``. 6.2: the single-UPS runtime (no coordinator) never
+    powers the host off for a lone list entry with an explicit
+    ``is_local: false``, whatever ``trigger_on`` says.
+    """
+    if not config.local_shutdown.enabled:
+        return False
+    groups = config.ups_groups
+    coordinated = config.multi_ups or bool(config.redundancy_groups)
+    if groups and not coordinated and not single_ups_owns_host(groups[0]):
+        return False
+    has_local = (any(g.is_local for g in groups)
+                 or any(g.is_local for g in config.redundancy_groups))
+    return bool(has_local or not groups
+                or config.local_shutdown.trigger_on == "any")
+
+
+def single_ups_is_local_unset(config: Config) -> bool:
+    """True for a one-entry ``ups:`` LIST whose entry omits ``is_local`` while
+    local_shutdown can power the host off (the case that deserves a warning)."""
+    if len(config.ups_groups) != 1 or config.redundancy_groups:
+        return False
+    group = config.ups_groups[0]
+    return bool(
+        group.is_multi_ups  # list form (the legacy mapping is always local)
+        and not group.is_local
+        and not group.is_local_explicit
+        and config.local_shutdown.enabled
+    )
 
 
 def resolve_energy_config(config: Config) -> EnergyConfig:
@@ -1934,6 +1998,7 @@ class ConfigLoader:
                 triggers = copy.deepcopy(global_triggers)
 
             is_local = entry.get('is_local', False)
+            is_local_explicit = 'is_local' in entry
 
             # Remote servers (allowed for all groups)
             remote_servers = []
@@ -1996,6 +2061,7 @@ class ConfigLoader:
                 containers=containers_config,
                 filesystems=fs_config,
                 is_local=is_local,
+                is_local_explicit=is_local_explicit,
                 nut_control=nut_control,
                 battery_health=battery_health,
                 self_test=self_test,
@@ -2876,6 +2942,12 @@ class ConfigLoader:
                 "is_local, or set local_shutdown.trigger_on: none, to confirm "
                 "this is intended."
             )
+
+        # 6.2: a one-entry `ups:` list that omits is_local still powers this
+        # host off (single-UPS runtime, unchanged since 5.0); ask the operator
+        # to say so explicitly. `is_local: false` now keeps the host up.
+        if single_ups_is_local_unset(config):
+            messages.append("WARNING: " + SINGLE_UPS_IS_LOCAL_UNSET_WARNING)
 
         # ups.name uniqueness. The name keys the per-group stats DB path, the
         # state-file suffix, the monitors-by-name routing dict, and redundancy

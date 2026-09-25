@@ -73,7 +73,7 @@ Each UPS row in `/api/v1/ups` and `/api/v1/ups/<name>` adds:
 | Field | Meaning |
 |-------|---------|
 | `statusSummary` | `{state, label, severity, blink, detail, tokens}`: one short label per state (`On mains`, `On battery`, `Low battery`, `Shutdown triggered`, `Shutting down`, ...) and a 3-level `severity` (`ok` / `warn` / `crit`). `blink` is true only for `shutting_down` and `trigger_active`. `detail` is the full token-by-token text. |
-| `triggerOutlook` | `{onBattery, timeOnBattery, stabilizing, stabilizationRemaining, triggers[], firing[], next, summary, action}`. `triggers[]` always lists `fsd`, `failsafe`, `lowBattery`, `criticalRuntime`, `depletionRate`, `extendedTime` and `selfTestFailure`, each with `state` (`idle` / `ok` / `held` / `fired` / `disabled` / `unknown`), `value`, `threshold`, `unit`, `margin`, `etaSeconds`, `etaBasis`, `condition` and `text`. |
+| `triggerOutlook` | `{onBattery, timeOnBattery, stabilizing, stabilizationRemaining, triggers[], firing[], next, summary, action}`. `triggers[]` always lists `fsd`, `failsafe`, `lowBattery`, `criticalRuntime`, `depletionRate`, `extendedTime` and `selfTestFailure`, each with `state` (`idle` / `ok` / `held` / `arming` / `fired` / `disabled` / `unknown`; `held` means a met trigger is waiting out the stabilization delay, `arming` means the FAILSAFE failed-poll countdown is running), `value`, `threshold`, `unit`, `margin`, `etaSeconds`, `etaBasis`, `condition` and `text`. |
 | `nextTrigger` | The closest trigger: the first one that has fired, otherwise the one with the smallest `etaSeconds`, otherwise `null`. |
 | `role` | `{kind, label, shutsDownLocalHost, localDrain, remoteServers, hasShutdownActions, redundancyGroups, dryRun}`. `kind` is `local`, `remote-only`, `monitor-only` or `redundancy-member`, derived from the same shutdown plan the Shutdown tab shows. |
 | `triggerOutlook.action` | `{kind, label, groups}`: `local-shutdown`, `remote-shutdown`, `notify-only` or `redundancy-advisory`, with a one-line label such as "Shuts down this host and 2 remote servers". |
@@ -87,9 +87,11 @@ drain rate, critical runtime assumes the runtime counts down in real time, and
 the time-based triggers use the clock. No ETA is shorter than the remaining
 on-battery stabilization hold.
 
-While NUT polls fail on battery, the `failsafe` row stays `ok` but its text
-counts the failures ("1 of 3 NUT polls failed") and its `etaSeconds` is the
-remaining polls times the 5 s retry wait (a floor). FAILSAFE fires at
+While NUT polls fail on battery, the `failsafe` row is `arming` (amber): its
+text counts the failures ("1 of 3 NUT polls failed") and its `etaSeconds` is
+the remaining polls times the 5 s retry wait (a floor). An `arming` row is a
+`nextTrigger` candidate like any other countdown. It turns `fired` on the poll
+where the daemon runs FAILSAFE, and back to `ok` once a poll succeeds. FAILSAFE fires at
 `max_stale_data_tolerance`; the row's `connectionErrorCount` and
 `staleDataCount` hold the counts.
 

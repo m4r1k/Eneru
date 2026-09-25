@@ -138,6 +138,28 @@ the dashboard, and self-tests that no longer look like outages.
 
 ### Changed
 
+- **Breaking: a one-entry `ups:` list now honours `is_local: false`.** Since
+  5.0, a `ups:` list with a single entry ran the single-UPS code path, and that
+  path never looked at `is_local`: on any trigger (low battery, runtime, FSD,
+  FAILSAFE, ...) it powered this host off even when the entry said
+  `is_local: false`. It was like a breaker labelled "not this house" that still
+  cut this house's power. Now an explicit `is_local: false` keeps this host
+  on; that UPS's remote servers still shut down and notifications still go out.
+  If `is_local` is left out, the host still powers off as before, and
+  `eneru run`, `eneru validate` and `eneru config check` warn you to set it.
+  In a multi-UPS list, `eneru config check` reports an error when every entry
+  says `is_local: false` and `local_shutdown.trigger_on` is `any` (any UPS would
+  still power the host off).
+
+  | Single-UPS config | Before | After |
+  |---|---|---|
+  | `ups:` as a mapping (classic form) | host powers off | host powers off (unchanged) |
+  | `ups:` list, one entry, `is_local` omitted | host powers off | host powers off, plus a new warning asking you to set `is_local` explicitly |
+  | `ups:` list, one entry, `is_local: true` | host powers off | host powers off (unchanged) |
+  | `ups:` list, one entry, **`is_local: false`** | host powers off (the bug) | **host stays on**; the group's remote servers still shut down |
+
+  If your host really is powered by that UPS, set `is_local: true` to keep the
+  old behaviour.
 - **`use_sudo` now covers custom pre-shutdown commands.** Every command on a
   `use_sudo: true` server runs through `sudo -n` unless it already starts with
   `sudo`; only the first command of a pipeline or list is prefixed. If your
@@ -242,7 +264,9 @@ the dashboard, and self-tests that no longer look like outages.
 - `config check` and the editor's order page no longer promise a host poweroff
   when a multi-UPS or redundancy config has `local_shutdown.enabled: false`.
 - While NUT polls fail on battery, the FAILSAFE row counts the failed polls
-  ("1 of 3 NUT polls failed") with an ETA instead of "connection OK"; `/api/v1/ups`
+  ("1 of 3 NUT polls failed") with an ETA instead of "connection OK", in a new
+  amber `arming` trigger state (the API, dashboard and `eneru monitor` render
+  it; `held` still means "waiting out the stabilization delay"); `/api/v1/ups`
   adds `connectionErrorCount`.
 - A single UPS plus a redundancy group: `eneru monitor` reads the daemon's
   suffixed state/stats files, so it no longer shows a false "Quorum lost".

@@ -8,7 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from eneru.config import Config, UPSGroupConfig, resolve_energy_config
+from eneru.config import (
+    Config, UPSGroupConfig, host_poweroff_possible, resolve_energy_config,
+)
 from eneru.health_model import UPSHealth, assess_health
 from eneru.remote_health import (
     REMOTE_HEALTH_DISABLED,
@@ -700,12 +702,9 @@ def _required_capabilities(config: Config) -> List[str]:
             caps.append("local_container_teardown")
         if group.filesystems.unmount.enabled:
             caps.append("local_filesystem_unmount")
-    has_local = any(g.is_local for g in config.ups_groups) or any(
-        g.is_local for g in config.redundancy_groups
-    )
-    if config.local_shutdown.enabled and (
-        has_local or not config.ups_groups or config.local_shutdown.trigger_on == "any"
-    ):
+    # 6.2: same rule as the root check (a lone list entry with an explicit
+    # `is_local: false` never powers the host off).
+    if host_poweroff_possible(config):
         caps.append("local_host_poweroff")
     remote_targets: List[Tuple[str, str]] = []
     for group in config.ups_groups:

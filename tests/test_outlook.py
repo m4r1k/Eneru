@@ -1267,7 +1267,8 @@ class TestFailsafeCountdown:
                               runtime="3000", time_on_battery=10,
                               failed_polls=1, failed_poll_tolerance=3)
         fs = _by_id(r)["failsafe"]
-        assert fs["state"] == "ok" and fs["text"].startswith("1 of 3 NUT polls")
+        # ``arming``: a countdown, amber, distinct from ``held`` (stabilization).
+        assert fs["state"] == "arming" and fs["text"].startswith("1 of 3 NUT polls")
         assert fs["etaSeconds"] == 2 * RETRY_WAIT_SECONDS
         assert r["next"]["id"] == "failsafe"
         # No failures: unchanged "connection OK", no ETA.
@@ -1323,8 +1324,9 @@ class TestFailsafeCountdown:
                 patch.object(monitor._stop_event, "wait", side_effect=record), \
                 patch.object(monitor, "_run_ups_name_diagnostic"):
             monitor._main_loop()
-        # Polls 1 and 2: engine waits, outlook counts down ("ok" + ETA).
-        assert seen[0] == (1, "ok") and seen[1] == (2, "ok")
+        # Polls 1 and 2: engine waits, outlook counts down ("arming" + ETA)
+        # from the very first failed poll.
+        assert seen[0] == (1, "arming") and seen[1] == (2, "arming")
         assert texts[0].startswith("1 of 3 NUT polls failed")
         assert texts[1].startswith("2 of 3 NUT polls failed")
         # Poll 3 reaches the tolerance: the engine fires FAILSAFE and the

@@ -43,10 +43,12 @@ from eneru.config import (
     Config,
     ConfigLoader,
     ConfigSectionError,
+    NOT_LOCAL_SKIP,
     RemoteServerConfig,
     UPSGroupConfig,
     is_validation_error,
     resolve_energy_config,
+    single_ups_owns_host,
 )
 from eneru.mqtt import _redact_broker
 from eneru.utils import (
@@ -372,7 +374,7 @@ def _dependency_findings(config: Config) -> List[Finding]:
         label = _group_label(group)
         local = bool(getattr(group, "is_local", False)) or (
             group is (config.ups_groups[0] if config.ups_groups else None)
-            and not config.multi_ups)
+            and not config.multi_ups and single_ups_owns_host(group))
         if local and not delegating:
             if group.virtual_machines.enabled and not command_exists("virsh"):
                 out.append(Finding(
@@ -489,8 +491,15 @@ def _behavior_findings(config: Config) -> List[Finding]:
             "Dry-run is off: shutdown steps execute for real"))
 
     owner = _runtime_ctx._local_owner_group(config)
-    legacy_local = bool(config.ups_groups) and not config.multi_ups
+    legacy_local = (bool(config.ups_groups) and not config.multi_ups
+                    and single_ups_owns_host(config.ups_groups[0]))
     protects_host = owner is not None or legacy_local
+    if (config.ups_groups and not config.multi_ups and not legacy_local
+            and not config.redundancy_groups):
+        out.append(Finding(
+            LEVEL_INFO, "safety",
+            "is_local: false on the only UPS: this host never powers itself "
+            "off; a trigger only shuts down its remote servers"))
     if protects_host and not config.local_shutdown.enabled:
         out.append(Finding(
             LEVEL_WARN, "safety",
@@ -498,7 +507,21 @@ def _behavior_findings(config: Config) -> List[Finding]:
             "Eneru will drain VMs/containers/remotes, then leave this host "
             "running until the battery dies."))
     if config.multi_ups and owner is None:
-        if config.local_shutdown.enabled and config.local_shutdown.trigger_on == "any":
+        every_explicit_false = all(
+            g.is_local_explicit and not g.is_local for g in config.ups_groups)
+        if (config.local_shutdown.enabled
+                and config.local_shutdown.trigger_on == "any"
+                and every_explicit_false):
+            # Contradiction: each UPS says "not this host", yet trigger_on: any
+            # powers the host off when ANY of them goes critical.
+            out.append(Finding(
+                LEVEL_ERROR, "safety",
+                "Every UPS says is_local: false, yet local_shutdown.trigger_on: "
+                "any powers this host off when any of them goes critical",
+                "If this host has independent power, set "
+                "local_shutdown.trigger_on: none; otherwise mark the UPS that "
+                "feeds it with is_local: true."))
+        elif config.local_shutdown.enabled and config.local_shutdown.trigger_on == "any":
             out.append(Finding(
                 LEVEL_WARN, "safety",
                 "No UPS is marked is_local, yet any group's shutdown powers "
@@ -1416,6 +1439,13 @@ def _group_config(config: Config, group: Any) -> Config:
                   local_shutdown=config.local_shutdown)
 
 
+def _protects_host(config: Config, group: Any) -> bool:
+    """Role label rule: the local group, or the only UPS unless it says an
+    explicit ``is_local: false`` (the single-UPS runtime rule)."""
+    return bool(group.is_local) or (
+        not config.multi_ups and single_ups_owns_host(group))
+
+
 def _plan_for_group(config: Config, group: Any) -> Dict[str, Any]:
     from eneru.shutdown.plan import build_shutdown_plan
     is_ups = isinstance(group, UPSGroupConfig)
@@ -1457,7 +1487,7 @@ def power_loss_plan(config: Config) -> List[str]:
         is_ups = isinstance(group, UPSGroupConfig)
         if is_ups:
             label = group.ups.label
-            role = ("protects THIS host" if (group.is_local or not config.multi_ups)
+            role = ("protects THIS host" if _protects_host(config, group)
                     else "monitoring / remote-only")
             lines.append(f"UPS {label} ({role})")
             if group.ups.name in members:
@@ -1590,7 +1620,9 @@ def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
          "role": "protects this host" | "monitoring / remote-only"
                  | "redundancy group",
          "note": <plan note or None>,
-         "hostStaysOn": <True when local_shutdown.enabled is false>,
+         "hostStaysOn": <True when local_shutdown.enabled is false, or the
+                         only UPS says an explicit is_local: false>,
+         "hostStaysOnReason": "is_local: false" | None,
          "disabled": [<names of enabled: false servers>],
          "phases": [{"number": 1..N, "waitsFor": None | number - 1,
                      "kind": "local" | "loopback-pre" | "remote"
@@ -1648,7 +1680,7 @@ def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
             add("final", final)
         if is_ups:
             role = ("protects this host"
-                    if (group.is_local or not config.multi_ups)
+                    if _protects_host(config, group)
                     else "monitoring / remote-only")
         else:
             role = "redundancy group"
@@ -1656,7 +1688,10 @@ def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
             "group": group.ups.label if is_ups else (group.name or "(unnamed)"),
             "kind": kind, "index": counters[kind], "role": role,
             "note": plan.get("note"),
-            "hostStaysOn": (_poweroff_skip(plan) == "disabled"
+            "hostStaysOnReason": ("is_local: false"
+                                  if _poweroff_skip(plan) == NOT_LOCAL_SKIP
+                                  else None),
+            "hostStaysOn": (_poweroff_skip(plan) in ("disabled", NOT_LOCAL_SKIP)
                             or _coordinator_keeps_host_on(plan, config)),
             "disabled": [s.name or s.host for s in group.remote_servers
                          if not s.enabled],
@@ -1710,7 +1745,8 @@ def format_order_tree(tree: List[Dict[str, Any]]) -> List[str]:
                     text = _server_line(server)
                 lines.append(f"    {branch} {text}")
         if group["hostStaysOn"]:
-            lines.append("  This host stays on (local_shutdown.enabled: false).")
+            why = group.get("hostStaysOnReason") or "local_shutdown.enabled: false"
+            lines.append(f"  This host stays on ({why}).")
         if group["disabled"]:
             lines.append("  Skipped (enabled: false): "
                          + ", ".join(group["disabled"]))

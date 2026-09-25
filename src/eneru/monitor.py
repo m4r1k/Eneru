@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any, Optional, Dict, Tuple, List
 
 from eneru.version import __version__
-from eneru.config import Config, RemoteServerConfig, resolve_energy_config
+from eneru.config import (
+    Config, NOT_LOCAL_SKIP, RemoteServerConfig, SINGLE_UPS_IS_LOCAL_UNSET_WARNING,
+    resolve_energy_config, single_ups_is_local_unset, single_ups_owns_host,
+)
 from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
@@ -488,6 +491,7 @@ class UPSGroupMonitor(
         if self.config.behavior.dry_run:
             self._log_message("🧪  *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
 
+        self._log_host_ownership()
         self._log_enabled_features()
         self._wait_for_initial_connection()
         self._initialize_voltage_thresholds()
@@ -1773,7 +1777,12 @@ class UPSGroupMonitor(
             except Exception:
                 pass
 
-        if self.config.local_shutdown.enabled and not delegated:
+        # 6.2: a lone list-form UPS with an explicit `is_local: false` is
+        # someone else's house: run its remotes, never flip OUR main switch.
+        host_poweroff = (self.config.local_shutdown.enabled
+                         and self._powers_this_host())
+
+        if host_poweroff and not delegated:
             progress.phase_start("local-poweroff")
             if self.config.behavior.dry_run:
                 record_sequence_complete()
@@ -1900,7 +1909,7 @@ class UPSGroupMonitor(
                 else:
                     progress.phase_finish("local-poweroff")
                     progress.finish("failed" if phase_failed else "succeeded")
-        elif self.config.local_shutdown.enabled and delegated:
+        elif host_poweroff and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
             # The container dies with it. Notify + flush + marker, then exit.
@@ -1996,6 +2005,22 @@ class UPSGroupMonitor(
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
                 progress.finish("failed" if phase_failed else "succeeded")
+        elif self.config.local_shutdown.enabled:
+            # Explicit `is_local: false` on the only UPS: this host stays up.
+            progress.phase_skip("local-poweroff", NOT_LOCAL_SKIP)
+            record_sequence_complete()
+            self._log_message(
+                "✅  SHUTDOWN SEQUENCE COMPLETE (is_local: false -- this host "
+                "stays up)")
+            self._send_notification(
+                f"✅  **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                f"This UPS does not power this host (is_local: false) — "
+                f"system stays up.",
+                self.config.NOTIFY_INFO,
+                category="shutdown_summary",
+            )
+            self._clear_shutdown_in_progress()
+            progress.finish("failed" if phase_failed else "succeeded")
         else:
             progress.phase_skip("local-poweroff", "local shutdown disabled")
             record_sequence_complete()
@@ -3153,10 +3178,36 @@ class UPSGroupMonitor(
         started = row.get("started_ts") or 0
         return time.time() - float(started) <= bound
 
+    def _powers_this_host(self) -> bool:
+        """Does this monitor's own shutdown sequence power the host off?
+
+        Single-UPS runtime only (the coordinator owns the poweroff in multi-UPS
+        mode): a lone list-form UPS with an explicit ``is_local: false`` never
+        powers the host off; everything else keeps the pre-6.2 behaviour.
+        """
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        return single_ups_owns_host(group)
+
+    def _log_host_ownership(self) -> None:
+        """Startup notice: does this lone UPS power the host off? (6.2)"""
+        if self._coordinator_mode:
+            return
+        if single_ups_is_local_unset(self.config):
+            self._log_message(f"⚠️  WARNING: {SINGLE_UPS_IS_LOCAL_UNSET_WARNING}")
+        elif self.config.local_shutdown.enabled and not self._powers_this_host():
+            self._log_message(
+                "ℹ️  is_local: false -- this host is never powered off by this "
+                "UPS; a shutdown trigger only runs its remote servers.")
+
     def _is_monitor_only_group(self) -> bool:
         """Return whether this UPS owns no shutdown-capable resources."""
         group = self.config.ups_groups[0] if self.config.ups_groups else None
         if group is None or group.is_local or self._in_redundancy_group:
+            return False
+        # Single-UPS: a list entry that omits is_local still powers the host
+        # off on T1-T4, so its T5 must too (the outlook says so).
+        if (not self._coordinator_mode and self.config.local_shutdown.enabled
+                and self._powers_this_host()):
             return False
         return not any(server.enabled for server in group.remote_servers)
 
