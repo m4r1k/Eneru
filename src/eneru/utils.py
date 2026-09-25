@@ -4,6 +4,8 @@ import math
 import shutil
 import subprocess
 import os
+import re
+import stat
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -76,6 +78,64 @@ def sanitize_name(name: Any) -> str:
     the config-path behaviour.
     """
     return (name or "").replace("@", "-").replace(":", "-").replace("/", "-")
+
+
+def runs_coordinator(config: Any) -> bool:
+    """True when ``eneru run`` starts the multi-UPS coordinator.
+
+    F-181: the coordinator (and its per-UPS suffixed state/stats paths) runs
+    for a multi-UPS list OR any redundancy group, even with a single UPS.
+    Every reader that derives those paths asks here, so it can't drift from
+    ``cli._cmd_run``.
+    """
+    return bool(getattr(config, "multi_ups", False)
+                or getattr(config, "redundancy_groups", None))
+
+
+def ups_state_file_path(config: Any, group: Any) -> str:
+    """The state file the daemon writes for ``group`` (suffixed under the
+    coordinator, bare in single-UPS mode)."""
+    base = config.logging.state_file
+    if runs_coordinator(config):
+        return base + f".{sanitize_name(group.ups.name)}"
+    return base
+
+
+# Reads of daemon-written side files (state file, progress sidecar) are
+# capped: a container-writable bind mount must not be able to point them at
+# /dev/zero or a FIFO and hang the operator's shell (F-183).
+SIDE_FILE_MAX_BYTES = 64 * 1024
+
+
+def read_side_file(path: Any, max_bytes: int = SIDE_FILE_MAX_BYTES) -> str:
+    """Read at most ``max_bytes`` of a regular, non-symlink file as text.
+
+    Raises ``OSError`` when the file is missing, a symlink, or not a
+    regular file. Undecodable bytes are replaced, never raised.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(str(path), flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"not a regular file: {path}")
+        data = os.read(fd, max_bytes)
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="replace")
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
+
+
+def clean(text: Any) -> str:
+    """Strip terminal escapes/control characters from EXTERNAL text.
+
+    Remote stderr, a NUT banner or a state-file value is printed to the
+    operator's terminal; a compromised source must not be able to repaint
+    it (clear the screen, retitle the window, write the clipboard).
+    """
+    text = _ANSI.sub("", str(text))
+    return "".join(ch if (ch.isprintable() or ch == " ") else " " for ch in text)
 
 
 def is_numeric(value: Any) -> bool:

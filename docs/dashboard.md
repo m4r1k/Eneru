@@ -45,7 +45,9 @@ Open `http://<host>:9191/` in a browser.
   role: a monitoring-only UPS gets an amber note that nothing is shut down on
   this host; a UPS that powers this host names the trigger that fired and what
   the shutdown does; a running shutdown links to its progress on the Shutdown
-  tab. Red alerts are announced to screen readers (`role="alert"`), and the
+  tab. A redundancy member's own alarms stay amber and say the group decides,
+  even when its entry has local resources: only the group's quorum verdict
+  (quorum lost, group shutdown running) turns the banner red. Red alerts are announced to screen readers (`role="alert"`), and the
   browser tab title follows the outage (`⚠ On battery · Lab 62% — Eneru`).
 - **What happens next:** while a UPS is on battery, its view lists every armed
   trigger (charge, runtime, drain rate, time on battery, ...) with the live

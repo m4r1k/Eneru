@@ -169,6 +169,10 @@ jobs:
           # 6.2 UX contract: outlook/role/freshness API fields + progress sidecar.
           grep -q "PASS (43a): next-trigger/role/freshness contract on the live API" tests/e2e/groups/single-ups-core.sh
           grep -q "eneru-e2e-state.shutdown-progress.json" tests/e2e/groups/single-ups-core.sh
+          # 6.2.0 review cycle 3 (F-188): nextTrigger == the trigger the daemon fired.
+          grep -q "PASS (43a): nextTrigger names the trigger the daemon fired" tests/e2e/groups/single-ups-core.sh
+          grep -q 'assert fired\[0\] == "Battery charge 14% below threshold 20%"' tests/e2e/groups/single-ups-core.sh
+          grep -q 'assert role\["kind"\] == "local", role' tests/e2e/groups/single-ups-core.sh
 
       - name: Verify v5.5 loopback E2E coverage is wired
         if: matrix.group == 'loopback'
@@ -190,6 +194,9 @@ jobs:
           grep -Eq "^[[:space:]]*config_check_identity_autofill_case[[:space:]]*$" tests/e2e/groups/loopback.sh
           grep -q 'host-loopback: host identity matches (loopback reaches THIS host)' tests/e2e/groups/loopback.sh
           grep -qF 'grep -qF "[read-only]" /tmp/test68b.log' tests/e2e/groups/loopback.sh
+          # F-189: the dry-run confirm must be on the captured screen.
+          grep -qx '  assert_dry_run_confirm_shown /tmp/test68a.log on || exit 1' tests/e2e/groups/loopback.sh
+          grep -q '^assert_dry_run_confirm_shown() {' tests/e2e/groups/lib.sh
 
       - name: Verify v6.0 E2E coverage is wired
         if: matrix.group == 'cli' || matrix.group == 'single-ups-auth'
@@ -216,6 +223,9 @@ jobs:
           grep -q "Test 62: self-test observation" tests/e2e/groups/single-ups-auth.sh
           grep -q "^ups.test.result:" tests/e2e/scenarios/self-test-passed.dev
           grep -q "Test 64: authenticated remote shutdown response and exit code" tests/e2e/groups/single-ups-auth.sh
+          # F-189: the selfTestFailure outlook row is observed live (armed, fired).
+          grep -q '\[ "$T5_IDLE" = "true idle - 3" \]' tests/e2e/groups/single-ups-auth.sh
+          grep -q '\[ "$T5_FIRED" = "true fired selfTestFailure 3" \]' tests/e2e/groups/single-ups-auth.sh
 
       - name: Verify v6.2 report and self-test E2E coverage is wired
         if: matrix.group == 'stats' || matrix.group == 'single-ups-auth'
@@ -271,6 +281,9 @@ jobs:
           grep -q 'touch /tmp/shutdown-invoked' tests/e2e/ssh-target/Dockerfile
           grep -q '\[1/1\] touch /root/eneru-custom-nosudo failed:' tests/e2e/groups/cli.sh
           test -f tests/e2e/config-tui-driver.py
+          # F-189: the `y` in the key script answers a real dry-run prompt.
+          grep -qx 'assert_dry_run_confirm_shown /tmp/test66a.log on || exit 1' tests/e2e/groups/cli.sh
+          grep -q '^assert_dry_run_confirm_shown() {' tests/e2e/groups/lib.sh
 
       - name: Verify redundancy progress E2E coverage is wired
         if: matrix.group == 'redundancy-quorum'

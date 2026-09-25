@@ -203,3 +203,32 @@ stop_redundancy_nut_drivers() {
            'ps -ef | grep -E "[d]ummy-ups.*-a UPS[12]" || echo "    (no UPS1/UPS2 driver processes)"' ) \
       2>&1 | sed 's/^/    /' || true
 }
+
+# assert_dry_run_confirm_shown <pty-log> <on|off>
+#
+#   The editor asks twice before flipping behavior.dry_run: on the toggle
+#   itself (config_tui.py _guard_dry_run) and again on save (request_save,
+#   "Saving changes behavior.dry_run to on. ..."). Like a lift that asks
+#   "are you sure?" at the button AND at the door: both questions must be on
+#   the captured screen, so the `y` in a key script provably answered the
+#   toggle prompt instead of landing on nothing. The text is
+#   DRY_RUN_ON_WARNING / DRY_RUN_OFF_WARNING verbatim.
+assert_dry_run_confirm_shown() {
+  local log="$1" state="$2" warning screen count
+  if [ "$state" = on ]; then
+    warning="Eneru will only LOG what it would do; nothing is shut down in a real outage. Continue?"
+  else
+    warning="Eneru WILL act on power loss: it will shut down VMs, containers, remote servers and this host. Continue?"
+  fi
+  # Strip CSI escapes and squeeze curses' padding. Here-strings, not
+  # pipes into grep -q, so pipefail can't SIGPIPE a producer.
+  screen=$(sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$log" | tr -s ' ')
+  count=$({ grep -oF "$warning" <<<"$screen" || true; } | wc -l)
+  if [ "$count" -lt 2 ] || \
+     ! grep -qF "Saving changes behavior.dry_run to $state. $warning" <<<"$screen"; then
+    echo "--- editor output (escape codes stripped) ---"
+    printf '%s\n' "$screen" | tail -40
+    echo "FAIL: the dry_run confirm (\"$warning\") was not shown on toggle and save (seen $count)"
+    return 1
+  fi
+}

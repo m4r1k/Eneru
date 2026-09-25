@@ -705,6 +705,7 @@ YAML
     sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' /tmp/test68a.log | tr -s ' ' | tail -40
     docker logs "$name" 2>&1 | tail -20
     echo "FAIL: in-container save did not reach the host file"; exit 1; }
+  assert_dry_run_confirm_shown /tmp/test68a.log on || exit 1
   sudo grep -q '^# Operator comment that must survive the edit' "$dir/config.yaml" || {
     echo "FAIL: operator comment lost"; exit 1; }
   [ "$(stat -c %i "$dir/config.yaml")" = "$inode_before" ] || {

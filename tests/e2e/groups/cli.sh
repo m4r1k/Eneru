@@ -615,6 +615,7 @@ cp "$E2E_DIR/config-e2e.yaml" /tmp/config-e2e-tui.yaml
 # confirm -> Save -> y answers the "saving changes dry_run" confirm -> Quit
 python3 "$E2E_DIR/config-tui-driver.py" '2|\r|y|S|y|q' -- \
   eneru config --basic --config /tmp/config-e2e-tui.yaml >/tmp/test66a.log
+assert_dry_run_confirm_shown /tmp/test66a.log on || exit 1
 if ! grep -qE '^  dry_run: true +# Real execution for E2E tests' /tmp/config-e2e-tui.yaml; then
   grep -n dry_run /tmp/config-e2e-tui.yaml || true
   echo "FAIL: TUI did not toggle dry_run in place with its comment intact"; exit 1

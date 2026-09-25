@@ -32,7 +32,7 @@ from eneru.notifications import APPRISE_AVAILABLE
 from eneru.redundancy import RedundancyGroupExecutor
 from eneru.remote_health import is_safe_probe_command, run_remote_probe
 from eneru.status import remote_health_for_config
-from eneru.utils import redact_apprise_url
+from eneru.utils import redact_apprise_url, runs_coordinator
 
 # Optional import for Apprise (needed for test notifications)
 try:
@@ -711,7 +711,7 @@ def _cmd_run(args):
     _exit_on_missing_loopback_contract(config)
     _exit_on_privilege_errors(config)
 
-    if config.multi_ups or config.redundancy_groups:
+    if runs_coordinator(config):
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
         coordinator.run()
     else:

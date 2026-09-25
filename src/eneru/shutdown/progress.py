@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 import re
 
 from eneru.logger import redact_sensitive_text
+from eneru.utils import read_side_file
 from eneru.shutdown.plan import PHASE_ORDER
 
 # Remote command output can be long (a chatty shutdown script). Keep the
@@ -44,7 +45,9 @@ def progress_sidecar_path(state_file_path: Any) -> Path:
 def read_progress_sidecar(path: Any) -> Optional[Dict[str, Any]]:
     """Read a progress sidecar; None when missing or unreadable."""
     try:
-        data = json.loads(Path(path).read_text())
+        # Capped, regular-file-only read (F-183): the sidecar may sit in a
+        # container-writable bind mount that host root reads.
+        data = json.loads(read_side_file(path))
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -291,9 +294,14 @@ class ShutdownProgress:
         if path is None:
             return
         try:
-            payload = self.snapshot()
-            payload["writtenAt"] = time.time()
+            # F-182: snapshot INSIDE the write lock. Taken outside, a slow
+            # writer's older "running" copy could land after a newer
+            # "succeeded" one and leave the TUI showing "Shutting down"
+            # forever. Lock order is always _write_lock -> _lock (snapshot);
+            # nothing holds _lock while calling persist().
             with self._write_lock:
+                payload = self.snapshot()
+                payload["writtenAt"] = time.time()
                 tmp = path.with_name(path.name + ".tmp")
                 tmp.write_text(json.dumps(payload, sort_keys=True))
                 tmp.replace(path)

@@ -888,9 +888,11 @@ function heroOutlook(u) {
   const list = upcomingTriggers(u);
   const role = upsRole(u);
   if (!list.length || !role) return null;
-  const acts = role.hasShutdownActions || role.kind === "redundancy-member";
+  const member = role.kind === "redundancy-member";
+  const acts = role.hasShutdownActions || member;
   const first = list[0];
-  const sev = first.state === "fired" ? "crit" : "warn";
+  // A member's fired trigger is a vote, not the verdict: amber (F-184).
+  const sev = first.state === "fired" && !member ? "crit" : "warn";
   const box = el("div", { class: "hero-outlook s-" + (acts ? sev : "muted") });
   if (!acts) {
     box.appendChild(el("p", { class: "ho-head", text: "Nothing is shut down here" }));
@@ -1846,8 +1848,11 @@ function bannerModel(rows, groups) {
     const info = statusInfo(u);
     const role = upsRole(u) || {};
     const name = u.label || u.name;
-    const acts = !!role.hasShutdownActions;
+    // The group decides (F-184): a redundancy member never gets the "this
+    // UPS shuts things down" wording, even when its own entry has local
+    // resources (hasShutdownActions) — like a single vote, not the verdict.
     const member = role.kind === "redundancy-member";
+    const acts = !!role.hasShutdownActions && !member;
     const watched = !acts && !member;
     const tag = watched ? name + " (monitoring only)" : name;
     const charge = numOrNull(u.batteryCharge);

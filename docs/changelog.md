@@ -110,8 +110,9 @@ the dashboard, and self-tests that no longer look like outages.
     an amber note ("no action will be taken here"), never "Shutdown
     imminent". A fired trigger reads "Shutdown triggered — Lab: critical
     runtime (4m 40s now · fires below 5m 0s) → Shuts down this host and 1
-    remote server"; a running shutdown links to its live progress. Red
-    alerts are announced with `role="alert"`, and the browser tab title
+    remote server"; a running shutdown links to its live progress. A
+    redundancy member's own trigger or FSD stays amber and says the group
+    decides, even when its entry has local resources. Red alerts are announced with `role="alert"`, and the browser tab title
     follows the outage (`⚠ On battery · Lab 62%`, `⛔ Shutting down · Lab`).
   - While on battery the UPS view lists every armed trigger with its live
     value and ETA; fleet rows add time on battery and the next trigger. The
@@ -234,6 +235,24 @@ the dashboard, and self-tests that no longer look like outages.
 - Report accuracy: duplicate display labels include the UPS name, synthetic
   carry-in outages stay out of CSV, missing bounds no longer show 1970.
 - Dashboard event search matches raw identifiers like `SELF_TEST_ON_BATTERY`.
+- **A one-entry `ups:` list without `is_local` no longer reads "Notification
+  only".** The daemon powers the host off on a trigger in that setup, and the
+  notification, API role, dashboard, `eneru monitor` and `config check` now
+  say so.
+- `config check` and the editor's order page no longer promise a host poweroff
+  when a multi-UPS or redundancy config has `local_shutdown.enabled: false`.
+- While NUT polls fail on battery, the FAILSAFE row counts the failed polls
+  ("1 of 3 NUT polls failed") with an ETA instead of "connection OK"; `/api/v1/ups`
+  adds `connectionErrorCount`.
+- A single UPS plus a redundancy group: `eneru monitor` reads the daemon's
+  suffixed state/stats files, so it no longer shows a false "Quorum lost".
+- A late progress write can no longer overwrite a finished shutdown, which
+  left `eneru monitor` showing "Shutting down" forever.
+- `eneru monitor --once` strips terminal escape sequences from NUT, state-file,
+  progress and event text, and state/progress files are read only as regular
+  files, capped at 64 KiB.
+- A redundancy member's fired trigger is shown in amber as "Trigger met, group
+  decides", never as a red "Shutdown triggered": the group decides.
 
 ### Security
 

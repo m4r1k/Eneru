@@ -243,7 +243,7 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         steps=[{"label": "Final sync before halt"}] if final_on else []))
 
     # 7) Terminal step — coordinator handoff, or the local host poweroff.
-    handoff_on = False
+    handoff_on = po_on = False
     if coordinator_mode:
         # The coordinator performs the single host poweroff — a LOCAL-ownership
         # action, so by default only a local group shows the handoff: losing a
@@ -266,9 +266,13 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
             if handoff_on else []))
     else:
         ls = config.local_shutdown
-        # Host poweroff is a LOCAL-ownership action: gate it the same way as the
-        # other local drain phases (a non-local group never powers off this host).
-        po_skip = _local_skip(is_local, delegated, ls.enabled)
+        # Single-UPS runtime (``_execute_shutdown_sequence``): the poweroff is
+        # gated on ``local_shutdown.enabled and not delegated`` ONLY -- unlike
+        # the drain phases above, it does not look at ``is_local`` (F-178).
+        # ELI5: the drains ask "is this my kitchen?", the poweroff only asks
+        # "is the main switch enabled?"; the plan has to ask the same questions.
+        po_skip = ("delegated to host" if delegated
+                   else None if ls.enabled else "disabled")
         po_on = po_skip is None
         phases.append(_phase(
             "local-poweroff", "Local host poweroff", enabled=po_on,
@@ -282,6 +286,10 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         note = ("Container loopback mode: VM / container / filesystem / poweroff "
                 "actions run on the host via the host-loopback SSH target (see "
                 "Remote servers), not in-process.")
+    elif not is_local and not coordinator_mode and po_on:
+        note = ("Single-UPS mode without is_local: local VM / container / "
+                "filesystem phases are skipped, but this host still powers off "
+                "when a trigger fires.")
     elif not is_local and not (coordinator_mode and handoff_on):
         note = ("Non-local UPS group: only remote-server shutdown runs; local "
                 "VM / container / filesystem / poweroff phases belong to the host "

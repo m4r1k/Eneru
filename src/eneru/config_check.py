@@ -49,7 +49,10 @@ from eneru.config import (
     resolve_energy_config,
 )
 from eneru.mqtt import _redact_broker
-from eneru.utils import command_exists, format_seconds, is_numeric, run_command
+from eneru.utils import (
+    clean, command_exists, format_seconds, is_numeric, run_command,
+    runs_coordinator,
+)
 
 # Finding levels, most severe first.
 LEVEL_ERROR = "error"
@@ -147,19 +150,6 @@ def classify_message(message: str) -> str:
         if pattern.search(message):
             return section
     return "file"
-
-
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
-
-
-def clean(text: Any) -> str:
-    """Strip terminal escapes/control characters from EXTERNAL output.
-
-    Remote stderr or a NUT banner is printed to the operator's terminal; a
-    compromised target must not be able to repaint it.
-    """
-    text = _ANSI.sub("", str(text))
-    return "".join(ch if (ch.isprintable() or ch == " ") else " " for ch in text)
 
 
 def _strip_level(message: str) -> str:
@@ -1429,8 +1419,11 @@ def _group_config(config: Config, group: Any) -> Config:
 def _plan_for_group(config: Config, group: Any) -> Dict[str, Any]:
     from eneru.shutdown.plan import build_shutdown_plan
     is_ups = isinstance(group, UPSGroupConfig)
-    multi = config.multi_ups or bool(config.redundancy_groups)
-    is_local = group.is_local or (is_ups and not config.multi_ups)
+    multi = runs_coordinator(config)
+    # F-178: the runtime gates the drain phases on the group's own is_local
+    # (even in single-UPS mode); the plan gates the single-UPS poweroff on
+    # local_shutdown alone, so no is_local override is needed here.
+    is_local = group.is_local
     delegated = _runtime_ctx._uses_loopback_delegate(config, group)
     handoff = None
     if multi and is_ups:
@@ -1554,10 +1547,20 @@ def _local_steps(plan: Dict[str, Any]) -> List[str]:
     return steps
 
 
-def _final_title(plan: Dict[str, Any]) -> Optional[str]:
+def _coordinator_keeps_host_on(plan: Dict[str, Any], config: Config) -> bool:
+    """F-179: the group hands off, but the coordinator skips the poweroff
+    because ``local_shutdown.enabled`` is false (``multi_ups`` runtime)."""
+    final = next(p for p in plan["phases"] if p["id"] == "local-poweroff")
+    return bool(plan.get("coordinatorMode") and final["enabled"]
+                and not config.local_shutdown.enabled)
+
+
+def _final_title(plan: Dict[str, Any], config: Config) -> Optional[str]:
     by_id = {p["id"]: p for p in plan["phases"]}
     final = by_id["local-poweroff"]
     sync = "final sync, then " if by_id["final-sync"]["enabled"] else ""
+    if _coordinator_keeps_host_on(plan, config):
+        return f"{sync}report done to the coordinator (this host stays on)"
     if final["enabled"] and plan.get("coordinatorMode"):
         return (f"{sync}report done to the coordinator, which powers off "
                 "this host")
@@ -1640,7 +1643,7 @@ def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
         if rp["loopbackPost"]:
             add("loopback-poweroff", "this host powers off via the loopback "
                 "delegate", servers=rp["loopbackPost"])
-        final = _final_title(plan)
+        final = _final_title(plan, config)
         if final:
             add("final", final)
         if is_ups:
@@ -1653,7 +1656,8 @@ def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
             "group": group.ups.label if is_ups else (group.name or "(unnamed)"),
             "kind": kind, "index": counters[kind], "role": role,
             "note": plan.get("note"),
-            "hostStaysOn": _poweroff_skip(plan) == "disabled",
+            "hostStaysOn": (_poweroff_skip(plan) == "disabled"
+                            or _coordinator_keeps_host_on(plan, config)),
             "disabled": [s.name or s.host for s in group.remote_servers
                          if not s.enabled],
             "phases": phases})

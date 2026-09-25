@@ -33,11 +33,15 @@ from eneru.utils import (
     SEVERITY_CRIT,
     SEVERITY_OK,
     SEVERITY_WARN,
+    clean,
     format_age,
     format_seconds,
     humanize_event_type,
     is_numeric,
+    read_side_file,
+    runs_coordinator,
     status_summary,
+    ups_state_file_path,
 )
 
 
@@ -238,20 +242,19 @@ def stats_db_path_for(group: UPSGroupConfig, config: Config) -> Path:
     Mirrors the sanitisation in MultiUPSCoordinator and UPSGroupMonitor.
     """
     # ISS-039: reuse status.sanitize_name rather than re-implementing the chain.
-    sanitized = sanitize_name(group.ups.name) if config.multi_ups else "default"
+    sanitized = (sanitize_name(group.ups.name) if runs_coordinator(config)
+                 else "default")
     return Path(config.statistics.db_directory) / f"{sanitized}.db"
 
 
 def state_file_path_for(group: UPSGroupConfig, config: Config) -> Path:
     """Return the per-UPS state file path the daemon writes every poll.
 
-    Multi-UPS mode appends a sanitized suffix; single-UPS uses the bare
-    path. Used by both ``collect_group_data`` and ``update_live_buffer``.
+    Coordinator mode (multi-UPS, or any redundancy group -- F-181) appends a
+    sanitized suffix; single-UPS uses the bare path. Used by both
+    ``collect_group_data`` and ``update_live_buffer``.
     """
-    # ISS-039: reuse status.sanitize_name rather than re-implementing the chain.
-    if config.multi_ups:
-        return Path(config.logging.state_file + f".{sanitize_name(group.ups.name)}")
-    return Path(config.logging.state_file)
+    return Path(ups_state_file_path(config, group))
 
 
 # ---- Live-sample blending (spec 2.13) ----
@@ -406,7 +409,7 @@ def parse_state_file(path: Path) -> Optional[Dict[str, str]]:
     try:
         if not path.exists():
             return None
-        text = path.read_text().strip()
+        text = read_side_file(path).strip()
         if not text:
             return None
         data = {}
@@ -1339,8 +1342,10 @@ def ups_block_lines(data: Dict, now: float, width: int = 120) -> List[Line]:
             state.get("STATUS", ""), trigger_active=state.get("TRIGGER_ACTIVE") == "1",
             stale=fresh["stale"])
         trig = ol.get("triggerOutlook") or {}
-        acts = bool(role and (role.get("hasShutdownActions")
-                              or role.get("kind") == "redundancy-member"))
+        # F-184: a redundancy member never escalates on its own trigger --
+        # the group decides (its role has no own shutdown actions).
+        acts = bool(role and role.get("hasShutdownActions")
+                    and role.get("kind") != "redundancy-member")
         if (trig.get("firing") and acts and not fresh["stale"]
                 and not summary.get("blink")):
             # A trigger condition is met and this UPS really shuts something
@@ -2345,6 +2350,11 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
     progress, redundancy groups).
     """
     verbose = _events_verbosity(verbose)
+
+    def _emit(text: Any) -> None:
+        # F-183: state-file values, NUT status, sidecar reasons and event
+        # details are external text; never let them repaint the terminal.
+        print(clean(text))
     # length=0 means "no cap" -- pass None through to the query.
     events_cap = None if length == 0 else length
 
@@ -2359,17 +2369,17 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
                                       max_events=events_cap)
         if events:
             for line in events:
-                print(line)
+                _emit(line)
         else:
-            print(_no_events_message(verbose))
+            _emit(_no_events_message(verbose))
         return
 
     now = time.time()
-    print(f"Eneru v{__version__}")
+    _emit(f"Eneru v{__version__}")
     group_count = len(config.ups_groups)
     if group_count > 1:
-        print(f"Mode: multi-UPS ({group_count} groups)")
-    print(f"Time: {datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S')}")
+        _emit(f"Mode: multi-UPS ({group_count} groups)")
+    _emit(f"Time: {datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
     groups_data = [collect_group_data(g, config, now) for g in config.ups_groups]
@@ -2380,14 +2390,14 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
         if state.get("STATUS") and lines and lines[0].badge:
             text[0] += f" ({state['STATUS']})"
         for row in text:
-            print(row)
+            _emit(row)
         if i < group_count - 1:
             print()
 
     for rg in collect_redundancy_data(config, groups_data, now):
         print()
         for row in _once_text(redundancy_block_lines(rg, now, width)):
-            print(row)
+            _emit(row)
 
     # Snapshot path: same flag semantics as the events-only branch above.
     # --verbose increments enabled tiers; --length caps the row count.
@@ -2401,14 +2411,14 @@ def run_once(config: Config, *, graph_metric: Optional[str] = None,
                                   max_events=snapshot_cap)
     if events:
         print()
-        print("Recent Events:")
+        _emit("Recent Events:")
         for event in events:
-            print(f"  {event}")
+            _emit(f"  {event}")
 
     if graph_metric:
         for group in config.ups_groups:
             print()
-            print(f"Graph: {group.ups.label}")
+            _emit(f"Graph: {group.ups.label}")
             for line in render_graph_text(config, group, graph_metric,
                                           time_range):
-                print(line)
+                _emit(line)

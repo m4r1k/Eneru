@@ -356,8 +356,10 @@ class TestTriggerChips:
 class TestOutlookLines:
     """End to end from real state files through outlook.state_file_outlook."""
 
-    def _data(self, tmp_path, state, *, remotes=1, local=True, now=NOW):
+    def _data(self, tmp_path, state, *, remotes=1, local=True, now=NOW,
+              local_shutdown=True):
         config = _config(tmp_path, remotes=remotes, local=(local,))
+        config.local_shutdown.enabled = local_shutdown
         _write_state(tmp_path / "ups.state", state)
         return tui.collect_group_data(config.ups_groups[0], config, now)
 
@@ -398,7 +400,10 @@ class TestOutlookLines:
     def test_monitor_only_ups_never_says_shutdown(self, tmp_path):
         """H1 parity: nothing is shut down here, so no red blinking badge."""
         state = _state("OB DISCHRG LB", BATTERY=10, RUNTIME=100, TIME_ON_BATTERY=610)
-        data = self._data(tmp_path, state, remotes=0, local=False)
+        # F-178: single-UPS mode powers the host off unless local_shutdown
+        # is disabled, whatever is_local says; this UPS really does nothing.
+        data = self._data(tmp_path, state, remotes=0, local=False,
+                          local_shutdown=False)
         lines = tui.ups_block_lines(data, NOW, 80)
         assert lines[0].badge[0] == "LOW BATTERY"
         assert lines[0].badge[2] is False
@@ -885,3 +890,124 @@ class TestRunTuiUx:
         assert "<?>" in rows[-1]
         # Nothing painted past the right edge.
         assert all(len(r) == 80 for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Release-review cycle 3 (F-181, F-183, F-184, F-187)
+# ---------------------------------------------------------------------------
+
+class TestCycle3:
+
+    @pytest.mark.unit
+    def test_single_ups_with_redundancy_group_reads_suffixed_paths(self, tmp_path):
+        """F-181: one UPS + a redundancy group runs the coordinator, which
+        writes suffixed paths; the TUI must read those, not the bare path."""
+        rg = RedundancyGroupConfig(name="rack", ups_sources=["ups-a@h"],
+                                   min_healthy=1)
+        config = _config(tmp_path, redundancy=[rg], local=(False,))
+        config.local_shutdown.trigger_on = "none"
+        assert not config.multi_ups
+        group = config.ups_groups[0]
+        path = tui.state_file_path_for(group, config)
+        assert path.name == "ups.state.ups-a-h"
+        assert tui.stats_db_path_for(group, config).name == "ups-a-h.db"
+        _write_state(path, _state(epoch=time.time() - 1))
+        data = tui.collect_group_data(group, config)
+        assert data["outlook"]["statusSummary"]["label"] == "On mains"
+        # Coordinator semantics (trigger_on: none): a non-local UPS never
+        # powers the host off; single-UPS semantics would say it does.
+        assert data["outlook"]["role"]["shutsDownLocalHost"] is False
+        [red] = tui.collect_redundancy_data(config, [data])
+        assert red["outlook"]["state"] != "quorum-lost"
+        assert red["quorumLost"] is False
+        # Single-UPS without redundancy keeps the bare path and default.db.
+        plain = _config(tmp_path)
+        assert tui.state_file_path_for(plain.ups_groups[0], plain).name == "ups.state"
+        assert tui.stats_db_path_for(plain.ups_groups[0], plain).name == "default.db"
+
+    @pytest.mark.unit
+    def test_member_trigger_never_blinks_red(self, tmp_path):
+        """F-184: a member's fired trigger is a vote; the group decides."""
+        rg = RedundancyGroupConfig(name="rack", ups_sources=["ups-a@h", "ups-b@h"],
+                                   min_healthy=1)
+        config = _config(tmp_path, ("ups-a@h", "ups-b@h"), local=(True, False),
+                         redundancy=[rg], remotes=1)
+        state = _state("OB DISCHRG", epoch=NOW - 1, BATTERY=10, RUNTIME=100,
+                       TIME_ON_BATTERY=610, TRIGGER_ACTIVE=1,
+                       TRIGGER_REASON="Battery low")
+        _write_state(Path(config.logging.state_file + ".ups-a-h"), state)
+        data = tui.collect_group_data(config.ups_groups[0], config, NOW)
+        assert data["outlook"]["role"]["kind"] == "redundancy-member"
+        lines = tui.ups_block_lines(data, NOW, 80)
+        assert lines[0].badge == ("TRIGGER MET, GROUP DECIDES", SEVERITY_WARN,
+                                  False)
+
+    @pytest.mark.unit
+    def test_stale_fired_trigger_is_not_dressed_as_live(self, tmp_path):
+        """F-187 (T04): old data whose trigger had fired shows STALE, not a
+        red blinking SHUTDOWN TRIGGERED."""
+        state = _state("OB DISCHRG", epoch=NOW - 600, BATTERY=10, RUNTIME=100,
+                       TIME_ON_BATTERY=610)
+        config = _config(tmp_path, remotes=1)
+        _write_state(tmp_path / "ups.state", state)
+        data = tui.collect_group_data(config.ups_groups[0], config, NOW)
+        assert data["outlook"]["triggerOutlook"]["firing"]
+        assert data["outlook"]["role"]["hasShutdownActions"] is True
+        badge = tui.ups_block_lines(data, NOW, 80)[0].badge
+        assert badge == ("STALE 10m", SEVERITY_WARN, False)
+
+    @pytest.mark.unit
+    def test_self_test_latch_does_not_open_db_on_mains(self, tmp_path):
+        """F-187 (T11): the stats DB is opened only while on battery."""
+        config = _config(tmp_path)
+        with patch.object(tui.StatsStore, "open_readonly",
+                          return_value=None) as opener:
+            assert tui._self_test_armed(config.ups_groups[0], config,
+                                        {"STATUS": "OL CHRG"}) is False
+            opener.assert_not_called()
+            tui._self_test_armed(config.ups_groups[0], config, {"STATUS": "OB"})
+            opener.assert_called_once()
+
+    @pytest.mark.unit
+    def test_once_strips_terminal_escapes(self, tmp_path, capsys):
+        """F-183: NUT status, state-file text, the sidecar reason and event
+        details are external text; --once must not pass escapes through."""
+        evil = "\x1b]0;PWNED\x07\x1b[2J"
+        config = _config(tmp_path)
+        _write_state(tmp_path / "ups.state",
+                     _state(f"OB {evil}", epoch=time.time() - 1,
+                            TRIGGER_ACTIVE=1,
+                            TRIGGER_REASON=f"low\x1b[31m{evil}"))
+        Path(str(tmp_path / "ups.state") + ".shutdown-progress.json").write_text(
+            json.dumps(_progress(reason=f"why{evil}", writtenAt=time.time())))
+        store = StatsStore(tui.stats_db_path_for(config.ups_groups[0], config))
+        store.open()
+        store.log_event("ON_BATTERY", f"detail{evil}", ts=int(time.time()) - 5)
+        store.close()
+        tui.run_once(config)
+        out = capsys.readouterr().out
+        assert "\x1b" not in out and "\x07" not in out
+        assert "Trigger: low" in out and "PWNED" in out
+        tui.run_once(config, events_only=True)
+        out = capsys.readouterr().out
+        assert "\x1b" not in out and "detail" in out
+
+    @pytest.mark.unit
+    def test_side_file_reads_are_bounded(self, tmp_path):
+        """F-183: a symlink (e.g. to /dev/zero) or a FIFO is refused, and a
+        huge regular file is read only up to the cap."""
+        from eneru.outlook import _read_state_file
+        from eneru.shutdown.progress import read_progress_sidecar
+        from eneru.utils import SIDE_FILE_MAX_BYTES, read_side_file
+        link = tmp_path / "state"
+        link.symlink_to("/dev/zero")
+        assert tui.parse_state_file(link) is None
+        assert _read_state_file(link) is None
+        assert read_progress_sidecar(link) is None
+        fifo = tmp_path / "fifo"
+        os.mkfifo(fifo)
+        assert tui.parse_state_file(fifo) is None
+        big = tmp_path / "big"
+        big.write_text("STATUS=OL\n" + "X" * (SIDE_FILE_MAX_BYTES * 2))
+        assert len(read_side_file(big)) == SIDE_FILE_MAX_BYTES
+        assert tui.parse_state_file(big) == {"STATUS": "OL"}

@@ -98,6 +98,9 @@ sudo eneru monitor --once --config /etc/ups-monitor/config.yaml
 The snapshot prints the same lines as the live panel. The header ends with the
 badge and the raw NUT tokens, for example `--  ON BATTERY (OB DISCHRG)`, and
 readings the UPS does not report are left out.
+Terminal escape sequences and control characters in NUT, state-file, progress
+or event text are stripped, so a rogue `upsd` or a writable state directory
+can't repaint the terminal.
 
 Render a graph without opening curses (the last line states the y-axis scale
 and now/min/max):

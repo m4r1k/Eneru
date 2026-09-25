@@ -271,3 +271,260 @@ def test_dashboard_v62_surfaces(minimal_config):
     assert "prefers-reduced-motion" in css
     # H2: the fleet-row name column has a floor on a phone.
     assert "grid-template-columns: minmax(5.5rem, 1fr) auto;" in css
+
+
+# ---------------------------------------------------------------------------
+# F-184 / F-186 (release-review cycle 3): pin every banner branch, the
+# client-side freshness math, the next-trigger line and the old-daemon role
+# fallback, so a changed priority or wording fails here instead of shipping.
+# ---------------------------------------------------------------------------
+
+CONN_CRIT = {"state": "connection_lost", "label": "Connection lost", "severity": "crit",
+             "blink": False, "detail": ""}
+CONN_WARN = dict(CONN_CRIT, severity="warn")
+STALE = {"state": "stale", "label": "Stale data", "severity": "warn", "blink": False,
+         "detail": ""}
+# A member whose own UPS entry has local resources (is_local: true): the
+# plan says it "acts", but the group decides (F-184).
+ROLE_MEMBER_ACTS = dict(ROLE_MEMBER, hasShutdownActions=True, shutsDownLocalHost=True)
+
+
+def _banner_cases():
+    near = [_trigger("criticalRuntime", "Critical runtime", "ok", eta=121,
+                     cond="runtime < 5m 0s")]
+    fired = [_trigger("lowBattery", "Low battery", "fired", eta=0,
+                      cond="charge < 20%", text="12% now")]
+    lab_ob = _row("Lab", "OB DISCHRG", role=ROLE_LOCAL, summary=OB, triggers=near,
+                  tob_text="3m 0s")
+    watched_ob = _row("APC", "OB DISCHRG", role=ROLE_MONITOR, summary=OB,
+                      tob_text="3m 0s")
+    stale = dict(_row("Lab", "OL", role=ROLE_LOCAL, summary=STALE),
+                 freshness={"ageSeconds": 120, "stale": True, "lastPollAt": 1})
+    member_trig = _row("UPS2", "OB LB", role=ROLE_MEMBER_ACTS, summary=TRIG,
+                       triggers=fired, trigger_active=True)
+    return {
+        "connCrit": [_row("Lab", "OB", role=ROLE_LOCAL, summary=CONN_CRIT), watched_ob],
+        "connWarn": [_row("Lab", "OL", role=ROLE_LOCAL, summary=CONN_WARN)],
+        "connWarnVsWatched": [_row("Lab", "OL", role=ROLE_LOCAL, summary=CONN_WARN),
+                              watched_ob],
+        "memberConn": [_row("UPS2", "OB", role=ROLE_MEMBER_ACTS, summary=CONN_CRIT)],
+        "staleAlone": [stale],
+        "staleVsOb": [stale, lab_ob],
+        "memberOb": [_row("UPS2", "OB", role=ROLE_MEMBER, summary=OB, triggers=near,
+                          tob_text="1m 0s")],
+        "memberLb": [_row("UPS2", "OB LB", role=ROLE_MEMBER, summary=LB, charge="9")],
+        "memberActsLb": [_row("UPS2", "OB LB", role=ROLE_MEMBER_ACTS, summary=LB,
+                              charge="9")],
+        "memberActsTrig": [member_trig],
+        "memberActsFsd": [_row("UPS2", "OB FSD", role=ROLE_MEMBER_ACTS, summary=FSD)],
+        "quorum": [member_trig],
+        "atRiskNoFailing": [],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_banner_branch_priorities(minimal_config):
+    """Every bannerModel branch: exact text, severity and rank (F-184/F-186)."""
+    body = "const cases = " + json.dumps(_banner_cases()) + ";\n" + """
+        const quorum = {name: "rack-a", upsSources: ["UPS1", "UPS2"],
+          outlook: {state: "quorum-lost", severity: "crit",
+                    label: "Quorum lost → group shutdown runs",
+                    action: "Shuts down 2 remote servers"}};
+        const atRisk = {name: "rack-a", upsSources: ["UPS1", "UPS2"], failingMembers: [],
+          outlook: {state: "at-risk", severity: "warn",
+                    label: "1 more failure → group shutdown", action: ""}};
+        const groups = {quorum: [quorum], atRiskNoFailing: [atRisk]};
+        const out = {};
+        for (const k of Object.keys(cases)) {
+          const m = bannerModel(cases[k], groups[k] || []);
+          out[k] = m && {prio: m.prio, severity: m.severity, text: m.text,
+                         progress: m.progress, more: m.more};
+        }
+        process.stdout.write(JSON.stringify(out));
+    """
+    out = _run(minimal_config, body)
+    # Losing NUT on battery is the failsafe path: it outranks a watched outage.
+    assert out["connCrit"] == {
+        "prio": 75, "severity": "crit", "progress": False, "more": 1,
+        "text": "Connection lost — Lab was on battery: failsafe shutdown applies"}
+    # On mains it is a quiet amber note, below any real outage.
+    assert out["connWarn"]["prio"] == 15 and out["connWarn"]["severity"] == "warn"
+    assert out["connWarn"]["text"] == "Connection lost — Lab: no fresh readings"
+    assert out["connWarnVsWatched"]["text"].startswith("On battery — APC (monitoring only)")
+    # A member never claims the failsafe: the group decides.
+    assert out["memberConn"]["text"] == "Connection lost — UPS2 was on battery"
+    assert out["staleAlone"] == {"prio": 10, "severity": "warn", "progress": False,
+                                 "more": 0,
+                                 "text": "Stale data — Lab: last reading 2m ago"}
+    assert out["staleVsOb"]["text"] == (
+        "On battery — Lab for 3m 0s. Shutdown in ≈2m 1s (runtime < 5m 0s)")
+    assert out["staleVsOb"]["prio"] == 50
+    # A member on battery is not "monitoring only": it counts for its group.
+    assert out["memberOb"]["prio"] == 35
+    assert out["memberOb"]["text"] == (
+        "On battery — UPS2 for 1m 0s. Counts as failed for its group in ≈2m 1s"
+        " (runtime < 5m 0s)")
+    assert out["memberLb"]["severity"] == "warn" and out["memberLb"]["prio"] == 70
+    # F-184: local resources on the member's entry do not override the group.
+    assert out["memberActsLb"]["severity"] == "warn"
+    assert out["memberActsTrig"] == {
+        "prio": 45, "severity": "warn", "progress": False, "more": 0,
+        "text": "UPS2 is critical for redundancy group rack-a: low battery (12% now)"
+                " — the group decides"}
+    assert out["memberActsFsd"] == {
+        "prio": 45, "severity": "warn", "progress": False, "more": 0,
+        "text": "UPS2 signals a forced shutdown (FSD) — redundancy group rack-a decides"}
+    # The group's verdict outranks its members' own alarms.
+    assert out["quorum"]["prio"] == 90 and out["quorum"]["severity"] == "crit"
+    assert out["quorum"]["text"] == (
+        "Quorum lost — redundancy group rack-a: group shutdown runs"
+        " (Shuts down 2 remote servers)")
+    assert out["quorum"]["more"] == 1
+    # "At risk" with every member healthy is a sizing fact, not an alarm.
+    assert out["atRiskNoFailing"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_client_freshness_math(minimal_config):
+    """dataAgeSeconds keeps counting while the daemon is silent; dataIsStale
+    trusts only a polled stale flag and falls back to 30 s (F-186)."""
+    body = """
+        Date.now = () => 1e12;
+        const out = {
+          neverPolled: dataIsStale({freshness: {stale: true, lastPollAt: null,
+                                                ageSeconds: 5, staleAfterSeconds: 30}}),
+          polledStale: dataIsStale({freshness: {stale: true, lastPollAt: 7,
+                                                ageSeconds: 5, staleAfterSeconds: 30}}),
+          fallback30: dataIsStale({freshness: {ageSeconds: 60}}),
+          fresh30: dataIsStale({freshness: {ageSeconds: 20}}),
+          customWindow: dataIsStale({freshness: {ageSeconds: 60, staleAfterSeconds: 90}}),
+          noData: [dataAgeSeconds({}), dataIsStale({})],
+        };
+        lastGoodFetchAt = 1e12 - 100000;   // the daemon went quiet 100 s ago
+        out.silentAge = dataAgeSeconds({freshness: {ageSeconds: 5}});
+        out.silentStale = dataIsStale({freshness: {ageSeconds: 5, staleAfterSeconds: 30}});
+        lastGeneratedAt = 1000;
+        out.legacyAge = dataAgeSeconds({lastUpdateTime: 940});
+        process.stdout.write(JSON.stringify(out));
+    """
+    out = _run(minimal_config, body)
+    assert out["neverPolled"] is False
+    assert out["polledStale"] is True
+    assert out["fallback30"] is True and out["fresh30"] is False
+    assert out["customWindow"] is False
+    assert out["noData"] == [None, False]
+    assert out["silentAge"] == 105
+    assert out["silentStale"] is True
+    assert out["legacyAge"] == 160
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_outlook_line_states(minimal_config):
+    """outlookLine: fired leads, held wording, disabled skipped, monitor-only
+    silent, member verb; heroOutlook severity follows the role (F-184/F-186)."""
+    disabled = dict(_trigger("extendedTime", "Time on battery", "ok", eta=10,
+                             cond="on battery > 5m 0s"), enabled=False)
+    rows = {
+        "fired": _row("Lab", "OB", role=ROLE_LOCAL, summary=TRIG, triggers=[
+            _trigger("criticalRuntime", "Critical runtime", "ok", eta=10,
+                     cond="runtime < 5m 0s"),
+            _trigger("lowBattery", "Low battery", "fired", cond="charge < 20%")]),
+        "held": _row("Lab", "OB", role=ROLE_LOCAL, summary=OB, triggers=[
+            _trigger("lowBattery", "Low battery", "held", eta=30, cond="charge < 20%")]),
+        "disabled": _row("Lab", "OB", role=ROLE_LOCAL, summary=OB, triggers=[
+            disabled, _trigger("criticalRuntime", "Critical runtime", "ok", eta=100,
+                               cond="runtime < 5m 0s")]),
+        "noEta": _row("Lab", "OB", role=ROLE_LOCAL, summary=OB, triggers=[
+            _trigger("depletionRate", "Fast battery drain", "ok",
+                     cond="drain > 15%/min")]),
+        "monitor": _row("APC", "OB", role=ROLE_MONITOR, summary=OB, triggers=[
+            _trigger("criticalRuntime", "Critical runtime", "ok", eta=100,
+                     cond="runtime < 5m 0s")]),
+        "member": _row("UPS2", "OB", role=ROLE_MEMBER_ACTS, summary=TRIG, triggers=[
+            _trigger("lowBattery", "Low battery", "fired", cond="charge < 20%")]),
+    }
+    body = "const rows = " + json.dumps(rows) + ";\n" + """
+        document.createElement = (tag) => ({tag, className: "", textContent: "",
+          children: [], setAttribute() {}, appendChild(c) { this.children.push(c); }});
+        const out = {};
+        for (const k of Object.keys(rows)) out[k] = outlookLine(rows[k]);
+        out.heroLocal = heroOutlook(rows.fired).className;
+        out.heroMember = heroOutlook(rows.member).className;
+        out.heroMonitor = heroOutlook(rows.monitor).className;
+        process.stdout.write(JSON.stringify(out));
+    """
+    out = _run(minimal_config, body)
+    assert out["fired"] == "Shutdown now: charge < 20%"
+    assert out["held"] == "Shutdown after stabilization, in ≈30s (charge < 20%)"
+    assert out["disabled"] == "Shutdown in ≈1m 40s (runtime < 5m 0s)"
+    assert out["noEta"] == "Shutdown when drain > 15%/min"
+    assert out["monitor"] is None
+    assert out["member"] == "Counts as failed for its group now: charge < 20%"
+    assert out["heroLocal"] == "hero-outlook s-crit"
+    assert out["heroMember"] == "hero-outlook s-warn"
+    assert out["heroMonitor"] == "hero-outlook s-muted"
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_old_daemon_role_fallback(minimal_config):
+    """A pre-6.2 row (no role, no isLocal) powers this host, like the loader's
+    default; an explicit isLocal:false without remotes only watches."""
+    body = """
+        const out = {
+          unset: upsRole({name: "x"}).kind,
+          explicit: upsRole({name: "x", isLocal: true}).kind,
+          off: upsRole({name: "x", isLocal: false}).kind,
+          action: actionLabel({name: "x"}),
+        };
+        lastGroups = [{name: "rack-a", upsSources: ["m"]}];
+        out.member = upsRole({name: "m"});
+        process.stdout.write(JSON.stringify(out));
+    """
+    out = _run(minimal_config, body)
+    assert out["unset"] == "local" and out["explicit"] == "local"
+    assert out["off"] == "monitor-only"
+    assert out["action"] == "Shuts down this host"
+    assert out["member"]["kind"] == "redundancy-member"
+    assert out["member"]["label"] == "Redundancy member (rack-a)"
+    assert out["member"]["hasShutdownActions"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_fleet_rows_keep_redundancy_group_names(minimal_config, tmp_path):
+    """A08: /api/v1/ups rows built by collect_status name their group, and the
+    dashboard shows that name instead of "its redundancy group"."""
+    from unittest.mock import MagicMock
+
+    from eneru import MonitorState, UPSGroupMonitor
+    from eneru.config import RedundancyGroupConfig
+    from eneru.status import collect_status
+
+    minimal_config.logging.battery_history_file = str(tmp_path / "bh")
+    minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+    minimal_config.logging.state_file = str(tmp_path / "state")
+    minimal_config.redundancy_groups = [RedundancyGroupConfig(
+        name="rack-a", ups_sources=["TestUPS@localhost", "Other@h"])]
+    monitor = UPSGroupMonitor(minimal_config)
+    monitor.state = MonitorState()
+    monitor.logger = MagicMock()
+    monitor._in_redundancy_group = True
+    source = MagicMock()
+    source.config = minimal_config
+    source._monitors = [monitor]
+    source._redundancy_remote_health_managers = []
+    row = collect_status(source)["ups"][0]
+    assert row["role"]["kind"] == "redundancy-member"
+    assert row["role"]["redundancyGroups"] == ["rack-a"]
+    body = "const row = " + json.dumps(row) + ";\n" + """
+        process.stdout.write(JSON.stringify({role: upsRole(row).label,
+                                             action: actionLabel(row)}));
+    """
+    out = _run(minimal_config, body)
+    assert out["role"] == "Redundancy member (rack-a)"
+    assert out["action"] == (
+        "Marks this UPS critical for redundancy group rack-a (group decides) (dry-run)")

@@ -1098,6 +1098,49 @@ class TestOrderTree:
         assert "Nothing to shut down" in "\n".join(
             cc.format_order_tree([group]))
 
+    def test_coordinator_with_local_shutdown_disabled_keeps_host_on(self, env):
+        """F-179: the coordinator skips the poweroff when local_shutdown is
+        off (multi_ups.py), so the tree must not promise one."""
+        cfg = build({"ups": [{"name": "a@h", "is_local": True},
+                             {"name": "b@h"}],
+                     "local_shutdown": {"enabled": False},
+                     "filesystems": {"sync_enabled": True}})
+        local, other = cc.shutdown_order_tree(cfg)
+        assert local["phases"][-1]["title"] == (
+            "final sync, then report done to the coordinator "
+            "(this host stays on)")
+        assert local["hostStaysOn"] is True
+        text = "\n".join(cc.format_order_tree([local]))
+        assert "which powers off this host" not in text
+        assert "This host stays on (local_shutdown.enabled: false)." in text
+        # K05: a non-local (monitoring-only) group's skipped poweroff is not
+        # "local_shutdown disabled" -- no stays-on line for it.
+        assert other["hostStaysOn"] is False
+        on = build({"ups": [{"name": "a@h", "is_local": True},
+                            {"name": "b@h"}]})
+        local_on, other_on = cc.shutdown_order_tree(on)
+        assert local_on["hostStaysOn"] is False
+        assert other_on["hostStaysOn"] is False
+        assert "which powers off this host" in local_on["phases"][-1]["title"]
+
+    def test_single_ups_list_without_is_local_matches_runtime(self, env):
+        """F-178: a one-entry ``ups:`` list with no is_local runs no local
+        drains (runtime gates them on is_local) but still powers the host
+        off (gated on local_shutdown only). The tree and the API plan agree."""
+        from eneru.shutdown.plan import build_shutdown_plan
+        cfg = build({"ups": [{"name": "u@h"}],
+                     "virtual_machines": {"enabled": True},
+                     "filesystems": {"sync_enabled": True}})
+        assert not cfg.multi_ups and cfg.ups_groups[0].is_local is False
+        (group,) = cc.shutdown_order_tree(cfg)
+        assert [p["kind"] for p in group["phases"]] == ["final"]
+        assert group["phases"][0]["title"] == (
+            "this host powers off: shutdown -h now")
+        api = build_shutdown_plan(cfg, is_local=False)
+        tree_plan = cc._plan_for_group(cfg, cfg.ups_groups[0])
+        assert ([(p["id"], p["enabled"]) for p in api["phases"]]
+                == [(p["id"], p["enabled"]) for p in tree_plan["phases"]])
+
     def test_format_report_section(self, env):
         report = cc.CheckReport(order=["UPS x", "  Phase 1: \x1b[2Jevil"])
         text = cc.format_report(report)

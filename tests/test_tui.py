@@ -2697,7 +2697,7 @@ class TestParseStateFileException:
         # Patch Path.read_text to raise so the except branch fires.
         bad = tmp_path / "state"
         bad.write_text("BATTERY=85\n")
-        with patch("eneru.tui.Path.read_text",
+        with patch("eneru.tui.read_side_file",
                    side_effect=PermissionError("nope")):
             assert parse_state_file(bad) is None
 

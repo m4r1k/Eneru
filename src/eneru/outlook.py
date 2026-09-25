@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from eneru.health_model import UPSHealth, assess_health
+from eneru.health_model import RETRY_WAIT_SECONDS, UPSHealth, assess_health
 from eneru.redundancy import effective_redundancy_health
 from eneru.shutdown.progress import progress_sidecar_path, read_progress_sidecar
 from eneru.state import HealthSnapshot
@@ -39,9 +39,12 @@ from eneru.utils import (
     SEVERITY_WARN,
     format_seconds,
     is_numeric,
+    read_side_file,
+    runs_coordinator,
     sanitize_name,
     status_has_token,
     status_summary,
+    ups_state_file_path,
 )
 
 __all__ = [
@@ -209,12 +212,19 @@ def describe_trigger_conditions(triggers: Any, *,
 def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
                       runtime: Any, depletion_rate: Any = 0.0,
                       time_on_battery: Any = 0, connection_state: str = "OK",
-                      self_test_failure_armed: bool = False) -> Dict[str, Any]:
+                      self_test_failure_armed: bool = False,
+                      failed_polls: Any = 0,
+                      failed_poll_tolerance: Any = 3) -> Dict[str, Any]:
     """Every configured trigger's live state, closest first-to-fire, summary.
 
     Pure. See the module docstring and ``docs/observability-api.md`` for the
     returned shape. Comparison rules mirror ``_handle_on_battery`` (T1-T5) and
     ``_main_loop`` (FSD, FAILSAFE) exactly.
+
+    ``failed_polls`` is the monitor's consecutive failed/stale NUT polls and
+    ``failed_poll_tolerance`` its ``max_stale_data_tolerance``: FAILSAFE fires
+    on the tolerance-th failure while on battery, so while the count climbs the
+    row says how many polls are left and gets a clock ETA (F-180).
     """
     on_battery = status_has_token(status, "OB")
     tob = max(0, _int_or(time_on_battery, 0)) if on_battery else 0
@@ -237,14 +247,26 @@ def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
 
     # FAILSAFE: NUT lost (after the stale/connection tolerance) while OB.
     failsafe = on_battery and str(connection_state).upper() == "FAILED"
+    failed = max(0, _int_or(failed_polls, 0))
+    tolerance = max(1, _int_or(failed_poll_tolerance, 3))
+    counting = on_battery and not failsafe and failed > 0
+    if failsafe:
+        fs_eta, fs_text = 0.0, "connection lost while on battery"
+    elif counting:
+        # One retry wait per remaining failed poll (a floor: a hung upsc adds
+        # its own timeout on top).
+        fs_eta = float(max(0, tolerance - failed) * RETRY_WAIT_SECONDS)
+        fs_text = (f"{failed} of {tolerance} NUT polls failed · fires at "
+                   f"{tolerance}")
+    else:
+        fs_eta, fs_text = None, "connection OK"
     rows.append(_trigger(
         "failsafe",
         state="fired" if failsafe else ("ok" if on_battery else "idle"),
         comparison="flag", value=failsafe, threshold=None, unit="",
-        eta=0 if failsafe else None, eta_basis="clock" if failsafe else None,
+        eta=fs_eta, eta_basis="clock" if fs_eta is not None else None,
         condition="connection to NUT lost while on battery",
-        text=("connection lost while on battery" if failsafe
-              else "connection OK")))
+        text=fs_text))
 
     def _held_state(met: bool) -> str:
         if not on_battery:
@@ -433,6 +455,9 @@ def ups_role(config: Any, group: Any, *, redundancy_groups: Sequence[str] = (),
                             "filesystem-unmount"}) or (delegated and loopback)
     names = [str(n) for n in redundancy_groups]
     member = bool(names) if in_redundancy is None else bool(in_redundancy)
+    # F-184: a member's own triggers are advisory; its UPS never runs its own
+    # sequence (the redundancy evaluator does), so its role says "no own
+    # actions" whatever resources the entry lists. The group decides.
     if member:
         kind = "redundancy-member"
         label = ("Redundancy member (" + ", ".join(names) + ")"
@@ -449,10 +474,28 @@ def ups_role(config: Any, group: Any, *, redundancy_groups: Sequence[str] = (),
         "shutsDownLocalHost": host,
         "localDrain": drain,
         "remoteServers": regular,
-        "hasShutdownActions": bool(enabled),
+        "hasShutdownActions": bool(enabled) and not member,
         "redundancyGroups": names,
         "dryRun": bool(getattr(getattr(config, "behavior", None), "dry_run", False)),
     }
+
+
+def member_status_summary(summary: Dict[str, Any],
+                          role: Optional[Dict[str, Any]], *,
+                          running: bool = False) -> Dict[str, Any]:
+    """F-184: for a redundancy member, a fired trigger (or the UPS's FSD
+    flag) is a vote, and the group decides. Keep the state, drop it to amber
+    without blinking, and say so. A shutdown really ``running`` is shown as
+    is."""
+    if not role or role.get("kind") != "redundancy-member" or running:
+        return summary
+    if summary.get("state") not in ("trigger_active", "shutting_down"):
+        return summary
+    out = dict(summary)
+    out.update({"label": "Trigger met, group decides",
+                "severity": SEVERITY_WARN, "blink": False,
+                "groupDecides": True})
+    return out
 
 
 def _servers_text(count: int) -> str:
@@ -546,7 +589,11 @@ def monitor_outlook(monitor: Any, source_config: Any = None) -> Dict[str, Any]:
         battery_charge=snap.battery_charge, runtime=snap.runtime,
         depletion_rate=snap.depletion_rate, time_on_battery=tob,
         connection_state=snap.connection_state,
-        self_test_failure_armed=_monitor_self_test_armed(monitor))
+        self_test_failure_armed=_monitor_self_test_armed(monitor),
+        failed_polls=max(_int_or(getattr(snap, "stale_data_count", 0), 0),
+                         _int_or(getattr(monitor.state,
+                                         "connection_error_count", 0), 0)),
+        failed_poll_tolerance=getattr(config.ups, "max_stale_data_tolerance", 3))
     role = monitor_role(monitor, source_config)
     outlook["action"] = trigger_action(role)
     tracker = getattr(monitor, "_shutdown_progress", None)
@@ -556,10 +603,11 @@ def monitor_outlook(monitor: Any, source_config: Any = None) -> Dict[str, Any]:
             running = tracker.snapshot().get("state") == "running"
         except Exception:
             running = False
-    summary = status_summary(
+    summary = member_status_summary(status_summary(
         snap.status, trigger_active=bool(snap.trigger_active),
         shutting_down=running, connection_state=snap.connection_state,
-        stale=bool(fresh["stale"] and snap.last_update_time))
+        stale=bool(fresh["stale"] and snap.last_update_time)), role,
+        running=running)
     return {"triggerOutlook": outlook, "nextTrigger": outlook["next"],
             "role": role, "freshness": fresh, "statusSummary": summary}
 
@@ -701,9 +749,7 @@ def _group_scoped_config(config: Any, group: Any) -> Any:
 
 
 def _state_file_path(config: Any, group: Any) -> Path:
-    if config.multi_ups:
-        return Path(config.logging.state_file + f".{sanitize_name(group.ups.name)}")
-    return Path(config.logging.state_file)
+    return Path(ups_state_file_path(config, group))
 
 
 def state_file_outlook(config: Any, group: Any,
@@ -739,18 +785,20 @@ def state_file_outlook(config: Any, group: Any,
         and not any(g.is_local for g in config.ups_groups))
     from eneru.runtime import _uses_loopback_delegate
     scoped = _group_scoped_config(config, group)
+    coordinated = runs_coordinator(config)
     role = ups_role(
         scoped, group, redundancy_groups=names,
-        coordinator_mode=bool(config.multi_ups),
-        coordinator_handoff=handoff if config.multi_ups else None,
+        coordinator_mode=coordinated,
+        coordinator_handoff=handoff if coordinated else None,
         delegated=bool(_uses_loopback_delegate(scoped, group)))
     outlook["action"] = trigger_action(role)
     progress = read_progress_sidecar(
         progress_sidecar_path(_state_file_path(config, group)))
     running = bool(progress and progress.get("state") == "running")
-    summary = status_summary(
+    summary = member_status_summary(status_summary(
         status, trigger_active=state.get("TRIGGER_ACTIVE") == "1",
-        shutting_down=running, stale=bool(fresh["stale"] and state))
+        shutting_down=running, stale=bool(fresh["stale"] and state)), role,
+        running=running)
     return {"triggerOutlook": outlook, "nextTrigger": outlook["next"],
             "role": role, "freshness": fresh, "statusSummary": summary,
             "shutdownProgress": progress}
@@ -822,7 +870,7 @@ def redundancy_outlook_from_state_files(config: Any, rg: Any, *,
 def _read_state_file(path: Path) -> Optional[Dict[str, str]]:
     """KEY=VALUE state-file reader (same format tui.parse_state_file reads)."""
     try:
-        text = Path(path).read_text()
+        text = read_side_file(path)
     except OSError:
         return None
     out: Dict[str, str] = {}

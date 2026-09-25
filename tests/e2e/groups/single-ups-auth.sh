@@ -748,6 +748,29 @@ done
 [ -n "${latch:-}" ] \
   || { echo "FAIL: hard self-test failure did not persist its latch"; cat /tmp/test62-daemon.log; exit 1; }
 
+# F-189: the outlook shows the latch live. On mains the T5 row is armed
+# (enabled) but idle; eneru.outlook evaluate_triggers "selfTestFailure".
+# t5_row <json-out> prints "enabled state nextTrigger threshold" for it.
+t5_row() {
+  curl -fsS http://127.0.0.1:9100/api/v1/ups > "$1" 2>/dev/null || return 1
+  python3 - "$1" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))["ups"][0]
+t5 = [t for t in row["triggerOutlook"]["triggers"] if t["id"] == "selfTestFailure"][0]
+nxt = (row.get("nextTrigger") or {}).get("id") or "-"
+print(str(t5["enabled"]).lower(), t5["state"], nxt, t5["threshold"])
+PY
+}
+T5_IDLE=""
+for _ in $(seq 1 20); do
+  T5_IDLE=$(t5_row /tmp/test62-t5-idle.json || true)
+  [ "${T5_IDLE%% *}" = "true" ] && break
+  sleep 0.5
+done
+[ "$T5_IDLE" = "true idle - 3" ] \
+  || { echo "FAIL: armed T5 row on mains was '$T5_IDLE'"; cat /tmp/test62-t5-idle.json 2>/dev/null; exit 1; }
+
 test_ob=$(sqlite3 "$ST_DB" \
   "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
    AND event_type='SELF_TEST_ON_BATTERY' AND notification_sent=0;")
@@ -825,6 +848,16 @@ for _ in $(seq 1 40); do
 done
 [ "${shutdowns:-0}" = "1" ] \
   || { echo "FAIL: failed-test latch did not trigger later outage shutdown"; cat /tmp/test62-daemon.log; exit 1; }
+# The dry-run daemon keeps polling the continuing outage, so the row the
+# dashboard and TUI read must now show T5 fired as the next trigger.
+T5_FIRED=""
+for _ in $(seq 1 20); do
+  T5_FIRED=$(t5_row /tmp/test62-t5-fired.json || true)
+  [ "$T5_FIRED" = "true fired selfTestFailure 3" ] && break
+  sleep 0.5
+done
+[ "$T5_FIRED" = "true fired selfTestFailure 3" ] \
+  || { echo "FAIL: T5 outlook row during the outage was '$T5_FIRED'"; cat /tmp/test62-t5-fired.json 2>/dev/null; exit 1; }
 trigger_delay=$(sqlite3 "$ST_DB" \
   "SELECT shutdown.ts - outage.ts FROM events outage JOIN events shutdown \
     WHERE outage.id > $OUTAGE_BASE AND outage.event_type='ON_BATTERY' \

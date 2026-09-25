@@ -1719,6 +1719,23 @@ class TestU1AddAndRemove:
         press(m, "m")
         assert not m.doc.get(("remote_servers",))
 
+    @pytest.mark.parametrize("base,spec", [
+        (("ups", 0, "self_test"), "self_test"),  # absent per-UPS section
+        (("ups", 1, "self_test"), "self_test"),  # existing section
+    ])
+    def test_leaving_an_existing_or_absent_page_changes_nothing(
+            self, tmp_path, base, spec):
+        """F-187 (C13): only a freshly ADDED item is discarded on leave;
+        backing out of any other page never deletes or restores content."""
+        m = _text_model(tmp_path, PROD_SHAPE_YAML)
+        m.doc.set(("ups", 1, "self_test"), {})  # an existing, empty mapping
+        before, was_modified = m.doc.dumps(), m.doc.modified
+        _open_section(m, base, cat.child(cat.UPS_ENTRY_SECTION, spec))
+        press(m, ESC)
+        assert "discarded" not in (m.message or "")
+        assert m.doc.dumps() == before
+        assert m.doc.modified == was_modified
+
     def test_discard_falls_back_to_delete(self, tmp_path):
         m = _model(tmp_path, "config-minimal.yaml")
         goto(m, "remote")
@@ -2436,6 +2453,15 @@ class TestU6LegacyParallel:
             assert orders == [None, None, None]  # batch 0 stays as is
         else:
             assert all(o is None or o >= 1 for o in orders)
+
+    @pytest.mark.parametrize("multi", [False, True])
+    def test_loopback_keeps_no_order_and_ranks_ignore_it(self, tmp_path, multi):
+        """F-187 (C17): the loopback delegate is neither ranked nor given a
+        shutdown_order; the regulars rank 1..K among themselves."""
+        m = _text_model(tmp_path, _servers_yaml(LEGACY_SERVERS["loopback"], multi))
+        servers = (m.view["ups"][1]["remote_servers"] if multi
+                   else m.view["remote_servers"])
+        assert [s.get("shutdown_order") for s in servers] == [1, None, 2]
 
     def test_mixed_shape_numbers(self, tmp_path):
         m = _text_model(tmp_path, _servers_yaml(LEGACY_SERVERS["mixed"], False))

@@ -814,8 +814,16 @@ ids = [t["id"] for t in row["triggerOutlook"]["triggers"]]
 assert ids == ["fsd", "failsafe", "lowBattery", "criticalRuntime",
                "depletionRate", "extendedTime", "selfTestFailure"], ids
 assert row["triggerOutlook"]["onBattery"] is False
-assert row["role"]["kind"] in ("local", "remote-only", "monitor-only"), row["role"]
-assert row["triggerOutlook"]["action"]["label"]
+# Containers + unmounts + one remote, local_shutdown off: drains this host
+# and shuts the remote down, but the host itself stays up.
+role = row["role"]
+assert role["kind"] == "local", role
+assert role["shutsDownLocalHost"] is False and role["localDrain"] is True, role
+assert role["remoteServers"] == 1 and role["redundancyGroups"] == [], role
+action = row["triggerOutlook"]["action"]
+assert action["kind"] == "local-shutdown", action
+assert action["label"] == ("Stops local workloads (this host stays up) and shuts "
+                           "down 1 remote server (dry-run)"), action
 assert row["freshness"]["stale"] is False
 assert abs(row["freshness"]["lastPollAt"] - time.time()) < 60
 assert row["statusSummary"]["state"] == "online", row["statusSummary"]
@@ -873,6 +881,42 @@ if [ "$UPS_PROGRESS_SEEN" != true ]; then
   echo "FAIL: per-UPS terminal shutdown progress was not published"
   cat /tmp/test43-progress.json /tmp/test43-daemon.log 2>/dev/null || true
   # Don't leak the low-battery state into the next test in this group.
+  kill "$DAEMON_PID" 2>/dev/null || true
+  trap - EXIT
+  apply_scenario online-charging
+  exit 1
+fi
+# F-188: the trigger the dashboard names as "next" must be the one the daemon
+# actually fired. The shutdown has run (progress succeeded) and the dry-run
+# daemon keeps polling, so the row still shows the low-battery reading.
+if ! curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test43-ups-lb.json || \
+   ! python3 - /tmp/test43-ups-lb.json /tmp/test43-daemon.log <<'PY'
+import json
+import re
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))["ups"][0]
+log = open(sys.argv[2], encoding="utf-8", errors="replace").read()
+# monitor.py _trigger_immediate_shutdown / _handle_on_battery (T1).
+fired = re.findall(r"Triggering immediate shutdown\. Reason: (.+)", log)
+assert fired, "daemon never logged a trigger"
+assert fired[0] == "Battery charge 14% below threshold 20%", fired
+prefix = {"lowBattery": "Battery charge ", "criticalRuntime": "Runtime ",
+          "depletionRate": "Depletion rate ", "extendedTime": "Time on battery "}
+nxt = row["nextTrigger"]
+assert nxt is not None, row["triggerOutlook"]
+assert nxt["id"] == "lowBattery" and nxt["state"] == "fired", nxt
+assert fired[0].startswith(prefix[nxt["id"]]), (nxt, fired)
+outlook = row["triggerOutlook"]
+assert outlook["onBattery"] is True, outlook
+assert outlook["firing"][:1] == ["lowBattery"], outlook["firing"]
+assert outlook["summary"].startswith("Shutdown condition met: low battery"), outlook
+assert row["role"]["kind"] == "local", row["role"]
+print("PASS (43a): nextTrigger names the trigger the daemon fired: " + fired[0])
+PY
+then
+  echo "FAIL: nextTrigger does not match the trigger the daemon fired"
+  cat /tmp/test43-ups-lb.json /tmp/test43-daemon.log 2>/dev/null || true
   kill "$DAEMON_PID" 2>/dev/null || true
   trap - EXIT
   apply_scenario online-charging

@@ -319,6 +319,9 @@ _CASES = [
     ("80", "300", 0.0, 29, 30), ("80", "300", 0.0, 30, 30),
     ("10", "1800", 0.0, 10, 30), ("80", "1800", 20.0, 100, 200),
     ("80", "1800", 0.0, 1000, 2000), ("abc", "xyz", 0.0, 40, 0),
+    # F-185 (O44): a battery charging while OB reports a negative rate; the
+    # engine needs rate > 0, so neither side may fire the drain trigger.
+    ("80", "1800", -20.0, 120, 0), ("80", "1800", -0.5, 120, 0),
 ]
 
 
@@ -422,8 +425,12 @@ class TestRoleAndAction:
     @pytest.mark.unit
     def test_monitor_only(self):
         g = _group()
-        role = ups_role(_config(g), g)
+        # Single-UPS mode powers the host off unless local_shutdown is off
+        # (F-178), so "monitoring only" needs that, or coordinator mode.
+        role = ups_role(_config(g, local_enabled=False), g)
         assert role["kind"] == "monitor-only"
+        assert ups_role(_config(g), g, coordinator_mode=True)["kind"] == (
+            "monitor-only")
         assert role["hasShutdownActions"] is False
         assert trigger_action(role)["kind"] == "notify-only"
 
@@ -431,7 +438,7 @@ class TestRoleAndAction:
     def test_remote_only_counts_regular_servers(self):
         g = _group(remote_servers=[_server(), _server("b", "b"),
                                    _server("off", "c", enabled=False)])
-        role = ups_role(_config(g), g)
+        role = ups_role(_config(g), g, coordinator_mode=True)
         assert role["kind"] == "remote-only" and role["remoteServers"] == 2
         action = trigger_action(role)
         assert action == {"kind": "remote-shutdown",
@@ -949,6 +956,44 @@ class TestProgressSidecar:
         tracker.start("x")  # write fails silently
         assert tracker.snapshot()["state"] == "running"
 
+    @pytest.mark.unit
+    def test_older_snapshot_never_lands_after_newer(self, tmp_path):
+        """F-182: a slow writer's "running" snapshot can't overwrite the
+        "succeeded" one written after it (snapshot taken under the write
+        lock)."""
+        import threading
+        path = tmp_path / "p.json"
+        tracker = ShutdownProgress("ups", "U", sidecar_path=path)
+        tracker.start("x")
+        real_snapshot = tracker.snapshot
+        took = threading.Event()
+        release = threading.Event()
+
+        def slow_snapshot(*a, **k):
+            data = real_snapshot(*a, **k)
+            if threading.current_thread().name == "slow":
+                took.set()
+                release.wait(5)
+            return data
+
+        tracker.snapshot = slow_snapshot
+        slow = threading.Thread(target=tracker.persist, name="slow")
+        slow.start()
+        assert took.wait(5)
+        fast = threading.Thread(target=tracker.finish, args=("succeeded",))
+        fast.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with tracker._lock:
+                if tracker._data["state"] == "succeeded":
+                    break
+            time.sleep(0.005)
+        fast.join(0.2)  # fixed code: blocked on the write lock
+        release.set()
+        slow.join(5)
+        fast.join(5)
+        assert read_progress_sidecar(path)["state"] == "succeeded"
+
 
 # ---------------------------------------------------------------------------
 # Monitor state file + status/API wiring
@@ -1151,3 +1196,313 @@ class TestBatteryHealthReplacementBlock:
         health = monitor.state.latest_battery_health
         assert health["replacementDaysRemaining"] is None
         assert health["replacement"]["text"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Release-review cycle 3 (F-178..F-185): display == runtime
+# ---------------------------------------------------------------------------
+
+def _dry_run_sequence(monitor):
+    """Run the real dry-run shutdown sequence; return {phase id: state}."""
+    monitor._send_notification = MagicMock()
+    with patch("eneru.monitor.run_command", return_value=(0, "", "")):
+        try:
+            monitor._execute_shutdown_sequence()
+        except SystemExit:
+            pass
+    snap = monitor._shutdown_progress.snapshot()
+    return {ph["id"]: ph["state"] for ph in snap["phases"]}
+
+
+class TestSingleUpsNonLocalParity:
+    """F-178: a one-entry ``ups:`` list without is_local still powers the
+    host off (runtime gates the poweroff on local_shutdown only)."""
+
+    def _monitor(self, minimal_config, tmp_path, *, local_enabled=True):
+        minimal_config.ups_groups[0].is_local = False
+        minimal_config.ups_groups[0].filesystems.sync_enabled = True
+        minimal_config.local_shutdown.enabled = local_enabled
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "bh")
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.logger = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("local_enabled", [True, False])
+    def test_plan_matches_dry_run_sequence(self, minimal_config, tmp_path,
+                                           local_enabled):
+        from eneru.shutdown.plan import build_shutdown_plan
+        monitor = self._monitor(minimal_config, tmp_path,
+                                local_enabled=local_enabled)
+        plan = build_shutdown_plan(monitor.config, is_local=False)
+        planned = {p["id"]: p["enabled"] for p in plan["phases"]}
+        ran = _dry_run_sequence(monitor)
+        for pid in ("vms", "containers", "filesystem-sync",
+                    "filesystem-unmount", "final-sync", "local-poweroff"):
+            assert planned[pid] is (ran[pid] != "skipped"), (pid, ran[pid])
+        assert planned["local-poweroff"] is local_enabled
+        assert planned["final-sync"] is False
+
+    @pytest.mark.unit
+    def test_role_and_hint_say_host_powers_off(self, minimal_config, tmp_path):
+        monitor = self._monitor(minimal_config, tmp_path)
+        role = outlook.monitor_role(monitor)
+        assert role["kind"] == "local" and role["shutsDownLocalHost"] is True
+        action = trigger_action(role)["label"]
+        assert action == "Shuts down this host (dry-run)"
+        hint = monitor._on_battery_trigger_hint()
+        assert "Notification only" not in hint and "Shuts down this host" in hint
+
+
+class TestFailsafeCountdown:
+    """F-180: failed NUT polls below the tolerance while OB count down to
+    FAILSAFE instead of reading "connection OK"."""
+
+    @pytest.mark.unit
+    def test_pure_countdown(self):
+        from eneru.health_model import RETRY_WAIT_SECONDS
+        r = evaluate_triggers(_triggers(), status="OB", battery_charge="80",
+                              runtime="3000", time_on_battery=10,
+                              failed_polls=1, failed_poll_tolerance=3)
+        fs = _by_id(r)["failsafe"]
+        assert fs["state"] == "ok" and fs["text"].startswith("1 of 3 NUT polls")
+        assert fs["etaSeconds"] == 2 * RETRY_WAIT_SECONDS
+        assert r["next"]["id"] == "failsafe"
+        # No failures: unchanged "connection OK", no ETA.
+        idle = _by_id(evaluate_triggers(_triggers(), status="OB",
+                                        battery_charge="80", runtime="3000"))
+        assert idle["failsafe"]["text"] == "connection OK"
+        assert idle["failsafe"]["etaSeconds"] is None
+        # On mains the counter is not a FAILSAFE countdown.
+        ol = _by_id(evaluate_triggers(_triggers(), status="OL",
+                                      battery_charge="80", runtime="3000",
+                                      failed_polls=2))
+        assert ol["failsafe"]["state"] == "idle"
+        assert ol["failsafe"]["etaSeconds"] is None
+
+    @pytest.mark.unit
+    def test_failsafe_needs_battery(self):
+        """F-185 (O19): losing NUT on mains is not a shutdown condition."""
+        r = evaluate_triggers(_triggers(), status="OL", battery_charge="80",
+                              runtime="3000", connection_state="FAILED")
+        assert r["firing"] == [] and _by_id(r)["failsafe"]["state"] == "idle"
+        r = evaluate_triggers(_triggers(), status="OB", battery_charge="80",
+                              runtime="3000", connection_state="FAILED")
+        assert r["firing"] == ["failsafe"]
+
+    @pytest.mark.unit
+    def test_monitor_debounce_parity(self, minimal_config, tmp_path):
+        """Drive the real _main_loop failure path poll by poll: the outlook
+        counts down while the engine waits and fires when the engine does."""
+        minimal_config.ups.max_stale_data_tolerance = 3
+        monitor = _parity_monitor(minimal_config, tmp_path)
+        with monitor.state._lock:
+            monitor.state.latest_status = "OB DISCHRG"
+            monitor.state.latest_battery_charge = "80"
+            monitor.state.latest_runtime = "3000"
+            monitor.state.latest_update_time = time.time()
+            monitor.state.latest_update_mono = time.monotonic()
+        monitor.state.previous_status = "OB DISCHRG"
+        monitor._stats_store = None
+        seen, texts = [], []
+
+        def record(*_a, **_k):
+            row = _by_id(monitor_outlook(monitor)["triggerOutlook"])["failsafe"]
+            seen.append((monitor.state.connection_error_count, row["state"]))
+            texts.append(row["text"])
+            if len(seen) == 3:
+                monitor._stop_event.set()
+
+        def one_poll(*_a, **_k):
+            return False, {}, "Connection refused"
+
+        with patch.object(monitor, "_get_all_ups_data", side_effect=one_poll), \
+                patch.object(monitor, "_execute_shutdown_sequence") as run, \
+                patch.object(monitor._stop_event, "wait", side_effect=record), \
+                patch.object(monitor, "_run_ups_name_diagnostic"):
+            monitor._main_loop()
+        # Polls 1 and 2: engine waits, outlook counts down ("ok" + ETA).
+        assert seen[0] == (1, "ok") and seen[1] == (2, "ok")
+        assert texts[0].startswith("1 of 3 NUT polls failed")
+        assert texts[1].startswith("2 of 3 NUT polls failed")
+        # Poll 3 reaches the tolerance: the engine fires FAILSAFE and the
+        # outlook says fired in the same poll.
+        assert seen[2] == (3, "fired")
+        run.assert_called_once()
+        blocks = monitor_outlook(monitor)
+        assert blocks["triggerOutlook"]["firing"] == ["failsafe"]
+
+    @pytest.mark.unit
+    def test_status_row_publishes_error_count(self, minimal_config, tmp_path):
+        from eneru.status import monitor_status
+        monitor = _parity_monitor(minimal_config, tmp_path)
+        monitor.state.connection_error_count = 2
+        assert monitor_status(monitor)["connectionErrorCount"] == 2
+
+
+class TestMemberRoleWins:
+    """F-184: a redundancy member's own resources never make it look like
+    it shuts something down itself -- the group decides."""
+
+    @pytest.mark.unit
+    def test_local_member_has_no_own_actions(self):
+        g = _group(is_local=True, remote_servers=[_server()])
+        role = ups_role(_config(g), g, redundancy_groups=["rack-a"],
+                        coordinator_mode=True, coordinator_handoff=True)
+        assert role["kind"] == "redundancy-member"
+        assert role["hasShutdownActions"] is False
+        assert trigger_action(role)["kind"] == "redundancy-advisory"
+        solo = ups_role(_config(g), g, coordinator_mode=True,
+                        coordinator_handoff=True)
+        assert solo["hasShutdownActions"] is True
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("kw,state", [
+        ({"trigger_active": True}, "trigger_active"),
+        ({}, "shutting_down"),
+    ])
+    def test_member_summary_is_amber(self, kw, state):
+        member = {"kind": "redundancy-member"}
+        status = "FSD OB" if state == "shutting_down" else "OB"
+        base = status_summary(status, **kw)
+        out = outlook.member_status_summary(base, member)
+        assert out["state"] == state
+        assert out["severity"] == "warn" and out["blink"] is False
+        assert out["label"] == "Trigger met, group decides"
+        # Non-members and a really running shutdown keep the red badge.
+        assert outlook.member_status_summary(base, {"kind": "local"}) is base
+        assert outlook.member_status_summary(base, member, running=True) is base
+        assert outlook.member_status_summary(base, None) is base
+        calm = status_summary("OB")
+        assert outlook.member_status_summary(calm, member) is calm
+
+    @pytest.mark.unit
+    def test_monitor_outlook_member(self, minimal_config, tmp_path):
+        monitor = _parity_monitor(minimal_config, tmp_path)
+        monitor._in_redundancy_group = True
+        monitor._stats_store = None
+        with monitor.state._lock:
+            monitor.state.latest_status = "OB"
+            monitor.state.latest_update_time = time.time()
+            monitor.state.latest_update_mono = time.monotonic()
+            monitor.state.trigger_active = True
+        blocks = monitor_outlook(monitor)
+        assert blocks["role"]["hasShutdownActions"] is False
+        assert blocks["statusSummary"]["severity"] == "warn"
+        assert blocks["statusSummary"]["blink"] is False
+
+
+class TestParityGaps:
+    """F-185: parity inputs the matrix never fed before."""
+
+    @pytest.mark.unit
+    def test_attributed_self_test_disables_t5(self, minimal_config, tmp_path):
+        """O24: during an attributed self-test OB the engine suppresses T5,
+        so the daemon-side outlook must too."""
+        monitor = _parity_monitor(minimal_config, tmp_path)
+        store = MagicMock()
+        store.get_meta.side_effect = lambda key: {
+            "self_test_failure_latched": "1700000000",
+            "self_test_failure_outage_start": "1",
+        }.get(key)
+        monitor._stats_store = store
+        monitor.state.on_battery_start_time = int(time.time()) - 60
+        with monitor.state._lock:
+            monitor.state.latest_status = "OB"
+            monitor.state.latest_time_on_battery = 60
+        armed = _by_id(monitor_outlook(monitor)["triggerOutlook"])
+        assert armed["selfTestFailure"]["state"] == "fired"
+        monitor._self_test_outage_attributed = True
+        rows = _by_id(monitor_outlook(monitor)["triggerOutlook"])
+        assert rows["selfTestFailure"]["state"] == "disabled"
+
+    @pytest.mark.unit
+    def test_cold_start_hold_defers_quorum(self):
+        """A11: during the evaluator's cold-start hold the API says
+        "deferred", not "quorum lost"."""
+        from eneru.status import redundancy_group_statuses
+        rg = RedundancyGroupConfig(name="rack-a", ups_sources=["A@h", "B@h"],
+                                   min_healthy=2, triggers=_triggers())
+        cfg = _config(_group(ups=UPSConfig(name="A@h")),
+                      extra_groups=[_group(ups=UPSConfig(name="B@h"))],
+                      redundancy=[rg])
+        evaluator = SimpleNamespace(_group=rg,
+                                    cold_start_hold_active=lambda: True)
+        source = SimpleNamespace(_monitors=[], _evaluator_threads=[evaluator])
+        row = redundancy_group_statuses(source, cfg, ups_rows=[])[0]
+        assert row["quorumDeferred"] is True
+        assert row["outlook"]["state"] == "deferred"
+        evaluator.cold_start_hold_active = lambda: False
+        row = redundancy_group_statuses(source, cfg, ups_rows=[])[0]
+        assert row["outlook"]["state"] == "quorum-lost"
+
+    @pytest.mark.unit
+    def test_effective_health_counts_degraded_as_healthy(self):
+        """O30: the split uses effective_redundancy_health, like the
+        evaluator's quorum math."""
+        rg = RedundancyGroupConfig(name="rack-a", ups_sources=["U0@h", "U1@h"],
+                                   min_healthy=2, triggers=_triggers(),
+                                   degraded_counts_as="healthy")
+        snaps = {"U0@h": _snap(status="OB"), "U1@h": _snap()}
+        raw = {"U0@h": UPSHealth.DEGRADED, "U1@h": UPSHealth.HEALTHY}
+        out = redundancy_group_outlook(rg, snaps, raw)
+        assert out["healthyMembers"] == ["U0@h", "U1@h"]
+        assert out["failuresTolerated"] == 0
+        rg.degraded_counts_as = "critical"
+        out = redundancy_group_outlook(rg, snaps, raw)
+        assert out["failingMembers"] == ["U0@h"]
+        assert out["failuresTolerated"] == -1
+
+    @pytest.mark.unit
+    def test_held_drain_eta_waits_for_stabilization(self):
+        """O14: a held drain trigger's ETA is the LONGER of the remaining
+        stabilization and grace."""
+        t = _triggers(on_battery_stabilization_delay=200)
+        r = evaluate_triggers(t, status="OB", battery_charge="80",
+                              runtime="3000", depletion_rate=20.0,
+                              time_on_battery=100)
+        dep = _by_id(r)["depletionRate"]
+        assert dep["state"] == "held" and dep["etaSeconds"] == 100
+
+    @pytest.mark.unit
+    def test_fleet_rows_name_their_groups(self, minimal_config, tmp_path):
+        """A08: collect_status passes the daemon config so member rows keep
+        their redundancy group names."""
+        from eneru.status import collect_status
+        monitor = _parity_monitor(minimal_config, tmp_path)
+        monitor._in_redundancy_group = True
+        monitor._stats_store = None
+        rg = RedundancyGroupConfig(name="rack",
+                                   ups_sources=[monitor.config.ups.name])
+        source = SimpleNamespace(
+            _monitors=[monitor],
+            config=_config(monitor.config.ups_groups[0], redundancy=[rg]))
+        payload = collect_status(source)
+        assert payload["ups"][0]["role"]["redundancyGroups"] == ["rack"]
+
+
+class TestStatusPriority:
+    @pytest.mark.unit
+    def test_connection_lost_outranks_stale(self):
+        """F-187 (U01): a stale OB snapshot with NUT FAILED is the FAILSAFE
+        path (crit "Connection lost"), not an amber "Stale data"."""
+        out = status_summary("OB", connection_state="FAILED", stale=True)
+        assert out["state"] == "connection_lost"
+        assert out["severity"] == "crit"
+        assert status_summary("OB", stale=True)["state"] == "stale"
+
+    @pytest.mark.unit
+    def test_runs_coordinator_and_state_paths(self):
+        from eneru.utils import runs_coordinator, ups_state_file_path
+        g = _group()
+        single = _config(g)
+        single.logging.state_file = "/run/s"
+        assert runs_coordinator(single) is False
+        assert ups_state_file_path(single, g) == "/run/s"
+        rg = RedundancyGroupConfig(name="r", ups_sources=["U@h"])
+        coord = _config(g, redundancy=[rg])
+        coord.logging.state_file = "/run/s"
+        assert runs_coordinator(coord) is True
+        assert ups_state_file_path(coord, g) == "/run/s.U-h"

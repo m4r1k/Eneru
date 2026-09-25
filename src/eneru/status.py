@@ -325,6 +325,10 @@ def monitor_status(monitor: Any, *, source_config: Any = None) -> Dict[str, Any]
         "triggerActive": snap.trigger_active,
         "triggerReason": snap.trigger_reason,
         "staleDataCount": snap.stale_data_count,
+        # F-180: hard NUT failures so far (FAILSAFE fires on battery once
+        # either count reaches max_stale_data_tolerance).
+        "connectionErrorCount": getattr(
+            getattr(monitor, "state", None), "connection_error_count", 0),
         "remoteHealth": remote_health_for_monitor(monitor),
         "batteryHealth": _battery_health_for_monitor(monitor),
         "energy": _energy_for_monitor(monitor),

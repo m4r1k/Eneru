@@ -87,6 +87,17 @@ drain rate, critical runtime assumes the runtime counts down in real time, and
 the time-based triggers use the clock. No ETA is shorter than the remaining
 on-battery stabilization hold.
 
+While NUT polls fail on battery, the `failsafe` row stays `ok` but its text
+counts the failures ("1 of 3 NUT polls failed") and its `etaSeconds` is the
+remaining polls times the 5 s retry wait (a floor). FAILSAFE fires at
+`max_stale_data_tolerance`; the row's `connectionErrorCount` and
+`staleDataCount` hold the counts.
+
+A redundancy member's own trigger is a vote, not a shutdown: its `role` has
+`hasShutdownActions: false`, and a `trigger_active` or FSD `statusSummary`
+keeps its `state` but is `warn`, does not blink, reads "Trigger met, group
+decides" and carries `groupDecides: true`.
+
 Redundancy-group rows add `failingMembers`, `healthyMembers`,
 `failuresTolerated` (`healthyCount - minHealthy`, negative once quorum is lost),
 `role`, and `outlook` (`{state, severity, label, action}`, where `state` is one
