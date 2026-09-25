@@ -9,147 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [6.2.0] - 2026-09-23
+## [6.2.0] - 2026-09-27
 
-A guided config editor, a read-only pre-flight check, live shutdown progress in
-the dashboard, and self-tests that no longer look like outages.
+A guided config editor, a read-only pre-flight check, and displays that say what
+happens next. This release also carries the fixes from three full review
+cycles, including one breaking change for a one-entry `ups:` list with
+`is_local: false`.
 
-### Added
+### Breaking
 
-- **`eneru config`: a guided config editor.** A curses TUI in the dashboard's
-  colors with a basic mode (the essentials, safe defaults) and an advanced mode
-  (every option), organised in stages: UPS and NUT login, safety and triggers,
-  this host, remote servers, redundancy groups, notifications, features, review.
-  - Every option shows its default and a plain-language explanation. Each stage
-    is validated as you go, errors in red, and `T` live-tests the UPS or server
-    under the cursor.
-  - Edits are made in place with `ruamel.yaml`: comments, quoting, indentation,
-    line endings, owner and mode survive, and a private `.bak` keeps the
-    previous version. Values YAML 1.1 would read differently (`on`, `12:30`,
-    `0644`) are quoted. New keys get an explanatory comment; new files are mode
-    0600 and start with `dry_run: true`.
-  - Review & save lists every change against the file on disk and shows what
-    happens on power loss.
-  - `/` searches every option; a `*` marks values changed from their default;
-    anything added can be deleted from its own page, and an untouched new
-    item is discarded. Switching `dry_run` in either direction asks first, in
-    red, and Review & save lists that change first.
-  - In a multi-UPS file, per-UPS rows show the value that really applies,
-    tagged `(this UPS)`, `(global)` or `(default)`. Before, a UPS without its
-    own `self_test:` showed self-test as disabled even with the global one
-    enabled. Editing writes an override for that UPS only; `D` removes it.
-  - Legacy `remote_servers[].parallel` is converted on open to the
-    `shutdown_order` numbers that keep the same phases (written on save).
-    A **Shutdown order** page shows the phases per group; `Left`/`Right`
-    moves a server to the previous or next phase.
-  - The container image ships it: `docker exec -it eneru eneru config` saves
-    through the config bind mount (the backup goes to the state volume) and
-    `docker kill -s HUP eneru` applies it. For a first setup without Eneru on
-    the host: `docker run --rm -it --network host -v /srv/eneru:/srv/eneru:Z
-    ghcr.io/m4r1k/eneru config --config /srv/eneru/config.yaml`.
-  - See `docs/config-editor.md`.
-- **`eneru config check`: inspect a config before an outage does.** Everything
-  `eneru validate` does, plus:
-  - the startup warnings that are easy to miss in the log (dry-run left on, a
-    local UPS with `local_shutdown` off, a plain-HTTP LAN API, MQTT without
-    TLS, missing tools or Python packages);
-  - a shutdown sequence longer than `critical_runtime_threshold`;
-  - live, read-only probes (skip with `--offline`): NUT name, variables, login
-    and self-test command; one SSH session per remote; `command -v` for every
-    tool each step needs; harmless listings (`docker ps`, `virsh list`, ...);
-    and `sudo -n -l <command>` to prove NOPASSWD sudo without running anything.
-  - It ends with a "what happens on power loss" timeline and exits 1 on errors.
-  - A phased shutdown-order tree follows it: what runs in parallel and what
-    waits for which phase, per UPS and redundancy group.
-- **Failed self-tests protect the next outage.** A hard failure is stored across
-  restarts and triggers the normal shutdown path when a later real outage lasts
-  longer than `triggers.self_test_failure_shutdown_delay` (30 s by default).
-  Redundancy members use the quorum path; monitoring-only UPSes alert.
-- **Live shutdown progress on the dashboard.** Per-UPS and redundancy-group
-  endpoints expose phase and per-remote state; the Shutdown tab polls them while
-  visible, shows live trigger status ("now 2 of 2 healthy"), and opens each
-  remote's result (timings, pre-command results, exit code, redacted response)
-  in a dialog for signed-in readers.
-- **The API says what happens next.** Each UPS row lists every configured
-  trigger with its threshold, current value, time to fire and the closest one,
-  plus what firing would do for that UPS (power off this host, shut down remote
-  servers only, notify only, or vote in a redundancy group). Rows also carry one
-  status vocabulary with ok/warn/crit severity, the last poll's epoch time and
-  age, and a capped battery replacement estimate ("~4 yr", "> 10 yr").
-  Redundancy groups name their failing members and how many more failures they
-  can take. The state file gains `EPOCH`, and shutdown progress is mirrored next
-  to it so `eneru monitor` can show both. ON_BATTERY events and notifications
-  show runtime as `24m 50s`.
-- **`eneru monitor` says what happens next, and how old the data is.**
-  - While on battery each UPS shows time on battery, the trigger that fires
-    next and when, one chip per trigger (`runtime < 5m: 6m 20s (~1m 21s)`),
-    and what firing does for that UPS. A running shutdown shows its phase
-    (`phase 3/7 Sync`), finished phases and remote servers.
-  - Redundancy groups get their own block: healthy members against the
-    quorum, each member's state, and what happens if one more fails.
-  - `Updated 3s ago` comes from the poll's epoch time, so a container on UTC
-    no longer looks two hours stale. When the daemon stops writing, the badge
-    turns `STALE` and the countdowns pause. A missing state file names the
-    path it tried and how to point the TUI at a container's bind mount,
-    instead of claiming the daemon is down.
-  - Badges use the dashboard's words (`ON MAINS`, `ON BATTERY`,
-    `SHUTTING DOWN`) and its green/amber/red scale. Only a triggered or
-    running shutdown blinks, and a monitoring-only UPS never shows one.
-    `[is_local]` becomes `Powers this host` / `Monitoring only`.
-  - Event lines show how long ago they happened, readable names instead of
-    `CONNECTION_LOST`, no notification emoji, and `24m 50s` instead of
-    `1490 seconds` in old rows. `-v`/`-vv` now always show some diagnostics
-    and lifecycle rows, even with a long outage history.
-  - `?` lists every key; at 80 columns the hints wrap onto two rows instead
-    of dropping `G`/`T`/`U`/`V`. The status panel is sized to its content.
-  - `--once` prints the same lines, leaves out readings the UPS doesn't
-    report (no more `Output: V`), and graphs state their y-axis scale.
-    `--events-only` keeps its raw `EVENT_TYPE:` format for scripts.
-- **The dashboard says what happens next, and how old the data is.**
-  - The banner reads the UPS's role: a monitoring-only UPS on low battery is
-    an amber note ("no action will be taken here"), never "Shutdown
-    imminent". A fired trigger reads "Shutdown triggered — Lab: critical
-    runtime (4m 40s now · fires below 5m 0s) → Shuts down this host and 1
-    remote server"; a running shutdown links to its live progress. A
-    redundancy member's own trigger or FSD stays amber and says the group
-    decides, even when its entry has local resources. Red alerts are announced with `role="alert"`, and the browser tab title
-    follows the outage (`⚠ On battery · Lab 62%`, `⛔ Shutting down · Lab`).
-  - While on battery the UPS view lists every armed trigger with its live
-    value and ETA; fleet rows add time on battery and the next trigger. The
-    Shutdown tab lists every configured trigger instead of "low battery or
-    FSD". Redundancy cards name the failing members and say what one more
-    failure does.
-  - Badges use the shared words and green/amber/red scale: on battery is
-    amber, only a triggered or running shutdown pulses. Role tags say
-    `Powers this host` / `Remote shutdowns only` / `Monitoring only`.
-  - A failed fetch no longer shows a fresh "Updated" time: the footer and
-    error say how old the data is, each UPS shows "updated 3s ago", and after
-    three missed polls the page is greyed and marked `STALE`.
-  - Durations read `7m 0s`, not `1205s`; "Replace in" says `~4 yr` and
-    matches the chart, which points off the edge for a far date.
-  - Smaller fixes: the UPS name no longer vanishes on a phone, a compact phone
-    header and a fading tab bar, newest events first, self-tests on battery
-    are no longer red, an old "reachable" check is grey, clipped chart
-    labels, a separate % axis for load, and aligned section spacing.
-- **Redundancy groups are dashboard scopes.** The View selector focuses
-  telemetry, events, remotes and shutdown details on a group.
-- **Per-step `use_sudo`** on `pre_shutdown_commands` overrides the server's
-  setting.
-
-### Changed
-
-- **Breaking: a one-entry `ups:` list now honours `is_local: false`.** Since
-  5.0, a `ups:` list with a single entry ran the single-UPS code path, and that
-  path never looked at `is_local`: on any trigger (low battery, runtime, FSD,
-  FAILSAFE, ...) it powered this host off even when the entry said
-  `is_local: false`. It was like a breaker labelled "not this house" that still
-  cut this house's power. Now an explicit `is_local: false` keeps this host
-  on; that UPS's remote servers still shut down and notifications still go out.
-  If `is_local` is left out, the host still powers off as before, and
-  `eneru run`, `eneru validate` and `eneru config check` warn you to set it.
-  In a multi-UPS list, `eneru config check` reports an error when every entry
-  says `is_local: false` and `local_shutdown.trigger_on` is `any` (any UPS would
-  still power the host off).
+- **A one-entry `ups:` list now honours `is_local: false`.** Since 5.0 a list
+  with a single entry ran the single-UPS path, which never read `is_local`, so
+  the host powered off on every shutdown trigger even when the entry said
+  `is_local: false`.
 
   | Single-UPS config | Before | After |
   |---|---|---|
@@ -158,156 +30,112 @@ the dashboard, and self-tests that no longer look like outages.
   | `ups:` list, one entry, `is_local: true` | host powers off | host powers off (unchanged) |
   | `ups:` list, one entry, **`is_local: false`** | host powers off (the bug) | **host stays on**; the group's remote servers still shut down |
 
-  If your host really is powered by that UPS, set `is_local: true` to keep the
-  old behaviour.
-- **`use_sudo` now covers custom pre-shutdown commands.** Every command on a
-  `use_sudo: true` server runs through `sudo -n` unless it already starts with
-  `sudo`; only the first command of a pipeline or list is prefixed. If your
-  sudoers allows only the shutdown tools, add rules for those commands, or set
-  `use_sudo: false` on the step. `eneru config check` lists what sudo would
-  refuse and flags shell builtins that sudo can't run.
-- **`eneru user create` / `passwd` require at least 12 characters** for new
-  passwords (`--generate` is unaffected). Existing passwords keep working.
-- **A configured `nominal_power` overrides NUT's reported rating.** Precedence:
-  `ups.realpower`, configured `nominal_power`, `ups.realpower.nominal`,
-  `ups.power.nominal`. A configured value above the reported rating logs one
-  warning. Energy totals are recalculated from stored samples when read.
-- **Self-tests follow a persisted ticket.** The active row is written before the
-  NUT command, duplicates are refused, results are polled to completion or a
-  24-hour timeout, and one start and one final notification are sent even across
-  restarts. Results distinguish `warning` and `aborted`.
-- **Periodic reports are compact and use one time window.** One or two lines per
-  UPS, fleet totals for multi-UPS, `~` on estimated energy. Daily covers
-  yesterday, weekly the trailing seven days, monthly the month to date.
-- **Power states read like normal language** in the dashboard and notifications
-  (**Utility power**, **Running on battery**, ...). API, SQLite and logs keep
-  raw values.
-- **Container config is mounted writable** in the documented Docker/Podman
-  samples (`chown 10001:10001`, mode 0600) so the editor can save. A `:ro`
-  mount keeps working for the daemon. The Kubernetes samples add
-  `seccompProfile: RuntimeDefault`, an API `NetworkPolicy`, and exec health
-  probes on `127.0.0.1`.
-- `ruamel.yaml` is a new dependency for pip and the image, and a *recommended*
-  package on deb (`python3-ruamel.yaml`) and rpm (`python3-ruamel-yaml`, CRB on
-  RHEL 9), so installing Eneru never fails over the editor.
-- Debian 11 retired from CI.
+  If your host really is powered by that UPS, set `is_local: true`. In a
+  multi-UPS list, `config check` now reports an error when every entry says
+  `is_local: false` while `local_shutdown.trigger_on: any` would still power
+  the host off.
+- **`use_sudo: true` also covers custom `pre_shutdown_commands`**, prefixed with
+  `sudo -n` unless they already start with `sudo`. Add sudoers rules for those
+  commands, or set the new per-step `use_sudo: false`. `config check` lists
+  what sudo would refuse, including shell builtins sudo can't run.
+- **RHEL 8 RPMs are no longer built.** RHEL 8 has no python3.9 `ruamel.yaml`.
+  Use the container image there, or stay on 6.1.x (the `rpm/el8` repository
+  stays frozen at 6.1.x).
+- **New passwords need at least 12 characters** (`eneru user create` /
+  `passwd`). Existing passwords and `--generate` are unaffected.
 
-### Removed
+### Added
 
-- **RHEL 8 RPMs are no longer built (breaking).** RPMs target RHEL 9 and 10.
-  RHEL 8 has no python3.9 `ruamel.yaml`. Use the container image there, or stay
-  on 6.1.x; the `rpm/el8` repository stays published, frozen at 6.1.x.
+- **`eneru config`**, a curses editor with a basic mode (the essentials, safe
+  defaults) and an advanced mode (every option). Every option explains itself
+  and shows its default; each stage validates as you go; `T` live-tests the UPS
+  or server under the cursor; `/` searches; `*` marks changed values.
+  - Edits keep your comments, quoting, indentation, owner and mode
+    (`ruamel.yaml`), with a private `.bak`. New files are 0600 and start in
+    dry-run. Flipping `dry_run` asks first, in red.
+  - Multi-UPS pages show the value each UPS really gets, tagged `(this UPS)`,
+    `(global)` or `(default)`. Legacy `parallel` is converted to the equivalent
+    `shutdown_order` on open, and a **Shutdown order** page moves servers
+    between phases.
+  - The container image ships it (`docker exec -it eneru eneru config`, then
+    `docker kill -s HUP eneru`). See `docs/config-editor.md`.
+- **`eneru config check`**, a read-only pre-flight inspection: everything
+  `validate` does, the startup warnings that are easy to miss, a sequence
+  longer than `critical_runtime_threshold`, and live probes of NUT, SSH, every
+  tool each step needs and NOPASSWD sudo (`sudo -n -l`). It never runs a
+  shutdown or custom command. It ends with a power-loss timeline and a phased
+  shutdown-order tree, and exits 1 on errors.
+- **Failed self-tests protect the next outage.** A hard failure is remembered
+  across restarts and shuts down once a later real outage outlasts
+  `triggers.self_test_failure_shutdown_delay` (30 s).
+- **What happens next, everywhere.** The API, dashboard, `eneru monitor` and the
+  ON_BATTERY notification list every configured trigger with its live value,
+  threshold and ETA, the closest one, and what firing does for that UPS
+  (power off this host, remote servers only, notify only, or let its
+  redundancy group decide). Data age shows as "updated 3s ago" and turns
+  `STALE`. While NUT polls fail on battery, the failsafe countdown shows as an
+  amber `arming` trigger.
+- **Live shutdown progress** per UPS and redundancy group on the dashboard and
+  in `eneru monitor`, with each remote's timings and result (command output for
+  signed-in readers only).
+- **Dashboard:** redundancy groups as view scopes; a role-aware banner (a
+  monitoring-only UPS is never "Shutdown imminent"); one status vocabulary with
+  green/amber/red; human durations; a bounded battery-replacement estimate
+  ("~4 yr", "> 10 yr"); phone layout fixes.
+- **`eneru monitor`:** redundancy-group blocks, readable event lines with their
+  age, a `?` help screen, and `--once` output that matches the live panel.
+
+### Changed
+
+- A configured `nominal_power` now overrides NUT's reported rating; energy
+  totals are recalculated from stored samples.
+- Self-tests follow a persisted ticket: no duplicates, results polled to
+  completion across restarts, one start and one final notification, and
+  `warning` / `aborted` results.
+- Periodic reports are one or two lines per UPS over one time window.
+- Power states read like normal language in the dashboard and notifications;
+  the API, SQLite and logs keep raw values.
+- Container samples mount the config writable (`chown 10001:10001`) so the
+  editor can save; Kubernetes samples add `seccompProfile: RuntimeDefault`, an
+  API `NetworkPolicy` and exec health probes.
+- `ruamel.yaml` is a new dependency (recommended, not required, on deb/rpm).
+  Debian 11 is retired from CI.
 
 ### Fixed
 
-- **A clock correction no longer shuts down a redundancy group.** When NTP
-  stepped the clock forward after boot (a Pi without an RTC, a resumed VM),
-  every member looked stale at once, quorum was lost and the group's servers
-  were shut down on good mains power. Data age, connection grace and the
-  coordinator's join deadlines now run on the monotonic clock.
-- **Remote shutdown builds its SSH command like the health probe.** Split
-  `ssh_options` such as `["-i", key]` or `["-p", port]`, and an item holding a
-  flag and its value (`"-i /root/.ssh/key"`, `"-l admin"`, now split into two
-  ssh arguments), no longer make every real shutdown fail while remote health
-  shows green.
-- A "Self-Test Started" notification is no longer sent for an API self-test
-  whose `upscmd` then fails.
-- The editor rejects `nan`/`inf` numbers and trims spaces around text values,
-  and no longer offers `voltage_sensitivity` or
-  `self_test_failure_shutdown_delay` under redundancy-group triggers (the group
-  ignores them). The loader rejects a non-finite depletion `critical_rate`.
-- Non-finite NUT readings (`inf`, `nan`) are no longer stored in statistics, and
-  `/history` skips any stored by older versions, so it stays valid JSON.
-- An on-battery UPS that doesn't report `battery.charge` or `battery.runtime`
-  logs that warning once every 5 minutes, not on every poll.
-- `eneru config check` warns about duplicate YAML keys (a second
-  `remote_servers:` silently replaces the first). A recursive YAML anchor no
-  longer crashes that scan.
-- **An old failed self-test in the UPS's log no longer arms the failed-test
-  trigger** after a fresh install or a stats DB reset.
-- **A real outage after a self-test is reported as an outage.** The test's
-  on-battery attribution ends with its own battery interval, a test claims at
-  most one battery interval, and an outage already alerted before the test's
-  command returned is never relabelled as the test.
-- **UPS battery exercises no longer look like utility outages**
-  (`SELF_TEST_ON_BATTERY` / `SELF_TEST_POWER_RESTORED`), including a test that
-  ends between polls. Short historical pairs are relabelled once.
-- **A config reload during a shutdown no longer skips the host poweroff.** A
-  SIGHUP or API reload that turned notifications off mid-sequence could crash
-  the shutdown on the final notification flush.
-- The host poweroff is still sent when a remote worker can't start or shutting
-  down regular remotes crashes; the remotes left unfinished are reported as
-  failed and a delegated host poweroff still completes its sequence.
-- `use_sudo` and `eneru config check` share one sudo-prefix rule: commands
-  starting with `sudo<TAB>` or `/usr/bin/sudo` are no longer prefixed twice,
-  and `config check` flags steps that would run a shell builtin or compound
-  (`cd`, `( … )`, `if`, ...) under sudo.
-- The editor no longer accepts values the loader rejects (a zero grace
-  duration, depletion `critical_rate` or step `timeout`) and no longer offers
-  `depletion.window` for redundancy-group triggers.
-- A local unmount stuck on a dead NFS server or disk no longer hangs the
-  shutdown.
+- **A clock correction no longer shuts down a redundancy group.** An NTP step
+  after boot made every member look stale at once and lost quorum on good mains
+  power. Data age and grace timers now use the monotonic clock.
+- **Remote shutdown builds its SSH command like the health check.** Split
+  `ssh_options` (`["-i", key]`, `"-p 2222"`) made every real shutdown fail while
+  remote health showed green.
+- **A config reload during a shutdown no longer skips the host poweroff.**
+- **Self-tests:** an old failed result in the UPS's log no longer arms the
+  failed-test trigger on a fresh install; a real outage after a test is
+  reported as an outage; a test's battery transfer no longer looks like a
+  utility outage.
+- The host poweroff still runs when a remote worker can't start or shutting
+  down regular remotes crashes, and a hung local unmount no longer blocks it.
 - UPS polling no longer waits behind a slow NUT control command.
-- VM names with spaces or quotes are shut down and destroyed correctly.
-- `eneru config check` fills a container loopback's `expected_host_identity`
-  from `/etc/machine-id` like the daemon.
-- Single-UPS `ups.energy` is rejected instead of silently ignored; group energy
-  cost gaps no longer read as kWh gaps; redundancy shutdown errors close the
-  running phase; older one-argument redundancy callbacks keep working.
-- Report accuracy: duplicate display labels include the UPS name, synthetic
-  carry-in outages stay out of CSV, missing bounds no longer show 1970.
-- Dashboard event search matches raw identifiers like `SELF_TEST_ON_BATTERY`.
-- **A one-entry `ups:` list without `is_local` no longer reads "Notification
-  only".** The daemon powers the host off on a trigger in that setup, and the
-  notification, API role, dashboard, `eneru monitor` and `config check` now
-  say so.
-- `config check` and the editor's order page no longer promise a host poweroff
-  when a multi-UPS or redundancy config has `local_shutdown.enabled: false`.
-- While NUT polls fail on battery, the FAILSAFE row counts the failed polls
-  ("1 of 3 NUT polls failed") with an ETA instead of "connection OK", in a new
-  amber `arming` trigger state (the API, dashboard and `eneru monitor` render
-  it; `held` still means "waiting out the stabilization delay"); `/api/v1/ups`
-  adds `connectionErrorCount`.
-- A single UPS plus a redundancy group: `eneru monitor` and the API read the
-  daemon's suffixed state/stats files, so `eneru monitor` no longer shows a
-  false "Quorum lost" and the API's history, events and remote health come from
-  the files the daemon writes.
-- A late progress write can no longer overwrite a finished shutdown, which
-  left `eneru monitor` showing "Shutting down" forever.
-- `eneru monitor` (interactive and `--once`) strips terminal escape sequences
-  from NUT, state-file, progress and event text, and state/progress files are
-  read only as regular files, capped at 64 KiB. `R` refreshes like `r`.
-- A one-entry `ups:` list without `is_local` and with
-  `local_shutdown.trigger_on: none` still counts as powering the host off, so
-  the root check and `/ready` require it. `config check` flags that setup's
-  missing poweroff binary and no longer warns about VM/container tools for
-  drain phases that never run there.
-- The replacement estimate's `days` and `text` always describe the same bucket,
-  and exactly 10 years is `beyond`.
-- Dashboard: a lost connection is announced to screen readers once, not on
-  every poll; an old "reachable" remote check has a neutral icon too; UPS
-  control actions confirm what they did ("Set … on …") on the status line
-  again.
-- A redundancy member's fired trigger is shown in amber as "Trigger met, group
-  decides", never as a red "Shutdown triggered": the group decides.
+- VM names with spaces or quotes shut down correctly.
+- Displays no longer disagree with the daemon: a one-entry list without
+  `is_local` is shown as powering the host off, a redundancy member's trigger is
+  amber ("group decides"), and one UPS plus a redundancy group reads the right
+  state files.
+- Smaller fixes to report accuracy, event search, non-finite NUT readings and
+  editor input validation.
 
 ### Security
 
 - Remote `user`/`host` values that look like ssh options are rejected, and the
-  destination is passed after `--`.
-- The API drops clients that send headers too slowly (their half-read request
-  is never run) and keeps slots for localhost health checks.
-- Audit events can't be deleted through the API, and anonymous readers (auth
-  on) no longer see audit events or remote-check error details, including the
-  remote-health rows inside `/api/v1/ups` and `/api/v1/ups/{name}`.
-- The shutdown-progress and remote-health sidecars are written through a
-  fresh `O_EXCL|O_NOFOLLOW` temp file, so a symlink planted at `<sidecar>.tmp`
-  can't redirect the write.
-- The editor refuses to save through a config path swapped for a symlink while
-  or after it was opened, and MQTT broker credentials are masked in the editor and in
-  `config check`.
-- `pypi.yml` validates the version on tag builds and drops checkout credentials;
-  it and `release.yml` reject a multi-line version input.
+  destination follows `--`.
+- The API drops clients that send headers too slowly and reserves slots for
+  localhost health checks. Audit events can't be deleted, and anonymous readers
+  don't see audit events or remote-check errors.
+- The editor won't save through a path swapped for a symlink; side files are
+  written with `O_EXCL|O_NOFOLLOW`; `eneru monitor` strips terminal escape
+  sequences; MQTT broker credentials are masked.
+- Release workflows validate the version input on every path.
 
 ## [6.1.9] - 2026-07-13
 

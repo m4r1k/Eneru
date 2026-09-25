@@ -34,162 +34,55 @@ thousands of tests, all gated at ≥95% per-file line+branch coverage. E2E
 tests are fewer, but they exercise the real service boundaries where
 packaging, NUT, SSH, Docker, filesystem, and CLI assumptions meet.
 
-## Pre-release code review (v6.0.0)
+## Pre-release code review
 
-Automated tests prove the code does what a test author *thought to ask*. They
-do not, on their own, prove that nobody overlooked a way the daemon can drop a
-healthy host or miss a real outage. So before the v6.0.0 release the whole
-repository at HEAD — not just the release diff — went through a structured,
-adversarial audit on top of the test pyramid. Think of it as a second pair of
-eyes that is paid to assume every safety claim is wrong until it reads the code
-and proves otherwise.
+Automated tests prove the code does what a test author *thought to ask*. Before
+every minor or major release, the whole repository at HEAD (not just the release
+diff) also goes through an adversarial audit. The process lives in the
+`release-review` skill (`.claude/skills/release-review/`), so it survives context
+loss and model changes.
 
-The audit was deliberately broad-then-deep:
+- **Fan-out.** Independent reviewers work in parallel: a five-axis code review, a
+  security audit with an explicit list of surfaces found clean, and a
+  test-quality audit that runs the suite and **mutates the source** to find
+  behaviour no test pins down.
+- **Verification.** Every finding needs a concrete failure path (file, input,
+  wrong outcome). Candidates are re-traced against the real code before a fix is
+  written, and findings that don't survive are dropped.
+- **Stable IDs and triage.** Findings get `F-NNN` IDs that continue across
+  releases. The maintainer can drop or defer any of them, and deferred items are
+  never re-reported.
+- **Fixes prove themselves.** Each code finding ships with a regression test that
+  fails against the pre-fix behaviour, per-file coverage stays at or above 95%,
+  and findings sharing a root cause are fixed as one class.
+- **Round 2.** A second, fresh set of reviewers checks every fix against its own
+  cited scenario, looks for bugs the fixes introduced, and hunts with lenses
+  earlier rounds did not use.
+- **Outside checks.** The GitHub-side AI reviewers (CodeRabbit, cubic) run over
+  the combined change set after CI is green. The maintainer also cuts mains power
+  on a real installation before tagging.
 
-- **Fan-out.** Eighteen independent reviewers each took one subsystem — the
-  trigger evaluation and shutdown sequence, the multi-UPS coordinator and its
-  locks, the redundancy quorum math, every shutdown/health mixin, remote-health
-  flapping, the v6.0 API/auth/`nut_control`/dashboard surface, the SQLite stats
-  layer, config parsing and hot-reload, and the test suite itself — and read
-  the relevant files **in full**, not in excerpts.
-- **Adversarial verification.** Every Critical/High/Medium candidate was handed
-  to a second, independent reviewer whose job was to *refute* it by tracing the
-  real call path and looking for an upstream guard the first reviewer missed.
-  Only findings that survived that second pass were kept; one proposed High was
-  refuted this way and dropped.
-- **Maintainer confirmation.** The crown-jewel findings (the shutdown decision
-  path and the auth/control gate) were then re-read by hand against the live
-  code before any fix was written, so no fix rests solely on an automated claim.
+Finding counts are not a health metric; the severity trend is. Every deep clean
+of a big house finds dirt. What matters is that the findings stop being scary,
+moving from the shutdown core toward the periphery release after release.
 
-The pass classified findings as Critical / High / Medium / Low / Nit using a
-UPS-specific rubric where "false shutdown of a healthy host", "missed shutdown
-during a real outage", and "auth bypass to a control endpoint" are the
-Critical-tier outcomes. The headline result: the new v6.0 security surface
-(argv-only NUT control, bcrypt + CSPRNG tokens, parameterized SQL, a strict
-static-asset name check, and a write gate in front of every mutating route)
-held up well; the residual risk was concentrated in the shutdown decision path,
-where a plausible config typo or a slow/wedged subsystem could crash the daemon
-*before* the host poweroff. rc10 fixed the first Critical/High tranche and opened
-the upstream PR so CI could start immediately. rc11 then closed the remaining
-confirmed Medium/Low/Nit items from the same audit: request-body read bounding/timeouts,
-auth bootstrap under read-gated APIs, redundancy health reporting, SQLite
-lifecycle races, dashboard event identity, password-reset session invalidation,
-package-data drift, and docs/examples drift. Each code finding has a regression
-test that fails against the pre-fix behavior, so the same class of bug cannot
-silently return.
+### Review history
 
-## Pre-release code review (v6.1.6)
+Each release's pass found fewer and less central problems, and the method gained
+a step each time. Every row's fixes shipped with regression tests.
 
-The 6.1.x line is, by design, a massively stabilizing release series. Rather
-than chase new features, each point release has been anchored by an in-depth,
-full-repository code review performed with **Anthropic Claude Fable 5** — the
-same broad-then-deep, adversarial method as the v6.0.0 pass above, run again
-and again across the series so regressions and latent hazards are found and
-fixed before they reach a real outage.
+| Release | What changed in the method | What the Critical/High tier was |
+|---|---|---|
+| v6.0.0 | Eighteen reviewers each read one subsystem in full; a second reviewer tried to refute every Critical/High/Medium candidate (one proposed High was dropped); the maintainer re-read the shutdown and auth findings by hand. | Config typos or a wedged subsystem that could crash the daemon *before* the host poweroff. The new API/auth/control surface held up. |
+| v6.1.6 | Findings grouped into systemic patterns and fixed as classes, not instances. | A SIGTERM aborting an in-flight poweroff, a "recovered" marker written before the poweroff command was validated, and delegated-loopback success read as failure. Also: triplicated shutdown logic that drifted, config shapes that crashed instead of erroring, wall-clock timing hazards, and CI not enforcing documented guarantees. |
+| v6.1.7 | A parallel fan-out of three specialists (code, security, test coverage) merged into one go/no-go, with the suite run as part of the review. | Three config-loader Criticals with one root cause (the loader trusted YAML types): closed by one declarative schema gate. Also silent notification/poweroff failures, a DNS-rebinding read, and API DoS. |
+| v6.2.0 | Mutation testing replaced reading coverage reports; three review cycles; the maintainer's real power-cut drill gates the tag. | Split `ssh_options` failing every real remote shutdown, a stale self-test result arming shutdown, outages labelled as self-tests, an NTP clock step shutting down a redundancy group, and a reload skipping the poweroff. Round 3 found no High, but tracing one display bug uncovered a gap from 5.0: a one-entry `ups:` list ignored `is_local: false`. |
 
-v6.1.6 is, on paper, a bugfix release — and a point release is emphatically
-*not* where dozens of fixes across the whole tree normally belong. It carries
-this much deliberately: the maintainer wanted Eneru operating at the best
-possible level rather than spreading the work across several minors or
-deferring it, so the entire remediation landed in one advertised bugfix
-instead.
-
-The work came out of a full-repository adversarial audit in the same spirit as
-the v6.0.0 pass above — source, tests, CI, packaging, deployment manifests, and
-config parsing all read in full at HEAD, not just a release diff. The findings
-clustered into four systemic patterns:
-
-- **Triplicated shutdown orchestration that drifts.** The single-UPS,
-  coordinator, and redundancy paths each carried near-copies of the loopback
-  success predicate, the marker-before-validation ordering guard, and the name
-  sanitizers, and a fix applied to one copy had repeatedly been missed in the
-  others. Consolidated into shared helpers (`select_loopback_results`,
-  `loopback_poweroff_sent`, `poweroff_command_parts`, one `sanitize_name`).
-- **Validation gaps that surface as raw tracebacks.** Scalar/null config
-  sections, non-numeric thresholds, and unknown keys in legacy config shapes
-  crashed or silently defaulted instead of producing a clean error. Every
-  parse path now guards its shape and sweeps unknown keys.
-- **Concurrency / clock hazards in the daemon loop.** Wall-clock deltas,
-  modulo-clock log throttles, non-serialized reloads, and `time.monotonic`
-  cooldowns seeded at `0.0` (which never fire on a fresh boot) were replaced
-  with monotonic timing, `None` sentinels, and a reload lock.
-- **Documented guarantees CI didn't enforce.** The ≥95%-per-file coverage bar
-  lived only in prose, the `integration` pytest marker selected zero tests, a
-  required E2E check could pass while SKIPping its core assertion, and CI
-  installed a hand-picked dependency subset that drifted from `pyproject`.
-  Each is now enforced by a CI gate.
-
-The Critical tier was the shutdown decision path: a SIGTERM aborting an
-in-flight single-UPS poweroff, a coordinator writing the "recovered" marker
-before validating the poweroff command, and delegated-loopback success being
-misclassified as failure. As in v6.0.0, every code finding ships with a
-regression test that fails against the pre-fix behavior, per-file coverage
-stays at or above 95%, and the AI review bots (CodeRabbit, cubic) ran over the
-combined change set before merge.
-
-## Pre-release code review (v6.1.7)
-
-v6.1.7 continues the series with another full-repository pass with **Claude
-Fable 5** — this time a parallel fan-out of independent specialist reviews (a
-five-axis code review, a security audit, and a test-coverage analysis) merged
-into a single go/no-go decision, with the whole unit suite (thousands of tests
-at ≥95% per-file coverage) executed for real as part of the review.
-
-The pass returned an initial no-go on three config-loader Criticals that all
-shared one root cause: the loader trusted YAML scalar types and container
-shapes, so a scalar `mounts` char-split into per-letter mount paths, a
-templated `"false"` boolean stayed truthy-armed, and a missing explicit
-`--config` path started the daemon on all-default, shutdown-armed config. Those
-were fixed as a single declarative schema gate, and the remediation then worked
-outward:
-
-- **Shutdown path.** Silent notification and host-poweroff failures are now
-  observable (buffer-and-replay, exit-code checks that clear the false
-  "recovered" marker); the graceful-wait loops are POSIX-portable so they work
-  on dash/BusyBox remotes; and a containerized multi-UPS loopback delegate no
-  longer double-issues the poweroff inside its own container.
-- **Security surface.** Host-header validation closes a DNS-rebinding read of
-  the anonymous API, MQTT and NUT credential handling is hardened, and the
-  login throttle gains a global ceiling — all without weakening the trusted-LAN,
-  no-TLS-by-design posture.
-- **Performance.** A bounded API server, a cached energy block, and a dashboard
-  that fetches its heavy event scans only on demand stop the daemon from being
-  DoSed (including by its own dashboard) during an incident.
-- **Release pipeline.** A dedicated RHEL 8 RPM, a `:latest` tag promoted only
-  after the image is verified, and a smoke install from the freshly-published
-  apt/dnf repositories.
-
-As in every pass, each code finding ships with a regression test that fails
-against the pre-fix behavior, per-file coverage stays at or above 95%, and the
-GitHub-side AI reviewers ran over the combined change set before merge.
-
-## Pre-release code review (v6.2.0)
-
-v6.2.0 ran the same three-reviewer fan-out, this time over a release that
-added a config editor and a live-probing `config check`. The code and security
-reviews found three High issues (shutdown commands that built SSH differently
-from the health probe, a stale self-test result arming the failed-test
-trigger, and real outages mislabelled as self-tests), plus a tail of hardening
-items in the API, remote execution and the editor's save path.
-
-The test-quality review changed method: instead of reading coverage reports it
-**mutated the source** (about 290 mutants across concurrency, config, API and
-E2E). Coverage was already ≥95% on every file, yet roughly one mutant in three
-survived. Think of a smoke alarm that is installed in every room (coverage) but
-was never tested with smoke (mutation). The survivors were turned into tests
-that fail against their mutant, among them:
-
-- per-route auth on every UPS control write, and strict auth on writes;
-- flush → marker → poweroff ordering and the SIGTERM join budget;
-- lock races proven with a thread stalled inside the critical section;
-- check/runtime parity for the sudo prefix and the catalog bounds;
-- E2E assertions that could pass vacuously (an FSD test that other triggers
-  satisfied, multi-UPS isolation tests that never checked the healthy side,
-  UNKNOWN-quorum tests that never produced an UNKNOWN member).
-
-It also found one real bug the suite could not: a config reload that disabled
-notifications during a shutdown could crash the sequence before the host
-poweroff.
+The v6.2.0 mutation pass is worth remembering. Every file was already at 95% or
+more coverage, yet about one deliberately broken change in three went unnoticed:
+a smoke alarm in every room that had never been tested with smoke. The survivors
+became tests, and several E2E checks that could pass without proving anything
+were fixed (one had only ever passed because the daemon crashed).
 
 ## CI layout
 
