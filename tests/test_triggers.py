@@ -401,13 +401,16 @@ def _boundary_monitor(minimal_config, tmp_path):
 def _evaluate(monitor, *, charge="80", runtime="1800", rate=0.0, on_battery_for=40):
     """Run one on-battery evaluation with an exact time-on-battery.
 
-    Continuing outage (previous_status OB) anchored on the monotonic clock,
-    offset by +0.5 s so float rounding can't floor ``int(now - start)`` to
-    ``on_battery_for - 1``. Returns the shutdown reason, or None."""
+    Continuing outage (previous_status OB). Both clocks are frozen, so a slow
+    runner can't turn "exactly 900 s" into 901 s mid-evaluation. Returns the
+    shutdown reason, or None."""
+    mono_now, wall_now = 100_000.0, 1_800_000_000
     monitor.state.previous_status = "OB DISCHRG"
-    monitor.state.on_battery_start_mono = time.monotonic() - on_battery_for - 0.5
-    monitor.state.on_battery_start_time = int(time.time()) - on_battery_for
+    monitor.state.on_battery_start_mono = mono_now - on_battery_for
+    monitor.state.on_battery_start_time = wall_now - on_battery_for
     with patch.object(monitor, "_calculate_depletion_rate", return_value=rate), \
+            patch("eneru.monitor.time.monotonic", return_value=mono_now), \
+            patch("eneru.monitor.time.time", return_value=wall_now), \
             patch.object(monitor, "_trigger_immediate_shutdown") as mock_shutdown:
         monitor._handle_on_battery({
             "ups.status": "OB DISCHRG", "battery.charge": charge,
