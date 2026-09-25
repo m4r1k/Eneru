@@ -220,14 +220,16 @@ assert_dry_run_confirm_shown() {
   else
     warning="Eneru WILL act on power loss: it will shut down VMs, containers, remote servers and this host. Continue?"
   fi
-  # Strip CSI escapes and squeeze curses' padding. Here-strings, not
+  # The red box wraps the prompt over several rows. Turn every CSI escape
+  # (cursor moves, erase-chars) and line break into a space, then squeeze,
+  # so the wrapped fragments re-join with one space. Here-strings, not
   # pipes into grep -q, so pipefail can't SIGPIPE a producer.
-  screen=$(sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$log" | tr -s ' ')
+  screen=$(sed 's/\x1b\[[0-9;?]*[A-Za-z]/ /g' "$log" | tr '\r\n' '  ' | tr -s ' ')
   count=$({ grep -oF "$warning" <<<"$screen" || true; } | wc -l)
   if [ "$count" -lt 2 ] || \
      ! grep -qF "Saving changes behavior.dry_run to $state. $warning" <<<"$screen"; then
     echo "--- editor output (escape codes stripped) ---"
-    printf '%s\n' "$screen" | tail -40
+    printf '%s\n' "$screen" | fold -w 160 | tail -40
     echo "FAIL: the dry_run confirm (\"$warning\") was not shown on toggle and save (seen $count)"
     return 1
   fi

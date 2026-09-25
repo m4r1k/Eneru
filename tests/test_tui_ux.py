@@ -733,6 +733,17 @@ class TestKeyHints:
         row = "".join(win.cells.get((1, x), (" ", 0))[0] for x in range(120))
         assert "scrolled" in row
 
+    @pytest.mark.unit
+    def test_event_rows_are_cleaned_before_painting(self):
+        """Escape/control bytes in an event detail never reach curses."""
+        win = _FakeWin(12, 120)
+        with patch.object(curses, "color_pair", lambda n: n):
+            tui.render_logs_panel(win, 0, 12, 120,
+                                  ["evil \x1b[2Jcleared\x08\x07 tail"], False)
+        painted = "".join(ch for (ch, _a) in win.cells.values())
+        assert "\x1b" not in painted and "\x08" not in painted
+        assert "\x07" not in painted and "cleared" in painted
+
 
 # ---------------------------------------------------------------------------
 # M5 / M6 / M3: readable events
@@ -1040,3 +1051,30 @@ class TestCycle3:
         big.write_text("STATUS=OL\n" + "X" * (SIDE_FILE_MAX_BYTES * 2))
         assert len(read_side_file(big)) == SIDE_FILE_MAX_BYTES
         assert tui.parse_state_file(big) == {"STATUS": "OL"}
+
+    @pytest.mark.unit
+    def test_sidecar_writes_do_not_follow_a_planted_tmp_symlink(self, tmp_path):
+        """A symlink planted at ``<sidecar>.tmp`` must not redirect the
+        progress / remote-health sidecar write to another file."""
+        import threading
+        from eneru.config import Config
+        from eneru.remote_health import RemoteHealthManager
+        from eneru.shutdown.progress import ShutdownProgress
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        sidecar = tmp_path / "state.progress.json"
+        (tmp_path / "state.progress.json.tmp").symlink_to(victim)
+        ShutdownProgress("ups", "UPS", sidecar_path=sidecar).persist()
+        assert victim.read_text() == "keep"
+        assert json.loads(sidecar.read_text())["state"] == "idle"
+        assert not (tmp_path / "state.progress.json.tmp").exists()
+
+        health = tmp_path / "state.remote-health.json"
+        (tmp_path / "state.remote-health.json.tmp").symlink_to(victim)
+        RemoteHealthManager(
+            config=Config(), group_label="Rack", servers=[],
+            sidecar_path=health, stop_event=threading.Event(),
+            log_fn=lambda *_: None, notify_fn=lambda *_: None,
+        )._write_sidecar()
+        assert victim.read_text() == "keep"
+        assert json.loads(health.read_text())["group"] == "Rack"

@@ -347,10 +347,14 @@ def bounded_replacement(days_remaining: Optional[float], *,
     elif age_days is not None:
         days, source = age_days, "age"
     beyond = False
-    if days is not None and days > MAX_REPLACEMENT_DAYS:
-        days, capped, beyond = MAX_REPLACEMENT_DAYS, True, True
+    if days is not None:
+        # Round BEFORE bucketing so ``days`` and ``text`` always agree, and
+        # use the same inclusive 10-year boundary as format_replacement_eta.
+        days = round(days, 1)
+        if days >= MAX_REPLACEMENT_DAYS:
+            days, capped, beyond = MAX_REPLACEMENT_DAYS, True, True
     return {
-        "days": round(days, 1) if days is not None else None,
+        "days": days,
         "years": round(days / 365.25, 2) if days is not None else None,
         "text": format_replacement_eta(days),
         "source": source,

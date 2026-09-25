@@ -499,6 +499,12 @@ class TestDisplays:
         assert not host_poweroff_possible(
             _multi(tmp_path, "false", "false", "none"))
         assert host_poweroff_possible(_multi(tmp_path, "true", "", "none"))
+        # The single-UPS runtime ignores trigger_on: an omitted is_local still
+        # powers the host off, so root/readiness must still require it.
+        for form, owned in (("omitted", True), ("true", True), ("false", False)):
+            cfg = _load(tmp_path, _yaml(form))
+            cfg.local_shutdown.trigger_on = "none"
+            assert host_poweroff_possible(cfg) is owned, form
 
     @pytest.mark.unit
     def test_reload_marks_is_local_change_restart_required(self, tmp_path):

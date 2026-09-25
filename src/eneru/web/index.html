@@ -73,7 +73,10 @@
   <div id="banner" class="banner" hidden></div>
   <div id="banner-alert" class="sr-only" role="alert"></div>
   <div id="banner-status" class="sr-only" role="status"></div>
-  <div id="error" class="error" role="status" hidden></div>
+  <!-- The visible error carries a live age ("data from 40s ago"); only its
+       stable headline is announced, once per change (#error-status). -->
+  <div id="error" class="error" hidden></div>
+  <div id="error-status" class="sr-only" role="status"></div>
   <div id="stale-mark" class="stale-mark" hidden></div>
 
   <main>

@@ -730,7 +730,7 @@ echo "PASS: use_sudo applies to custom pre-shutdown commands"
 echo ""
 echo ">>> Running: Test 69: remote shutdown with split ssh_options (-i/-p)"
 
-docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts /tmp/eneru-split-opts-final
 cat >/tmp/config-e2e-split-opts.yaml <<'YAML'
 ups:
   name: "TestUPS@localhost:3493"
@@ -743,7 +743,7 @@ remote_servers:
     enabled: true
     host: "localhost"
     user: "testuser"
-    shutdown_command: "true"
+    shutdown_command: "touch /tmp/eneru-split-opts-final"
     ssh_options:
       - "-i"
       - "/tmp/e2e-ssh-key"
@@ -755,12 +755,26 @@ remote_servers:
       - command: "touch /tmp/eneru-split-opts"
 YAML
 
-eneru shutdown remote --config /tmp/config-e2e-split-opts.yaml \
+# Bounded: a hung SSH (stalled connection, unexpected prompt) is a FAIL,
+# not a group job stuck until the runner's limit.
+set +e
+timeout 60s eneru shutdown remote --config /tmp/config-e2e-split-opts.yaml \
   --server "Split Opts" --i-really-want-to-proceed-with-remote-shutdown \
-  >/tmp/test69a.log 2>&1 || true
+  >/tmp/test69a.log 2>&1
+rc=$?
+set -e
 cat /tmp/test69a.log
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: eneru shutdown remote exited $rc (124 = hung past 60s)"
+  exit 1
+fi
 if ! docker exec eneru-e2e-ssh test -e /tmp/eneru-split-opts; then
   echo "FAIL: split -i/-p ssh_options did not reach the target on the shutdown path"
+  exit 1
+fi
+# The final shutdown_command must run too, not just the pre-shutdown step.
+if ! docker exec eneru-e2e-ssh test -e /tmp/eneru-split-opts-final; then
+  echo "FAIL: the final shutdown_command did not run over the split ssh_options"
   exit 1
 fi
 
@@ -770,7 +784,7 @@ set -e
 cat /tmp/test69b.log
 grep -qF "Split Opts: SSH as testuser@localhost works" /tmp/test69b.log || {
   echo "FAIL: config check did not reach the split-options target"; exit 1; }
-docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts /tmp/eneru-split-opts-final
 echo "PASS: split ssh_options work identically for shutdown and config check"
 )
 

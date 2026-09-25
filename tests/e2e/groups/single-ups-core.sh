@@ -708,14 +708,15 @@ echo ""
 echo ">>> Running: Test 43: Embedded API health/readiness/metrics/index"
 
 apply_scenario online-charging
-timeout 60s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+timeout 120s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
   > /tmp/test43-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
 # Each startup endpoint gets a 10 s poll budget (0.5 s x 20 attempts), so
-# their serial retries can take 30 s. The later progress poll adds 15 s;
-# the 60 s outer timeout covers that 45 s retry budget plus test work.
+# their serial retries can take 30 s. The later apply_scenario (up to 20 s),
+# the 15 s progress poll and the F-188 check follow; the 120 s outer timeout
+# covers that budget with room. The daemon is killed as soon as the test ends.
 poll_endpoint() {
   local url="$1" out="$2" tries="${3:-20}"
   for _ in $(seq 1 "$tries"); do

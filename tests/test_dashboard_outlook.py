@@ -34,7 +34,10 @@ def _run(config, body):
     """)
     script = stub + js + "\n" + textwrap.dedent(body)
     result = subprocess.run([NODE, "-"], input=script, text=True,
-                            capture_output=True, check=True)
+                            capture_output=True)
+    if result.returncode != 0:
+        pytest.fail(f"node harness failed (exit {result.returncode})\n"
+                    f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
     return json.loads(result.stdout)
 
 
@@ -566,3 +569,79 @@ def test_fleet_rows_keep_redundancy_group_names(minimal_config, tmp_path):
     assert out["role"] == "Redundancy member (rack-a)"
     assert out["action"] == (
         "Marks this UPS critical for redundancy group rack-a (group decides) (dry-run)")
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_connection_error_is_announced_once(minimal_config):
+    """The visible error's age ticks every poll; the live region only hears
+    the stable headline, and only when it changes."""
+    body = """
+        const els = {error: {hidden: true, textContent: ""},
+                     "error-status": {textContent: "", writes: 0}};
+        const live = els["error-status"];
+        let text = "";
+        Object.defineProperty(live, "textContent", {
+          get() { return text; }, set(v) { text = v; live.writes += 1; }});
+        document.getElementById = (id) => els[id] || null;
+        showError("Connection lost - showing data from 10s ago", "Connection lost");
+        showError("Connection lost - showing data from 20s ago", "Connection lost");
+        const afterTwo = {writes: live.writes, spoken: text,
+                          shown: els.error.textContent};
+        showError("");
+        process.stdout.write(JSON.stringify({afterTwo, cleared: text,
+                                             hidden: els.error.hidden}));
+    """
+    out = _run(minimal_config, body)
+    assert out["afterTwo"] == {"writes": 1, "spoken": "Connection lost",
+                               "shown": "Connection lost - showing data from 20s ago"}
+    assert out["cleared"] == "" and out["hidden"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_old_reachable_remote_is_neutral_everywhere(minimal_config):
+    """An old "reachable" result: strip, header icon and badge all muted."""
+    body = """
+        const mk = (tag) => ({tag, className: "", children: [], attrs: {},
+          setAttribute(k, v) { this.attrs[k] = v; },
+          appendChild(c) { this.children.push(c); }, addEventListener() {}});
+        document.createElement = mk;
+        document.createElementNS = (_ns, tag) => mk(tag);
+        const wrap = {replaceChildren(...c) { this.children = c; }};
+        const els = {"remote-section": {hidden: true}, "remote-cards": wrap};
+        document.getElementById = (id) => els[id] || null;
+        Date.now = () => 1e12;
+        remoteHealthSnapshot = [{server: "nas", host: "10.0.0.2", reachable: true,
+                                 status: "OK", last_checked_at: 1e9 - 86400}];
+        renderRemoteHealth();
+        const card = wrap.children[0];
+        const find = (n, pred) => pred(n) ? n
+          : (n.children || []).map((c) => find(c, pred)).find(Boolean);
+        const ico = find(card, (n) => /card-ico/.test(n.className || ""));
+        const badge = find(card, (n) => /badge/.test(n.className || ""));
+        process.stdout.write(JSON.stringify({card: card.className,
+          ico: ico.className, badge: badge.className}));
+    """
+    out = _run(minimal_config, body)
+    assert out == {"card": "card s-muted", "ico": "card-ico s-muted",
+                   "badge": "badge muted"}
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_control_confirmation_reaches_the_status_line(minimal_config):
+    """setVariable / self-test / commands confirm what they did, not a
+    generic "Updated"."""
+    body = """
+        const line = {textContent: "", classList: {toggle() {}}};
+        document.getElementById = (id) => (id === "status-line" ? line : null);
+        setStatus("Set battery.charge.low on ups@h");
+        const confirmed = line.textContent;
+        setStatus(true);
+        process.stdout.write(JSON.stringify({confirmed, polled: line.textContent}));
+    """
+    out = _run(minimal_config, body)
+    assert "Set battery.charge.low on ups@h" in out["confirmed"]
+    assert "Updated" not in out["confirmed"]
+    assert out["polled"].startswith("Updated ")

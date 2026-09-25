@@ -698,16 +698,16 @@ def host_poweroff_possible(config: Config) -> bool:
     """Can any shutdown path power this host off? (root / readiness checks)
 
     Mirrors the runtime: a local owner, the implicit no-groups mode, or
-    ``trigger_on: any``. 6.2: the single-UPS runtime (no coordinator) never
-    powers the host off for a lone list entry with an explicit
-    ``is_local: false``, whatever ``trigger_on`` says.
+    ``trigger_on: any``. 6.2: the single-UPS runtime (no coordinator) ignores
+    ``trigger_on``: it powers the host off unless the lone list entry says
+    ``is_local: false`` explicitly.
     """
     if not config.local_shutdown.enabled:
         return False
     groups = config.ups_groups
     coordinated = config.multi_ups or bool(config.redundancy_groups)
-    if groups and not coordinated and not single_ups_owns_host(groups[0]):
-        return False
+    if groups and not coordinated:
+        return single_ups_owns_host(groups[0])
     has_local = (any(g.is_local for g in groups)
                  or any(g.is_local for g in config.redundancy_groups))
     return bool(has_local or not groups

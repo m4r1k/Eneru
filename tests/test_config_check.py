@@ -293,6 +293,19 @@ class TestStatic:
         assert out[0].level == "ok"
         assert "no container runtime found (docker)" in joined(out)
 
+    def test_dependencies_single_list_entry_follows_runtime(self, env):
+        """A one-entry list that omits is_local powers the host off but
+        skips the drain phases: flag the poweroff binary, not virsh."""
+        env.bins = {"upsc", "logger"}
+        config = build({"ups": [{"name": "u@h",
+                                 "virtual_machines": {"enabled": True}}]})
+        text = joined(cc._dependency_findings(config))
+        assert "local_shutdown.command binary 'shutdown'" in text
+        assert "could not power this host off" in text
+        assert "'virsh' not found" not in text
+        config = build({"ups": [{"name": "u@h", "is_local": False}]})
+        assert "binary 'shutdown'" not in joined(cc._dependency_findings(config))
+
     def test_dependencies_container_delegating(self, env):
         env.runtime = "container (Docker)"
         env.bins = {"upsc"}

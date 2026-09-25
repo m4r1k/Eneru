@@ -2715,6 +2715,24 @@ def test_state_file_path_for_group_single_ups_uses_unsuffixed_path():
 
 
 @pytest.mark.unit
+def test_status_paths_follow_the_coordinator_for_single_ups_redundancy():
+    """One UPS plus a redundancy group runs the coordinator, which writes
+    suffixed state + per-UPS stats files; the API readers must agree."""
+    from eneru.status import state_file_path_for_group, stats_db_path_for_group
+    from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
+    from eneru.config import RedundancyGroupConfig
+    config = Config(
+        ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+        redundancy_groups=[RedundancyGroupConfig(
+            name="rack", ups_sources=["UPS@host"])],
+        logging=LoggingConfig(state_file="/tmp/eneru-state"),
+    )
+    group = config.ups_groups[0]
+    assert str(state_file_path_for_group(config, group)) == "/tmp/eneru-state.UPS-host"
+    assert stats_db_path_for_group(config, group).name == "UPS-host.db"
+
+
+@pytest.mark.unit
 def test_redundancy_group_statuses_returns_empty_when_config_is_none():
     from eneru.status import redundancy_group_statuses
     assert redundancy_group_statuses(MagicMock(), None) == []

@@ -1246,6 +1246,7 @@ def test_relative_or_bogus_backup_dir_is_ignored(tmp_path):
 # --- F-107: no writing through a symlink swapped in after load -------------
 
 @pytest.mark.unit
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW")
 def test_swap_while_loading_cannot_retarget_the_save(tmp_path):
     """The owner swaps the path for a symlink between root resolving it and
     opening it: the load refuses (O_NOFOLLOW) instead of reading the
@@ -1297,6 +1298,7 @@ def test_save_through_a_symlink_that_was_there_at_load_is_fine(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW")
 def test_in_place_write_refuses_to_follow_a_symlink(tmp_path):
     target = tmp_path / "t.yaml"
     victim = tmp_path / "victim"

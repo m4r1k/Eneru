@@ -854,12 +854,19 @@ class TestExecutorShutdown:
         ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
         ex.logger = MagicMock()
         inside = threading.Event()
+        t2_entering = threading.Event()
+        t2_done = threading.Event()
         real_identity = ex._current_owner_identity
 
         def stalling_identity():
             if not inside.is_set():
                 inside.set()
-                time.sleep(0.3)  # thread 2 reaches the guard meanwhile
+                # Deterministic overlap: thread 1 stays inside the guard until
+                # thread 2 has entered shutdown(). Without the lock thread 2
+                # runs to completion here (and logs the false warning); with
+                # it, thread 2 blocks and this wait just times out.
+                assert t2_entering.wait(timeout=5)
+                t2_done.wait(timeout=0.5)
             return real_identity()
 
         ex._current_owner_identity = stalling_identity
@@ -868,9 +875,14 @@ class TestExecutorShutdown:
 
         def call(reason):
             try:
+                if reason == "b":
+                    t2_entering.set()
                 results.append(ex.shutdown(reason))
             except BaseException as exc:  # surface it in the main thread
                 errors.append(exc)
+            finally:
+                if reason == "b":
+                    t2_done.set()
 
         t1 = threading.Thread(target=call, args=("a",), daemon=True)
         t1.start()

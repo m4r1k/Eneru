@@ -1464,19 +1464,19 @@ class TestReleaseReviewRemoteValidation:
         assert "pre_shutdown_commands[2].use_sudo" in sudo_errors[0]
         assert not [m for m in msgs if "unknown config key" in m]
 
-    @pytest.mark.parametrize("field,value", [
-        ("user", "-oProxyCommand=touch /tmp/x"),
-        ("host", "-oProxyCommand=x"),
-        ("user", "bad user"),
-        ("host", "host\nname"),
-        ("host", "tab\there"),
+    @pytest.mark.parametrize("field,value,phrase", [
+        ("user", "-oProxyCommand=touch /tmp/x", "must not start with '-'"),
+        ("host", "-oProxyCommand=x", "must not start with '-'"),
+        ("user", "bad user", "whitespace/control characters"),
+        ("host", "host\nname", "whitespace/control characters"),
+        ("host", "tab\there", "whitespace/control characters"),
     ])
-    def test_option_like_or_whitespace_destinations_are_rejected(self, field, value):
+    def test_option_like_or_whitespace_destinations_are_rejected(
+            self, field, value, phrase):
         server = {"name": "s", "enabled": True, "host": "h", "user": "u"}
         server[field] = value
         errors = [m for m in self._messages(server) if m.startswith("ERROR")]
-        assert any(f"{field} " in m and "must not start with '-'" in m
-                   for m in errors), errors
+        assert any(f"{field} " in m and phrase in m for m in errors), errors
 
     def test_normal_destinations_pass(self):
         server = {"name": "s", "enabled": True, "host": "nas-1.lan",

@@ -341,6 +341,36 @@ class TestRunTuiLoop:
         )
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("refresh_key", ["r", "R"])
+    def test_refresh_key_is_case_insensitive(self, refresh_key):
+        """The hint advertises <R>: both cases jump the events back to the top."""
+        from eneru import tui as tui_mod
+
+        config = Config(ups_groups=[UPSGroupConfig(
+            ups=UPSConfig(name="ups-a@localhost"), is_local=True)])
+        screen = _FakeTuiScreen(height=30, width=120, keys=[
+            curses.KEY_UP, curses.KEY_UP, ord(refresh_key), ord("q")])
+        events = [f"12:{i:02d}:00  POWER EVENT: e{i}" for i in range(40)]
+
+        with patch.object(tui_mod.curses, "wrapper",
+                          side_effect=lambda cb: cb(screen)), \
+             patch.object(tui_mod.curses, "COLORS", 256, create=True), \
+             patch.object(tui_mod.curses, "start_color", lambda: None), \
+             patch.object(tui_mod.curses, "init_pair", lambda *args: None), \
+             patch.object(tui_mod.curses, "color_pair", lambda n: n), \
+             patch.object(tui_mod.curses, "curs_set", lambda _value: None), \
+             patch.object(tui_mod, "collect_group_data",
+                          side_effect=self._group_data), \
+             patch.object(tui_mod, "update_live_buffer"), \
+             patch.object(tui_mod, "query_events_for_display",
+                          return_value=events), \
+             patch.object(tui_mod, "render_logs_panel") as logs:
+            tui_mod.run_tui(config, interval=2)
+
+        offsets = [c.kwargs["scroll_offset"] for c in logs.call_args_list]
+        assert offsets[2] > 0 and offsets[-1] == 0
+
+    @pytest.mark.unit
     def test_run_tui_handles_small_terminal_until_quit(self):
         from eneru import tui as tui_mod
 
@@ -486,11 +516,11 @@ class TestRenderConfigPanel:
             },
             "resources": "VMs, containers",
             "remote_health_summary": "1 failed",
-            "epoch": time.time() - 3,
+            "epoch": 1_000_000.0,
         }]
 
         with patch.object(curses, "color_pair", lambda n: n):
-            render_config_panel(win, 0, 9, 100, groups_data)
+            render_config_panel(win, 0, 9, 100, groups_data, now=1_000_003.0)
 
         # M4: role words instead of the old "[is_local]" jargon.
         assert "Powers this host" in self._row_text(win, 1)

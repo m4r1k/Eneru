@@ -124,6 +124,27 @@ def read_side_file(path: Any, max_bytes: int = SIDE_FILE_MAX_BYTES) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def write_side_file(path: Any, text: str) -> None:
+    """Atomically replace a daemon-written side file with ``text``.
+
+    The ``<name>.tmp`` staging file is unlinked first and re-created with
+    ``O_EXCL|O_NOFOLLOW``, so a symlink planted there in a writable bind
+    mount cannot redirect the write to another file.
+    """
+    path = str(path)
+    tmp = path + ".tmp"
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
 
 

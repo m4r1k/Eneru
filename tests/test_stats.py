@@ -2051,7 +2051,7 @@ class TestPurge:
         # F-154: a sample exactly at the (bucket-aligned) raw cutoff is kept.
         import types
         import eneru.stats as stats_mod
-        now = 2_000_000_100                       # cutoff aligns down to ...000
+        now = 2_000_000_150         # now - 1h = ...550, aligned down to ...500
         fake = types.SimpleNamespace(
             **{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
         fake.time = lambda: float(now)
@@ -2059,7 +2059,8 @@ class TestPurge:
         s = StatsStore(tmp_path / "purge_edge.db", retention_raw_hours=1)
         s.open()
         try:
-            cutoff = ((now - 3600) // 300) * 300
+            cutoff = ((now - 3600) // BUCKET_5MIN) * BUCKET_5MIN
+            assert cutoff != now - 3600      # the alignment really moves it
             s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff - 1)
             s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff)
             s.flush()

@@ -312,8 +312,14 @@ function relTime(epoch) {
   return Math.floor(s / 86400) + "d ago";
 }
 
-function showError(msg) {
+// `spoken` is the stable headline screen readers hear (defaults to msg). The
+// live region is written only when that headline changes, so a message whose
+// visible age ticks every poll is not re-announced every 10 seconds.
+function showError(msg, spoken) {
   const box = document.getElementById("error");
+  const live = document.getElementById("error-status");
+  const say = msg ? (spoken || msg) : "";
+  if (live && live.textContent !== say) live.textContent = say;
   if (!msg) { box.hidden = true; return; }
   box.textContent = msg; box.hidden = false;
 }
@@ -1422,16 +1428,17 @@ function renderRemoteHealth() {
     const cls = remoteStatusClass(r);
     const reachable = remoteHealthReachable(r);
     const name = r.server || r.host || "server";
+    // An old "reachable" is neutral, not green: it says what WAS true. The
+    // strip, the icon and the badge all use the same neutral class.
+    const old = cls === "ok" && remoteCheckIsOld(r);
     // Health is carried by the colored status strip + icon + the Status row; the
     // badge stays out of the head so a long server name isn't clipped.
     const rows = [el("div", { class: "card-head" }, [
-      el("span", { class: "card-ico s-" + cls }, [icon("shield")]),
+      el("span", { class: "card-ico s-" + (old ? "muted" : cls) }, [icon("shield")]),
       el("h3", { text: name }),
     ])];
     // Label matches the color: ok→reachable, warn→degraded, crit→unreachable
     // (a DEGRADED server is amber, not a contradictory "unreachable").
-    // An old "reachable" is neutral, not green: it says what WAS true.
-    const old = cls === "ok" && remoteCheckIsOld(r);
     const statusText = cls === "ok" ? (old ? "reachable " + relTime(r.last_checked_at) : "reachable")
       : cls === "warn" ? "degraded" : "unreachable";
     rows.push(el("div", { class: "row" }, [el("span", { text: "Status" }),
@@ -5038,13 +5045,18 @@ function clientDataStale() {
   return age != null && age > CLIENT_STALE_SECONDS;
 }
 
+// `ok` is the poll result (boolean), or a confirmation message from a control
+// action ("Set battery.charge.low on ups"), shown with the time it happened.
 function setStatus(ok) {
   const bits = [];
   if (daemonVersion) bits.push("Eneru v" + daemonVersion);
   if (daemonRuntime) bits.push(daemonRuntime);
   const line = document.getElementById("status-line");
   const stale = clientDataStale();
-  if (ok) {
+  if (typeof ok === "string" && ok) {
+    bits.push(ok);
+    bits.push(new Date().toLocaleTimeString());
+  } else if (ok) {
     const at = lastGeneratedAt ? new Date(lastGeneratedAt * 1000) : new Date();
     bits.push("Updated " + at.toLocaleTimeString());
   } else if (lastGoodFetchAt) {
@@ -5132,9 +5144,11 @@ async function refreshOnce() {
     // per-UPS "updated … ago" ages keep counting.
     const since = lastGoodFetchAt ? " — showing data from " + formatAge(clientDataAge()) : "";
     if (ups.status === 0) {
-      showError("⚠️  Connection lost" + since + ". Retrying…");  // L14: network/daemon down
+      showError("⚠️  Connection lost" + since + ". Retrying…",  // L14: network/daemon down
+        "Connection lost. Retrying…");
     } else if (ups.status !== 401) {
-      showError("Could not load UPS status (HTTP " + ups.status + ")" + since);
+      showError("Could not load UPS status (HTTP " + ups.status + ")" + since,
+        "Could not load UPS status (HTTP " + ups.status + ")");
     }
     if (lastUpsRows.length) {
       preserveWindowScroll(() => { renderOverviewSummary(lastUpsRows); renderBanner(); });

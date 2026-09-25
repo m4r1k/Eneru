@@ -22,7 +22,8 @@ from eneru.remote_health import (
 from eneru.redundancy import effective_redundancy_health
 from eneru.stats import StatsStore
 from eneru.utils import (
-    command_exists, format_seconds, is_numeric, sanitize_name, status_has_token,
+    command_exists, format_seconds, is_numeric, runs_coordinator, sanitize_name,
+    status_has_token, ups_state_file_path,
 )
 from eneru.version import __version__
 
@@ -78,16 +79,15 @@ LIFECYCLE_EVENT_TYPES = {
 
 
 def stats_db_path_for_group(config: Config, group: UPSGroupConfig) -> Path:
-    """Return the stats DB path for a group."""
-    stem = sanitize_name(group.ups.name) if config.multi_ups else "default"
+    """Return the stats DB path for a group (per-UPS under the coordinator,
+    which also runs for a single UPS in a redundancy group; F-181)."""
+    stem = sanitize_name(group.ups.name) if runs_coordinator(config) else "default"
     return Path(config.statistics.db_directory) / f"{stem}.db"
 
 
 def state_file_path_for_group(config: Config, group: UPSGroupConfig) -> Path:
     """Return the state file path for a group."""
-    if config.multi_ups:
-        return Path(config.logging.state_file + f".{sanitize_name(group.ups.name)}")
-    return Path(config.logging.state_file)
+    return Path(ups_state_file_path(config, group))
 
 
 def redundancy_state_file_path(config: Config, group_name: str) -> Path:

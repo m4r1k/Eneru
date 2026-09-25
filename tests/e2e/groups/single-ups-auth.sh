@@ -674,7 +674,9 @@ echo "PASS: self_test without auth is rejected at validation"
 # stats DB only records a baseline (F-096), so the result must appear AFTER
 # Eneru is watching to count as a new observation.
 apply_scenario online-charging
-timeout 180s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test62-daemon.log 2>&1 &
+# 300s: the poll phases below budget ~180s of worst-case sleep on their own;
+# the daemon is killed as soon as the test finishes.
+timeout 300s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test62-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 

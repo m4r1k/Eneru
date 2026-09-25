@@ -1832,8 +1832,9 @@ def render_logs_panel(win, y_start: int, y_end: int, width: int,
                 EVENT_SECTION_LIFECYCLE,
             )
             # Display-cell width (handles emoji + CJK) so lines never
-            # spill past the panel edge; "…" marks a cut line.
-            display = _ellipsize(f"   {event}", max_cells)
+            # spill past the panel edge; "…" marks a cut line. clean():
+            # event details are external text (F-183), as in --once.
+            display = _ellipsize(f"   {clean(event)}", max_cells)
             # Pad to full row width with gold-bg spaces so the line
             # overwrites every cell of the row, not just where the text
             # ends. Mobile SSH clients often render emoji at a different
@@ -2197,7 +2198,7 @@ def run_tui(config: Config, interval: int = 5, *,
             if key in (ord('?'), ord('h'), ord('H')):
                 show_help = True
                 continue
-            elif key == ord('r'):
+            elif key in (ord('r'), ord('R')):
                 events_scroll = 0
                 continue
             elif key in (ord('m'), ord('M')):

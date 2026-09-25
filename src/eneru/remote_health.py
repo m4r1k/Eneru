@@ -679,9 +679,8 @@ class RemoteHealthManager:
                 "servers": self.snapshot(),
             }
             self.sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.sidecar_path.with_name(self.sidecar_path.name + ".tmp")
-            tmp.write_text(json.dumps(payload, sort_keys=True))
-            tmp.replace(self.sidecar_path)
+            eneru_utils.write_side_file(
+                self.sidecar_path, json.dumps(payload, sort_keys=True))
         except Exception as exc:
             key = str(self.sidecar_path)
             if key not in self._sidecar_write_failed_paths:

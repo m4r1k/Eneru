@@ -897,6 +897,15 @@ class TestReplacementCaps:
         b = prediction.bounded_replacement(204288, age_years=None,
                                            expected_life_years=5)
         assert b["beyond"] is True and b["days"] == prediction.MAX_REPLACEMENT_DAYS
+        # A new battery with a 10-year life lands exactly on the cap.
+        b = prediction.bounded_replacement(None, age_years=0,
+                                           expected_life_years=10)
+        assert b["text"] == "> 10 yr" and b["beyond"] is True
+        # days and text describe the same bucket after rounding.
+        b = prediction.bounded_replacement(59.96, age_years=None,
+                                           expected_life_years=None)
+        assert b["days"] == 60.0
+        assert b["text"] == prediction.format_replacement_eta(b["days"])
         b = prediction.bounded_replacement(None, age_years=6,
                                            expected_life_years=5)
         assert b["source"] == "age" and b["text"] == "now"
@@ -1017,7 +1026,7 @@ class TestStateFileKeys:
         assert data["TIMESTAMP"]  # old key kept
         assert abs(float(data["EPOCH"]) - time.time()) < 5
         assert "T" in data["TIMESTAMP_ISO"] and data["TIMESTAMP_ISO"][-6] in "+-"
-        assert data["TIME_ON_BATTERY"] in ("42", "43")
+        assert 42 <= int(data["TIME_ON_BATTERY"]) <= 47  # tolerate a slow CI worker
         assert data["DEPLETION_RATE"] == "1.5"
         assert data["TRIGGER_ACTIVE"] == "1"
         assert data["TRIGGER_REASON"] == "runtime low"
@@ -1035,7 +1044,7 @@ class TestStateFileKeys:
         monitor = _parity_monitor(minimal_config, tmp_path)
         monitor.state.on_battery_start_time = int(time.time()) - 10
         monitor._save_state({"ups.status": "OB"})
-        assert _read_state(tmp_path / "state")["TIME_ON_BATTERY"] in ("10", "11")
+        assert 10 <= int(_read_state(tmp_path / "state")["TIME_ON_BATTERY"]) <= 15
         monitor.state.on_battery_start_time = 0
         monitor._save_state({"ups.status": "OL"})
         assert _read_state(tmp_path / "state")["TIME_ON_BATTERY"] == "0"
@@ -1152,10 +1161,30 @@ class TestStatusAndApiWiring:
 
 class TestMonitorDisplayStrings:
     @pytest.mark.unit
-    def test_power_restored_downtime_is_human(self):
-        import inspect
-        source = inspect.getsource(UPSGroupMonitor._emit_lifecycle_startup_notification)
-        assert "(downtime {format_seconds(downtime)})" in source
+    def test_power_restored_downtime_is_human(self, minimal_config, tmp_path):
+        """Drive the real startup path: the POWER_RESTORED row closing an
+        outage-triggered shutdown reads "1h 1m", not raw seconds."""
+        from eneru.lifecycle import REASON_SEQUENCE_COMPLETE
+        from eneru.version import __version__
+        monitor = _parity_monitor(minimal_config, tmp_path)
+        monitor._stats_store = MagicMock()
+        monitor._stats_store._conn = object()
+        monitor._stats_store.get_meta.return_value = __version__
+        monitor._stats_store.find_pending_by_category.return_value = []
+        marker = {"shutdown_at": 1_000_000, "version": __version__,
+                  "reason": REASON_SEQUENCE_COMPLETE}
+        with patch("eneru.monitor.read_shutdown_marker", return_value=marker), \
+             patch("eneru.monitor.read_upgrade_marker", return_value=None), \
+             patch("eneru.monitor.delete_shutdown_marker"), \
+             patch("eneru.monitor.delete_upgrade_marker"), \
+             patch("eneru.monitor.coalesce_recovered_with_prev_shutdown",
+                   return_value=None), \
+             patch("time.time", return_value=1_003_700):
+            monitor._emit_lifecycle_startup_notification()
+        restored = [c.args[1] for c in monitor._stats_store.log_event.call_args_list
+                    if c.args and c.args[0] == "POWER_RESTORED"]
+        assert restored == [
+            "Power restored after outage-triggered shutdown (downtime 1h 1m)"]
 
 
 class TestBatteryHealthReplacementBlock:

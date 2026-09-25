@@ -85,10 +85,12 @@ With `use_sudo: true` on the server, every step (predefined actions and
 custom commands) and the final shutdown command run through `sudo -n`. A
 command that already starts with `sudo` (or `/usr/bin/sudo`) is left as
 written, and only the first command of a pipeline or list is prefixed.
-Two predefined actions don't follow `use_sudo`: `sync` never uses sudo
-(any user can flush), and `stop_proxmox_vms` / `stop_proxmox_cts` always
-call `sudo qm` / `sudo pct`, so a non-root user needs NOPASSWD rules for
-those tools either way.
+Among the predefined actions only `stop_containers`, `stop_vms`,
+`stop_compose` and `unmount_filesystems` follow `use_sudo`. `sync` never
+uses sudo (any user can flush); `stop_proxmox_vms` / `stop_proxmox_cts`
+always call `sudo qm` / `sudo pct`, so a non-root user needs NOPASSWD rules
+for those tools either way; `stop_containers_rootless` always uses
+`sudo -u <user>`; `stop_xcpng_vms` and `stop_esxi_vms` run as the SSH user.
 
 Some steps must run as the SSH user itself: `systemctl --user`, `podman`
 for that user's containers, or a command that starts with a shell builtin

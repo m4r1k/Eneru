@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 import re
 
 from eneru.logger import redact_sensitive_text
-from eneru.utils import read_side_file
+from eneru.utils import read_side_file, write_side_file
 from eneru.shutdown.plan import PHASE_ORDER
 
 # Remote command output can be long (a chatty shutdown script). Keep the
@@ -302,8 +302,6 @@ class ShutdownProgress:
             with self._write_lock:
                 payload = self.snapshot()
                 payload["writtenAt"] = time.time()
-                tmp = path.with_name(path.name + ".tmp")
-                tmp.write_text(json.dumps(payload, sort_keys=True))
-                tmp.replace(path)
+                write_side_file(path, json.dumps(payload, sort_keys=True))
         except Exception:
             pass

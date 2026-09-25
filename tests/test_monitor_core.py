@@ -5607,6 +5607,10 @@ class TestUpscPollNeverStallsBehindControl:
         # Lock free again: the episode ends, and a later bypass logs again.
         monitor._run_upsc([], full_poll=True)
         assert monitor._upsc_lock_bypassed is False
+        with lock:
+            monitor._run_upsc([], full_poll=True)
+        logs = [c.args[0] for c in monitor._log_message.call_args_list]
+        assert sum("polling without waiting" in m for m in logs) == 2
 
 
 class TestNominalPowerOverrideWarning:

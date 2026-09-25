@@ -84,16 +84,19 @@ Each UPS row in `/api/v1/ups` and `/api/v1/ups/<name>` adds:
 `/api/v1/ups` and `/api/v1/ups/<name>` both carry `generatedAt`, the server's
 epoch time when the payload was built. ETA rules: low battery uses the current
 drain rate, critical runtime assumes the runtime counts down in real time, and
-the time-based triggers use the clock. No ETA is shorter than the remaining
-on-battery stabilization hold.
+the time-based triggers use the clock. The low-battery, critical-runtime,
+depletion-rate and extended-time ETAs are never shorter than the remaining
+on-battery stabilization hold; the `failsafe` and `selfTestFailure` rows have
+no such hold.
 
 While NUT polls fail on battery, the `failsafe` row is `arming` (amber): its
 text counts the failures ("1 of 3 NUT polls failed") and its `etaSeconds` is
 the remaining polls times the 5 s retry wait (a floor). An `arming` row is a
 `nextTrigger` candidate like any other countdown. It turns `fired` on the poll
 where the daemon runs FAILSAFE, and back to `ok` once a poll succeeds. FAILSAFE fires at
-`max_stale_data_tolerance`; the row's `connectionErrorCount` and
-`staleDataCount` hold the counts.
+`max_stale_data_tolerance`. The counts themselves are the UPS row's
+top-level `connectionErrorCount` and `staleDataCount` fields, not keys of the
+`failsafe` trigger row.
 
 A redundancy member's own trigger is a vote, not a shutdown: its `role` has
 `hasShutdownActions: false`, and a `trigger_active` or FSD `statusSummary`

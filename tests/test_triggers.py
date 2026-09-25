@@ -549,7 +549,8 @@ class TestFailsafeLatchFSD:
 
     @pytest.mark.unit
     def test_online_poll_rearms_latch(self, monitor):
-        self._one_poll(monitor, {
+        mock_sd = self._one_poll(monitor, {
             "ups.status": "OL CHRG", "battery.charge": "90",
             "battery.runtime": "1800", "ups.load": "25"})
+        mock_sd.assert_not_called()                  # on line: nothing fires
         assert monitor._failsafe_initiated is False

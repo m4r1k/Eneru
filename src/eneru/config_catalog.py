@@ -19,7 +19,7 @@ shows everything.
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional, Tuple, Union
 
-from eneru.actions import REMOTE_ACTIONS
+from eneru.actions import REMOTE_ACTION_PLACEHOLDERS, REMOTE_ACTIONS
 from eneru.config import (
     APIConfig,
     AuthConfig,
@@ -371,7 +371,12 @@ PRE_SHUTDOWN_SECTION = Section(
                "Sudo for this step only. Empty = follow the server's use_sudo; "
                "false runs it as the SSH user (e.g. `systemctl --user`, "
                "`podman` for that user, or a `cd … &&` command); true forces "
-               "`sudo -n`.", None, nullable=True),
+               "`sudo -n`. Applies to custom commands and to "
+               + ", ".join(sorted(a for a, keys in
+                                  REMOTE_ACTION_PLACEHOLDERS.items()
+                                  if "sudo" in keys))
+               + "; other actions ignore it (the Proxmox actions always run "
+               "`sudo qm` / `sudo pct`).", None, nullable=True),
         ListSection("mounts", "Mounts (unmount_filesystems only)",
                     "Remote mount points to unmount.", MOUNT_SECTION,
                     tier=BASIC),

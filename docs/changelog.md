@@ -268,13 +268,26 @@ the dashboard, and self-tests that no longer look like outages.
   amber `arming` trigger state (the API, dashboard and `eneru monitor` render
   it; `held` still means "waiting out the stabilization delay"); `/api/v1/ups`
   adds `connectionErrorCount`.
-- A single UPS plus a redundancy group: `eneru monitor` reads the daemon's
-  suffixed state/stats files, so it no longer shows a false "Quorum lost".
+- A single UPS plus a redundancy group: `eneru monitor` and the API read the
+  daemon's suffixed state/stats files, so `eneru monitor` no longer shows a
+  false "Quorum lost" and the API's history, events and remote health come from
+  the files the daemon writes.
 - A late progress write can no longer overwrite a finished shutdown, which
   left `eneru monitor` showing "Shutting down" forever.
-- `eneru monitor --once` strips terminal escape sequences from NUT, state-file,
-  progress and event text, and state/progress files are read only as regular
-  files, capped at 64 KiB.
+- `eneru monitor` (interactive and `--once`) strips terminal escape sequences
+  from NUT, state-file, progress and event text, and state/progress files are
+  read only as regular files, capped at 64 KiB. `R` refreshes like `r`.
+- A one-entry `ups:` list without `is_local` and with
+  `local_shutdown.trigger_on: none` still counts as powering the host off, so
+  the root check and `/ready` require it. `config check` flags that setup's
+  missing poweroff binary and no longer warns about VM/container tools for
+  drain phases that never run there.
+- The replacement estimate's `days` and `text` always describe the same bucket,
+  and exactly 10 years is `beyond`.
+- Dashboard: a lost connection is announced to screen readers once, not on
+  every poll; an old "reachable" remote check has a neutral icon too; UPS
+  control actions confirm what they did ("Set … on …") on the status line
+  again.
 - A redundancy member's fired trigger is shown in amber as "Trigger met, group
   decides", never as a red "Shutdown triggered": the group decides.
 
@@ -287,6 +300,9 @@ the dashboard, and self-tests that no longer look like outages.
 - Audit events can't be deleted through the API, and anonymous readers (auth
   on) no longer see audit events or remote-check error details, including the
   remote-health rows inside `/api/v1/ups` and `/api/v1/ups/{name}`.
+- The shutdown-progress and remote-health sidecars are written through a
+  fresh `O_EXCL|O_NOFOLLOW` temp file, so a symlink planted at `<sidecar>.tmp`
+  can't redirect the write.
 - The editor refuses to save through a config path swapped for a symlink while
   or after it was opened, and MQTT broker credentials are masked in the editor and in
   `config check`.

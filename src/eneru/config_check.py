@@ -350,15 +350,21 @@ def _dependency_findings(config: Config) -> List[Finding]:
     owner = _runtime_ctx._local_owner_group(config)
     delegating = _runtime_ctx._uses_loopback_delegate(config)
     implicit_local = not config.ups_groups and not config.redundancy_groups
-    if ((owner is not None or implicit_local) and config.local_shutdown.enabled
-            and not delegating):
+    # The only UPS (no coordinator) powers the host off unless it says an
+    # explicit is_local: false, even when is_local is omitted.
+    single_owner = bool(config.ups_groups) and not runs_coordinator(config) \
+        and single_ups_owns_host(config.ups_groups[0])
+    if ((owner is not None or implicit_local or single_owner)
+            and config.local_shutdown.enabled and not delegating):
         binary = poweroff_binary(config.local_shutdown.command)
         if binary and not command_exists(binary):
             out.append(Finding(
                 LEVEL_ERROR, "safety",
                 f"local_shutdown.command binary '{binary}' not found",
-                "The daemon treats a missing poweroff binary as FATAL at "
-                "startup. Fix local_shutdown.command or install the tool."))
+                ("The daemon treats a missing poweroff binary as FATAL at "
+                 "startup." if owner is not None or implicit_local else
+                 "The shutdown sequence could not power this host off.")
+                + " Fix local_shutdown.command or install the tool."))
     if delegating and not command_exists("ssh"):
         out.append(Finding(
             LEVEL_ERROR, "runtime",
@@ -372,9 +378,9 @@ def _dependency_findings(config: Config) -> List[Finding]:
 
     for group in _all_groups(config):
         label = _group_label(group)
-        local = bool(getattr(group, "is_local", False)) or (
-            group is (config.ups_groups[0] if config.ups_groups else None)
-            and not config.multi_ups and single_ups_owns_host(group))
+        # The drain phases run only for the group's own is_local (the runtime
+        # gates them on it even in single-UPS mode; F-178).
+        local = bool(getattr(group, "is_local", False))
         if local and not delegating:
             if group.virtual_machines.enabled and not command_exists("virsh"):
                 out.append(Finding(
