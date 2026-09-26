@@ -31,22 +31,41 @@ Open `http://<host>:9191/` in a browser.
   config + remote-health snapshot taken once per refresh, so opening it costs no
   extra requests.
 - **Redundancy groups:** a healthy/required rollup (how many member UPSes are
-  currently healthy vs the quorum target), when configured. The header **View**
+  currently healthy vs the quorum target), when configured. Each card names
+  the failing members, says what happens next ("1 more failure → group
+  shutdown", "Quorum lost → group shutdown runs") and what the group's
+  shutdown does. The header **View**
   selector can scope Overview, Power, Battery, Energy, Events, and Shutdown to
   one redundancy group. Group views use the member UPS telemetry and show only
   remote servers owned by that group. UPS write controls remain per-UPS, so the
   Control tab asks you to select a UPS instead of exposing group-wide buttons.
 - **On-battery / shutdown banner:** driven by live UPS and redundancy status (not
-  stale events), so it appears when a UPS goes on battery or shutdown is imminent
-  and clears as soon as power returns.
+  stale events), so it appears when a UPS goes on battery or a shutdown trigger
+  fires and clears as soon as power returns. The wording depends on the UPS's
+  role: a monitoring-only UPS gets an amber note that nothing is shut down on
+  this host; a UPS that powers this host names the trigger that fired and what
+  the shutdown does; a running shutdown links to its progress on the Shutdown
+  tab. A redundancy member's own alarms stay amber and say the group decides,
+  even when its entry has local resources: only the group's quorum verdict
+  (quorum lost, group shutdown running) turns the banner red. Red alerts are announced to screen readers (`role="alert"`), and the
+  browser tab title follows the outage (`⚠ On battery · Lab 62% — Eneru`).
+- **What happens next:** while a UPS is on battery, its view lists every armed
+  trigger (charge, runtime, drain rate, time on battery, ...) with the live
+  value and an ETA, led by the closest one, plus what firing does. Fleet rows
+  show time on battery and the next trigger. Nothing is shown for a
+  monitoring-only UPS beyond a note that it only alerts.
+- **Freshness:** each UPS shows how old its reading is ("updated 3s ago"). If
+  the daemon stops answering, the footer and the error line say how old the
+  data on screen is; after three missed polls (30 s) the page is greyed out and
+  marked `STALE` so a frozen daemon never looks live.
 - **History graphs:** hand-rolled SVG line charts for battery charge, load,
   runtime, and input voltage, from `/api/v1/ups/{name}/history`, with a **range
   selector** (1 hour → 1 year, or All). Charts scale to the panel width and
   redraw on resize.
 - **Event timeline:** power/diagnostic/lifecycle events from `/api/v1/events`,
-  with filters for source, event type, and detail text, a **range selector**, and
-  a **Load older** button that pages further back through the full retained
-  history.
+  newest first, with filters for source, event type, and detail text, a **range
+  selector**, and a **Load older** button under the table that pages further
+  back through the full retained history.
 - **Delete events:** when signed in, select events with the row checkboxes and
   use **Delete selected** to remove them (auth-gated; the server enforces it).
   Only currently-visible selected rows are deleted.
@@ -55,7 +74,8 @@ Open `http://<host>:9191/` in a browser.
   controls reflect the configured command/variable allowlists; the server
   enforces them regardless of what the UI renders.
 - **Shutdown plan and progress:** the Shutdown tab shows the exact plan for a
-  UPS or redundancy group, including phase order, parallel remotes, advisory
+  UPS or redundancy group, every configured trigger with its threshold and the
+  closest one right now, phase order, parallel remotes, advisory
   remote health, and the current or most recent execution result. During an
   active shutdown it marks phases and remote targets as running, succeeded,
   failed, timed out, or skipped.
@@ -64,6 +84,15 @@ The page polls status every 10 seconds. While the Shutdown tab is visible, it
 polls the small progress snapshots every second so phase changes appear promptly.
 
 ### Status and event wording
+
+Status badges use the shared status vocabulary (see
+[Observability API](observability-api.md), "Status vocabulary"): one short
+label (**On mains**, **On battery**, **Low battery**, **Shutdown triggered**,
+**Shutting down**, **Stale data**, ...) on a green/amber/red scale. On battery
+is amber; only a triggered or running shutdown pulses. Hover a badge for the
+full NUT wording. Each UPS also carries a role tag: **Powers this host**,
+**Remote shutdowns only**, **Monitoring only** or **Redundancy member**, taken
+from its real shutdown plan.
 
 The dashboard translates NUT status flags and Eneru event identifiers into
 plain language. For example, `OL CHRG` appears as **Utility power · Battery
@@ -75,7 +104,7 @@ charging**, `OB LB` appears as **Battery low · Running on battery**, and
 Vendor-specific status tokens are not hidden. The dashboard appends them as a
 custom state after any recognized status. This translation happens only in the
 browser: the REST API, SQLite history, and logs retain the exact NUT values for
-integrations and troubleshooting. The terminal UI is unchanged.
+integrations and troubleshooting. `eneru monitor` uses the same short labels.
 
 ## Theme
 

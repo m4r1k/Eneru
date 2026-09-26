@@ -390,6 +390,34 @@ class TestDelegatedShutdownSequence:
         monitor._cleanup_and_exit.assert_called_once_with(None, None)
 
     @pytest.mark.unit
+    def test_reload_nulling_worker_mid_delegated_flush_still_completes(
+            self, tmp_path):
+        """F-122 (delegated site): a SIGHUP reload that disables notifications
+        lands between the worker check and ``.flush()``. The delegated
+        completion must still flush the worker it read and write the
+        recovery marker (the host poweroff was delegated over SSH)."""
+        monitor = _make_delegated_monitor(tmp_path, dry_run=False)
+        self._spy_phases(monitor)
+        monitor._send_notification = MagicMock()
+        worker = MagicMock()
+
+        def reload_lands_here():
+            monitor._notification_worker = None
+            return True
+
+        worker.__bool__ = MagicMock(side_effect=reload_lands_here)
+        monitor._notification_worker = worker
+
+        with _patch_runtime("container (Docker)"), \
+             patch("eneru.monitor.write_shutdown_marker") as marker:
+            monitor._execute_shutdown_sequence()
+
+        worker.flush.assert_called_once_with(timeout=5)
+        marker.assert_called_once()
+        # The simulated reload really landed mid-sequence.
+        assert monitor._notification_worker is None
+
+    @pytest.mark.unit
     def test_missing_ssh_is_fatal_when_delegating(self, tmp_path):
         monitor = _make_delegated_monitor(tmp_path)
 

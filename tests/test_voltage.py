@@ -936,3 +936,45 @@ class TestNotificationText:
         h._check_voltage_issues("OL", "245")
         body, _ = h.notifications[0]
         assert "outside the configured ±5% nominal band" in body
+
+
+# ===========================================================================
+# F-154: threshold / dwell boundaries (exactly-at-threshold stays NORMAL)
+# ===========================================================================
+
+class TestVoltageBoundaries:
+
+    @pytest.mark.unit
+    def test_exactly_warning_low_is_normal(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=0)
+        h._initialize_voltage_thresholds()
+        low = h.state.voltage_warning_low
+        h._check_voltage_issues("OL", str(low))
+        assert h.state.voltage_state == "NORMAL"
+        h._check_voltage_issues("OL", str(low - 0.5))
+        assert h.state.voltage_state == "LOW"
+
+    @pytest.mark.unit
+    def test_exactly_warning_high_is_normal(self):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=0)
+        h._initialize_voltage_thresholds()
+        high = h.state.voltage_warning_high
+        h._check_voltage_issues("OL", str(high))
+        assert h.state.voltage_state == "NORMAL"
+        h._check_voltage_issues("OL", str(high + 0.5))
+        assert h.state.voltage_state == "HIGH"
+
+    @pytest.mark.unit
+    def test_dwell_fires_at_exactly_hysteresis_seconds(self, monkeypatch):
+        h = _TestHost(ups_vars={"input.voltage.nominal": "230"}, hysteresis=5)
+        h._initialize_voltage_thresholds()
+        clock = [1000.0]
+        monkeypatch.setattr("eneru.health.voltage.time.time", lambda: clock[0])
+        h._check_voltage_issues("OL", "260")      # +13%: HIGH, not severe -> pending
+        clock[0] = 1004.0
+        h._check_voltage_issues("OL", "260")      # 4 s < 5 s dwell
+        assert h.notifications == []
+        clock[0] = 1005.0
+        h._check_voltage_issues("OL", "260")      # exactly the dwell -> fire
+        assert len(h.notifications) == 1
+        assert "Persisted 5s" in h.notifications[0][0]

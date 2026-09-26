@@ -10,7 +10,10 @@ from typing import Any, Optional, Tuple
 from eneru import auth
 from eneru import runtime as _runtime_ctx
 from eneru.version import __version__
-from eneru.config import Config, ConfigLoader, UPSConfig, UPSGroupConfig, is_validation_error
+from eneru.config import (
+    Config, ConfigLoader, UPSConfig, UPSGroupConfig, host_poweroff_possible,
+    is_validation_error, single_ups_owns_host,
+)
 # F-057: runtime-context detection + loopback-delegation predicate now live in
 # the leaf module ``eneru.runtime`` (they used to be defined here, which made
 # monitor.py / redundancy.py reach UP into the CLI). cli calls them through the
@@ -32,7 +35,7 @@ from eneru.notifications import APPRISE_AVAILABLE
 from eneru.redundancy import RedundancyGroupExecutor
 from eneru.remote_health import is_safe_probe_command, run_remote_probe
 from eneru.status import remote_health_for_config
-from eneru.utils import redact_apprise_url
+from eneru.utils import redact_apprise_url, runs_coordinator
 
 # Optional import for Apprise (needed for test notifications)
 try:
@@ -157,12 +160,9 @@ def _root_required_reasons(config: Config) -> list[str]:
         if group.filesystems.unmount.enabled:
             reasons.append(f"redundancy group '{label}' has filesystem unmount enabled")
 
-    has_local_owner = any(g.is_local for g in groups) or any(
-        g.is_local for g in config.redundancy_groups
-    )
-    if config.local_shutdown.enabled and (
-        has_local_owner or not groups or config.local_shutdown.trigger_on == "any"
-    ):
+    # 6.2: shared with the readiness check; the only UPS with an explicit
+    # `is_local: false` never powers the host off, so it needs no root for it.
+    if host_poweroff_possible(config):
         reasons.append("local_shutdown can power off the Eneru host")
 
     return sorted(set(reasons))
@@ -711,7 +711,7 @@ def _cmd_run(args):
     _exit_on_missing_loopback_contract(config)
     _exit_on_privilege_errors(config)
 
-    if config.multi_ups or config.redundancy_groups:
+    if runs_coordinator(config):
         coordinator = MultiUPSCoordinator(config, exit_after_shutdown=args.exit_after_shutdown)
         coordinator.run()
     else:
@@ -730,7 +730,8 @@ def _cmd_run(args):
             raise SystemExit(1)
 
 
-def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
+def _print_shutdown_sequence(group, enabled_servers, has_local, prefix,
+                             local_drain=None):
     """Print the shutdown sequence tree for a UPS group.
 
     v5.5: ``is_host_loopback`` delegates do NOT participate in normal
@@ -756,8 +757,12 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
     print(f"{prefix}  Shutdown sequence:")
     step = 1
     indent = f"{prefix}    "
+    # The runtime drains (VMs/containers/filesystems) only for an is_local
+    # group, even when the lone UPS still powers the host off (omitted key).
+    if local_drain is None:
+        local_drain = has_local
 
-    if has_local and not delegated:
+    if local_drain and not delegated:
         if group.virtual_machines.enabled:
             print(f"{indent}{step}. Virtual machines")
             step += 1
@@ -779,7 +784,7 @@ def _print_shutdown_sequence(group, enabled_servers, has_local, prefix):
                 parts.append(f"unmount {mount_count} mount(s)")
             print(f"{indent}{step}. Filesystem {' + '.join(parts)}")
             step += 1
-    elif has_local and delegated:
+    elif local_drain and delegated:
         # Build a brief summary of what will be delegated to the loopback.
         delegated_parts = []
         if group.virtual_machines.enabled:
@@ -863,12 +868,18 @@ def _print_group_summary(group, idx, multi_ups):
         print(f" ({group.ups.name})", end="")
     if group.is_local:
         print(" [is_local]", end="")
+    elif not multi_ups and group.is_local_explicit:
+        print(" [is_local: false, this host stays on]", end="")
     print()
 
     # Shutdown sequence tree
     enabled_servers = [s for s in group.remote_servers if s.enabled]
-    has_local = group.is_local or not multi_ups
-    _print_shutdown_sequence(group, enabled_servers, has_local, prefix)
+    # Single-UPS: the host powers off unless the lone list entry says an
+    # explicit `is_local: false` (the runtime's single_ups_owns_host rule).
+    has_local = group.is_local or (
+        not multi_ups and single_ups_owns_host(group))
+    _print_shutdown_sequence(group, enabled_servers, has_local, prefix,
+                             local_drain=group.is_local)
 
 
 def _cmd_validate(args):
@@ -1616,6 +1627,18 @@ def _resolve_auth_store(args):
 
 
 def _resolve_password(args):
+    """Resolve the password (see :func:`_read_password`) and enforce the
+    F-111 minimum length on operator-chosen ones; ``--generate`` output
+    (24 characters) always passes."""
+    password, generated = _read_password(args)
+    if not generated and len(password) < auth.MIN_PASSWORD_LENGTH:
+        raise SystemExit(
+            f"ERROR: password must be at least {auth.MIN_PASSWORD_LENGTH} "
+            "characters (or use --generate)")
+    return password, generated
+
+
+def _read_password(args):
     """Resolve a password without ever accepting it as a CLI argument value.
 
     Order: ``--generate`` -> ``--password-stdin`` -> interactive ``getpass``.

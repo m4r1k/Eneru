@@ -85,6 +85,9 @@ remote_servers:
     # Eneru inside the container has no ~/.ssh/known_hosts. The MITM
     # surface on 127.0.0.1 is zero (same kernel namespace), so the
     # loopback explicitly disables strict host-key checking.
+    # ONLY with --network host: for a bridge gateway or
+    # host.containers.internal, drop both options so the host key is
+    # pinned (docs/containers-kubernetes.md, "Pin the host key").
     ssh_options:
       - "StrictHostKeyChecking=no"
       - "UserKnownHostsFile=/dev/null"

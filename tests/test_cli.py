@@ -401,9 +401,12 @@ class TestPrivilegeChecks:
         """
         from eneru.cli import _root_required_reasons
 
+        # A lone UPS needs `is_local: false` spelled out: the single-UPS
+        # runtime ignores trigger_on and powers the host off otherwise.
         config = Config(
             ups_groups=[UPSGroupConfig(
                 ups=UPSConfig(name="UPS@nut"), is_local=False,
+                is_local_explicit=True,
             )],
             local_shutdown=LocalShutdownConfig(enabled=True, trigger_on="none"),
         )

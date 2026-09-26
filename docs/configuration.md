@@ -216,7 +216,7 @@ In single-UPS mode this is `ups:`. In multi-UPS mode each list entry accepts the
 | `display_name` | `null` | Human label for logs, notifications, and TUI |
 | `check_interval` | `1` | Poll interval in seconds |
 | `max_stale_data_tolerance` | `3` | Failed or stale polls before connection handling starts |
-| `is_local` | `false` | Multi-UPS only. This group powers the Eneru host and may own local resources |
+| `is_local` | `false` | List form only. This group powers the Eneru host and may own local resources. With a one-entry list, an explicit `false` means this host is never powered off by that UPS (only its remote servers shut down); leaving it out still powers the host off and logs a warning. See [Local shutdown](#local-shutdown) |
 | `connection_loss_grace_period.enabled` | `true` | Suppress notifications for brief NUT outages while the UPS is on line power |
 | `connection_loss_grace_period.duration` | `60` | Seconds to wait before sending `CONNECTION_LOST` |
 | `connection_loss_grace_period.flap_threshold` | `5` | Warning threshold for repeated grace-period recoveries within 24 hours |
@@ -238,6 +238,39 @@ See [Troubleshooting](troubleshooting.md#intermittent-nut-drops) for tuning guid
 In list-form `ups:`, only `cost_per_kwh` and `nominal_power` may appear in a
 per-UPS `energy:` block. Missing keys inherit the global value; explicit `null`
 clears it. See [Energy tracking](energy-tracking.md) for calculation details.
+
+## Battery health
+
+`battery_health` computes a 0-100 battery score and predicts when the battery
+is due for replacement. Global defaults can be overridden per UPS. Full
+explanation: [Battery health](battery-health.md).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Compute the score and prediction |
+| `update_interval` | `3600` | Seconds between score updates |
+| `nominal_runtime_seconds` | `null` | Expected full-charge runtime; `null` learns it at the first 100% reading |
+| `battery_install_date` | `null` | `YYYY-MM-DD`; `null` leaves the age term unavailable |
+| `expected_life_years` | `5.0` | Expected battery life |
+| `warn_score` / `critical_score` | `30.0` / `15.0` | Alert once when the score drops below each; `null` disables a tier |
+| `replacement.threshold_score` | `50.0` | Score at which the battery counts as due |
+| `replacement.horizon_days` | `90` | Warn when the due date is within this many days |
+| `replacement.min_history_days` | `14` | History needed before predicting |
+
+## Self-test
+
+Eneru always records the results of tests the UPS runs itself. `self_test`
+adds scheduled tests that Eneru issues (a write surface that needs API
+authentication). Overridable per UPS. Full explanation:
+[Self-test](self-test.md).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Issue a self-test on the schedule below |
+| `schedule` | `monthly` | `daily`, `weekly`, `monthly`, or `every <N>d/h/m` |
+| `time` | `"03:00"` | Wall-clock time for calendar schedules |
+| `command` | `test.battery.start` | Instant command to issue; must be listed by `upscmd -l` |
+| `result_poll_after` | `60` | Seconds after issuing before reading the result |
 
 ## Triggers
 
@@ -522,8 +555,9 @@ mounts:
 | `shutdown_command` | `sudo shutdown -h now` | Final shutdown command |
 | `use_sudo` | `false` | Run generated privileged actions, custom `pre_shutdown_commands` (6.2+) and the final shutdown command through `sudo -n`, unless a command already starts with `sudo`. Useful for non-root loopback or remote users with NOPASSWD sudo |
 | `ssh_key_path` | `null` | Optional SSH private-key path, useful for container/Kubernetes volume mounts |
-| `ssh_options` | `[]` | Extra SSH options. Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
+| `ssh_options` | `[]` | Extra SSH options, one per item: `KEY=VALUE` (sent as `-o KEY=VALUE`), `-o KEY=VALUE`, or a flag with its value (`-i /path/key` is split into two ssh arguments). Eneru defaults each remote to `StrictHostKeyChecking=accept-new` (learns and pins the host key on first use; bare metal uses the running user's `~/.ssh/known_hosts`, Docker/Podman uses `/var/lib/eneru/ssh/known_hosts`, Kubernetes samples set a PVC-backed path), so no entry is needed for normal use. Set your own `StrictHostKeyChecking` or `UserKnownHostsFile` to override; avoid `StrictHostKeyChecking=no` in production |
 | `pre_shutdown_commands` | `[]` | Pre-shutdown actions or commands. For loopback entries Eneru generates these from the local config — don't duplicate |
+| `pre_shutdown_commands[].use_sudo` | unset | Per-step sudo: unset follows the server's `use_sudo`; `false` runs the step as the SSH user (e.g. `systemctl --user`, a `cd … &&` command), `true` forces `sudo -n` |
 | `pre_shutdown_commands[].mounts` | `[]` | Mounts for `action: unmount_filesystems` on ordinary remote servers. Loopback entries derive mounts from `filesystems.unmount.mounts` |
 | `shutdown_order` | unset | Explicit phase. Same value runs in parallel; higher values run later |
 | `parallel` | unset | Legacy mode. `false` runs before the default parallel batch. Mutually exclusive with `shutdown_order` |
@@ -573,6 +607,21 @@ See [Remote servers](remote-servers.md) for SSH keys, sudoers, predefined action
 | `drain_on_local_shutdown` | `false` | Multi-UPS. Drain all groups before powering off the local host |
 | `trigger_on` | `any` | Multi-UPS. `any` means any group can trigger local shutdown; `none` disables cross-group local shutdown |
 | `wall` | `false` | Broadcast shutdown warnings to logged-in TTYs |
+
+### Which UPS powers this host off
+
+Think of each UPS as a house's main breaker. Eneru only flips the breaker of
+the house it lives in.
+
+| Config | Does a trigger power this host off? |
+|---|---|
+| `ups:` as a mapping (classic single-UPS form) | Yes |
+| `ups:` list with one entry, `is_local: true` | Yes |
+| `ups:` list with one entry, `is_local` left out | Yes, and Eneru warns at startup, in `eneru validate` and in `eneru config check` so you can set `is_local` explicitly |
+| `ups:` list with one entry, `is_local: false` | No. Its `remote_servers` still shut down and notifications still go out; this host stays on (since 6.2) |
+| `ups:` list with several entries | The `is_local: true` group powers the host off. With no local group, `trigger_on: any` lets any group power it off and `none` never does. `eneru config check` reports an error when every entry says `is_local: false` yet `trigger_on` is `any` |
+
+`local_shutdown.enabled: false` keeps the host on in every row.
 
 ## Redundancy groups
 

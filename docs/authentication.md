@@ -76,6 +76,11 @@ eneru user passwd alice --generate
 eneru user delete alice
 ```
 
+Passwords you choose (prompt or `--password-stdin`) must be **at least 12
+characters**; shorter ones are refused. `--generate` always produces a
+24-character password. Existing accounts keep working; the rule applies only
+when a password is set.
+
 There is deliberately **no `--password VALUE` flag** — a password on the command
 line leaks into shell history and the process list (`ps`). Use the interactive
 prompt, `--generate`, or `--password-stdin`.

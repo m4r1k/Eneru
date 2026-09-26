@@ -16,10 +16,10 @@ an explanation.
 shows everything.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional, Tuple, Union
 
-from eneru.actions import REMOTE_ACTIONS
+from eneru.actions import REMOTE_ACTION_PLACEHOLDERS, REMOTE_ACTIONS
 from eneru.config import (
     APIConfig,
     AuthConfig,
@@ -72,6 +72,8 @@ class Option:
     nullable: bool = False
     minimum: Optional[float] = None
     maximum: Optional[float] = None
+    # True: ``minimum`` itself is rejected (the loader wants "> minimum").
+    minimum_exclusive: bool = False
     tier: str = ADVANCED
     # Example shown when the value is empty (e.g. "UPS@192.168.1.10").
     example: str = ""
@@ -185,7 +187,7 @@ CLGP_SECTION = Section(
         Option("duration", "int",
                "Seconds of lost NUT connection (on mains) before the "
                "CONNECTION_LOST notification is sent.",
-               _d(_CLGP, "duration"), minimum=0),
+               _d(_CLGP, "duration"), minimum=1),
         Option("flap_threshold", "int",
                "Warn once the connection has dropped and recovered this many "
                "times within 24 hours: a sign of a flaky network or upsd.",
@@ -228,7 +230,7 @@ TRIGGERS_SECTION = Section(
                     Option("critical_rate", "float",
                            "Shut down when charge drops faster than this many "
                            "percent per minute.", _d(_DEP, "critical_rate"),
-                           minimum=0),
+                           minimum=0, minimum_exclusive=True),
                     Option("grace_period", "int",
                            "Seconds after power loss before the drain rate "
                            "may trigger (the first minute is noisy).",
@@ -362,9 +364,19 @@ PRE_SHUTDOWN_SECTION = Section(
                example="systemctl stop my-service"),
         Option("timeout", "int",
                "Seconds this step may take; empty = the server's "
-               "command_timeout.", None, nullable=True, minimum=0),
+               "command_timeout.", None, nullable=True, minimum=1),
         Option("path", "str", "Compose file path (stop_compose only).", None,
                nullable=True),
+        Option("use_sudo", "tristate",
+               "Sudo for this step only. Empty = follow the server's use_sudo; "
+               "false runs it as the SSH user (e.g. `systemctl --user`, "
+               "`podman` for that user, or a `cd … &&` command); true forces "
+               "`sudo -n`. Applies to custom commands and to "
+               + ", ".join(sorted(a for a, keys in
+                                  REMOTE_ACTION_PLACEHOLDERS.items()
+                                  if "sudo" in keys))
+               + "; other actions ignore it (the Proxmox actions always run "
+               "`sudo qm` / `sudo pct`).", None, nullable=True),
         ListSection("mounts", "Mounts (unmount_filesystems only)",
                     "Remote mount points to unmount.", MOUNT_SECTION,
                     tier=BASIC),
@@ -403,7 +415,8 @@ REMOTE_SERVER_SECTION = Section(
         Option("shutdown_order", "int",
                "Phase number. Lower phases shut down first; servers with the "
                "same number shut down in parallel (e.g. 1 = compute, 2 = "
-               "storage, 3 = network). Empty = legacy `parallel` behavior.",
+               "storage, 3 = network). Empty = the default batch, which runs "
+               "before every numbered phase.",
                None, nullable=True, minimum=1, tier=BASIC),
         ListSection("pre_shutdown_commands", "Pre-shutdown steps",
                     "Steps run on this server, in order, before the shutdown "
@@ -415,7 +428,10 @@ REMOTE_SERVER_SECTION = Section(
                "Default seconds each remote command may take.",
                _d(_RS, "command_timeout"), minimum=1),
         Option("ssh_options", "list",
-               "Extra ssh options such as `-o Port=2222`. Eneru already uses "
+               "Extra ssh options, one per item: `Port=2222` (sent as "
+               "`-o Port=2222`), `-o Port=2222`, or a flag with its value "
+               "such as `-i /root/.ssh/key` (split into two ssh arguments). "
+               "Eneru already uses "
                "StrictHostKeyChecking=accept-new (learn the host key once, "
                "refuse if it changes).", []),
         Option("parallel", "tristate",
@@ -526,11 +542,13 @@ ENERGY_OVERRIDE = Section(
     "energy", "Energy (this UPS)",
     "Per-UPS tariff and watt rating; other energy settings are global.", (
         Option("cost_per_kwh", "float",
-               "Price per kWh for this UPS. Empty inherits the global value.",
+               "Price per kWh for this UPS. Unset inherits the global value "
+               "(D removes an override); empty (null) = no cost for this UPS.",
                None, nullable=True, minimum=0),
         Option("nominal_power", "float",
                "Rated WATTS (not VA) of this UPS, used to estimate power from "
-               "load %. Empty = use what NUT reports.", None, nullable=True,
+               "load %. Unset inherits the global value; empty (null) = use "
+               "what NUT reports.", None, nullable=True,
                minimum=1),
     ))
 
@@ -563,7 +581,10 @@ UPS_ENTRY_SECTION = Section(
         Option("is_local", "bool",
                "On: this UPS powers the machine running Eneru, so its "
                "shutdown also stops local VMs/containers and powers this host "
-               "off. At most one UPS (or redundancy group) may be local.",
+               "off. At most one UPS (or redundancy group) may be local. "
+               "With a single UPS, an explicit off keeps this host on (only "
+               "its remote servers shut down); leaving it out still powers "
+               "this host off.",
                False, tier=BASIC),
         NUT_CONTROL_OVERRIDE,
         TRIGGERS_SECTION,
@@ -583,6 +604,30 @@ UPS_LIST = ListSection(
     "ups", "UPS list", "Every UPS this Eneru instance watches.",
     UPS_ENTRY_SECTION, tier=BASIC,
     new_item=(("name", "ups@localhost"), ("is_local", False)))
+
+# R2-14: per-UPS-only trigger settings. The redundancy evaluator
+# (health_model.assess_health) never reads them, so offering them under a
+# group would be a setting that silently does nothing.
+_PER_UPS_ONLY_TRIGGERS = ("voltage_sensitivity",
+                          "self_test_failure_shutdown_delay")
+
+
+def _redundancy_triggers(triggers: Section) -> Section:
+    """TRIGGERS_SECTION for a redundancy group: the loader rejects
+    ``redundancy_groups[].triggers.depletion.window`` (the drain rate is
+    computed per UPS), and the group evaluator ignores the per-UPS-only
+    settings, so the editor must not offer any of them."""
+    children = tuple(
+        replace(c, children=tuple(
+            o for o in c.children if o.key != "window"))
+        if isinstance(c, Section) and c.key == "depletion" else c
+        for c in triggers.children
+        if c.key not in _PER_UPS_ONLY_TRIGGERS)
+    return replace(triggers, children=children)
+
+
+REDUNDANCY_TRIGGERS_SECTION = _redundancy_triggers(TRIGGERS_SECTION)
+
 
 REDUNDANCY_SECTION = Section(
     "", "Redundancy group",
@@ -607,7 +652,7 @@ REDUNDANCY_SECTION = Section(
                choices=("critical", "degraded", "healthy")),
         Option("is_local", "bool",
                "On: these UPSes power the machine running Eneru.", False),
-        TRIGGERS_SECTION,
+        REDUNDANCY_TRIGGERS_SECTION,
         REMOTE_SERVERS_LIST,
         VMS_SECTION,
         CONTAINERS_SECTION,

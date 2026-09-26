@@ -11,6 +11,7 @@ A SQLite outage never raises into the daemon loop.
 """
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -75,13 +76,19 @@ _QUERYABLE_METRICS = frozenset(SAMPLE_FIELDS) - {"ts", "status", "connection_sta
 
 
 def _to_float(value) -> Optional[float]:
-    """Lenient float coercion. Returns ``None`` for empty / non-numeric."""
+    """Lenient float coercion. Returns ``None`` for empty / non-numeric.
+
+    R2-05: non-finite readings (NUT ``inf``, ``nan``, ``1e400``) are dropped
+    too. Stored, they would reach ``/history`` as a literal ``Infinity``
+    (invalid JSON) and sit in the 5-year hourly tier.
+    """
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        f = float(value)
     except (TypeError, ValueError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def _to_int(value) -> Optional[int]:
@@ -2135,7 +2142,10 @@ class StatsStore:
                         "ORDER BY ts ASC",
                         (int(start_ts), int(end_ts)),
                     )
-                return [(int(r[0]), float(r[1])) for r in cur.fetchall()]
+                # Rows written before non-finite readings were dropped at
+                # ingest can still hold inf; never hand those to /history.
+                return [(int(r[0]), float(r[1])) for r in cur.fetchall()
+                        if math.isfinite(float(r[1]))]
         except (sqlite3.Error, OSError) as e:
             self._log_error_once(f"stats: query_range failed: {e}")
             return []

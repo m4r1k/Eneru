@@ -270,6 +270,24 @@ def test_write_recheck_fails_closed_on_db_error(minimal_config):
 
 
 @pytest.mark.unit
+def test_authorize_write_fails_closed_on_db_error_read_stays_open(minimal_config):
+    """F-148: _authorize must pass strict=write through. With the auth DB
+    erroring, a WRITE is refused (401) -- a deleted admin can't keep control
+    during the outage -- while a READ keeps the session principal."""
+    _enable_auth(minimal_config)
+    store = MagicMock()
+    store.get_user.side_effect = RuntimeError("db locked")
+    sessions = SessionManager(3600)
+    token = sessions.create({"username": "alice", "role": "admin", "kind": "user"})
+    h = _handler(minimal_config, auth_store=store, sessions=sessions,
+                 headers={"Authorization": f"Bearer {token}"})
+    with pytest.raises(APIUnauthorized):
+        h._authorize(write=True)
+    assert h._authorize(write=False)["username"] == "alice"
+    assert sessions.validate(token) is not None      # token survives the blip
+
+
+@pytest.mark.unit
 def test_session_validity_ignores_non_user_principals(minimal_config):
     # API-key-kind principals never carry a username; they must not be re-checked
     # via get_user (and must not be invalidated by it).
@@ -582,11 +600,15 @@ def test_login_success_clears_throttle(minimal_config, tmp_path):
 # ----- F-040: global login-rate ceiling (IP-rotation backstop) -----
 
 @pytest.mark.unit
-def test_global_login_ceiling_trips_across_distinct_ips(minimal_config, tmp_path):
+def test_global_login_ceiling_trips_across_distinct_ips(
+        minimal_config, tmp_path, monkeypatch):
     """F-040: an attacker rotating source IPs never hits the per-IP cap, but the
     global sliding-window ceiling still throttles once total failures exceed
     GLOBAL_LOGIN_FAIL_MAX — even for a fresh IP that has never failed."""
     import eneru.api as api_mod
+    # F-154: 100 real bcrypt checks took ~20 s. Shrink the ceiling; the loop
+    # below reads the constant, so the behavior asserted is unchanged.
+    monkeypatch.setattr(api_mod, "GLOBAL_LOGIN_FAIL_MAX", 5)
     _enable_auth(minimal_config)
     store = AuthStore(tmp_path / "auth.db")
     store.create_user("alice", "s3cret")

@@ -293,6 +293,64 @@ def test_remote_health_suppresses_repeated_failure_notifications(tmp_path, remot
 
 
 @pytest.mark.unit
+def test_remote_health_flap_re_alerts_second_failure(tmp_path, remote_server):
+    """F-133: FAILED -> recovered -> FAILED must alert twice; recovery re-arms
+    the once-per-outage failure dedup."""
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 1
+    notifications = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=lambda msg: None,
+        notify_fn=lambda body, typ: notifications.append((body, typ)),
+    )
+
+    for ok in (False, True, False):
+        with patch("eneru.remote_health.run_remote_probe",
+                   return_value=(ok, "" if ok else "refused", 5)):
+            manager.check_once()
+
+    failures = [b for b, _ in notifications if "Recovered" not in b]
+    assert len(failures) == 2, notifications
+
+
+@pytest.mark.unit
+def test_remote_health_degraded_to_healthy_logs_recovery(tmp_path,
+                                                        remote_server):
+    """F-133: DEGRADED -> HEALTHY is a recovery too (logged, dedup re-armed),
+    but it sends no recovery notification (nothing was alerted)."""
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.failure_threshold = 2
+    logs = []
+    notifications = []
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=threading.Event(),
+        log_fn=logs.append,
+        notify_fn=lambda body, typ: notifications.append((body, typ)),
+    )
+
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(False, "refused", 5)):
+        assert manager.check_once()[0]["status"] == REMOTE_HEALTH_DEGRADED
+    with patch("eneru.remote_health.run_remote_probe",
+               return_value=(True, "", 5)):
+        assert manager.check_once()[0]["status"] == REMOTE_HEALTH_HEALTHY
+
+    assert any("Remote health recovered: nas" in m for m in logs), logs
+    assert notifications == []
+
+
+@pytest.mark.unit
 def test_remote_health_records_only_status_transitions(tmp_path, remote_server):
     config = Config()
     config.remote_health.enabled = True
@@ -545,6 +603,45 @@ def test_remote_health_stop_keeps_alive_thread_reference(tmp_path,
     assert manager._local_stop.is_set()
     assert thread.join_timeout == 7
     assert manager._thread is thread
+
+
+@pytest.mark.unit
+def test_remote_health_stop_interrupts_interval_wait(tmp_path, remote_server):
+    """F-134: a reload stop() must end the REAL loop mid-interval (600 s)
+    instead of letting the old manager outlive stop() and keep probing and
+    writing the sidecar next to its replacement."""
+
+    class FastSliceEvent(threading.Event):
+        """Daemon stop event whose waits return quickly, so the test exercises
+        the between-slice local-stop check without real 5 s slices."""
+
+        def wait(self, timeout=None):
+            return super().wait(min(timeout or 0.05, 0.05))
+
+    config = Config()
+    config.remote_health.enabled = True
+    config.remote_health.startup_check = False
+    config.remote_health.interval = 600  # 120 fast slices: outlives stop(2) if unchecked
+    daemon_stop = FastSliceEvent()
+    manager = RemoteHealthManager(
+        config=config,
+        group_label="Rack",
+        servers=[remote_server],
+        sidecar_path=tmp_path / "state.remote-health.json",
+        stop_event=daemon_stop,
+        log_fn=lambda msg: None,
+    )
+    try:
+        with patch.object(manager, "check_once") as check_once:
+            manager.start()
+            thread = manager._thread
+            assert thread is not None and thread.is_alive()
+            manager.stop(timeout=2)
+            assert not thread.is_alive()
+            assert manager._thread is None
+            check_once.assert_not_called()
+    finally:
+        daemon_stop.set()  # never leak a live loop into later tests
 
 
 @pytest.mark.unit

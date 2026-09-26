@@ -160,9 +160,47 @@ class TestLoading:
         data, f = cc.load_raw(str(p))
         assert data is None and "mapping" in f[0].message
 
+    def test_duplicate_keys_warn_at_any_depth(self, tmp_path):
+        """R2-03: a second `remote_servers:` silently replaced the first
+        block (last wins) and every checker said OK. `config check` now
+        warns; the loader still accepts the file (the daemon keeps running)."""
+        p = tmp_path / "c.yaml"
+        p.write_text(
+            "ups:\n  name: UPS@localhost\n"
+            "remote_servers:\n  - name: nas\n    host: nas.lan\n"
+            "    user: root\n    user: admin\n"
+            "base: &b {a: 1}\n"
+            "merged:\n  <<: *b\n  a: 2\n"
+            "remote_servers:\n  - name: hv\n    host: hv.lan\n    user: root\n")
+        data, f = cc.load_raw(str(p))
+        assert data["remote_servers"][0]["name"] == "hv"  # last one wins
+        warns = [x for x in f if x.level == "warning"]
+        assert [w.message.split("`")[1] for w in warns] == [
+            "remote_servers[0].user", "remote_servers"]
+        assert "line 12" in warns[1].message
+        assert cc.duplicate_yaml_keys(tmp_path / "missing.yaml") == []
+
+    def test_recursive_anchor_does_not_crash_the_duplicate_scan(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text("ups:\n  name: UPS@localhost\nloop: &x\n  - *x\n"
+                     "dup: &d {k: 1, k: 2}\nagain: *d\n")
+        _data, f = cc.load_raw(str(p))
+        warns = [x.message for x in f if x.level == "warning"]
+        assert len(warns) == 1 and "`dup.k`" in warns[0]  # aliased once only
+
+    def test_no_duplicate_warning_for_clean_file(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text("ups:\n  name: UPS@localhost\nlist:\n  - {a: 1}\n  - {a: 2}\n")
+        _data, f = cc.load_raw(str(p))
+        assert not [x for x in f if x.level == "warning"]
+
     def test_build_structural_error(self):
         config, f = cc.build_config({"ups": "just-a-string"})
         assert config is None and f and f[0].level == "error"
+        # The loader's own structural message, not the generic
+        # "Config could not be parsed" crash fallback.
+        assert (f[0].section, f[0].message) == (
+            "ups", "'ups' must be a mapping or a list, got str.")
 
     def test_build_section_error(self):
         from eneru.config import ConfigSectionError
@@ -254,6 +292,19 @@ class TestStatic:
         out = cc._dependency_findings(config)
         assert out[0].level == "ok"
         assert "no container runtime found (docker)" in joined(out)
+
+    def test_dependencies_single_list_entry_follows_runtime(self, env):
+        """A one-entry list that omits is_local powers the host off but
+        skips the drain phases: flag the poweroff binary, not virsh."""
+        env.bins = {"upsc", "logger"}
+        config = build({"ups": [{"name": "u@h",
+                                 "virtual_machines": {"enabled": True}}]})
+        text = joined(cc._dependency_findings(config))
+        assert "local_shutdown.command binary 'shutdown'" in text
+        assert "could not power this host off" in text
+        assert "'virsh' not found" not in text
+        config = build({"ups": [{"name": "u@h", "is_local": False}]})
+        assert "binary 'shutdown'" not in joined(cc._dependency_findings(config))
 
     def test_dependencies_container_delegating(self, env):
         env.runtime = "container (Docker)"
@@ -886,6 +937,234 @@ class TestPlan:
 
 
 # ---------------------------------------------------------------------------
+# Shutdown order tree (U8)
+# ---------------------------------------------------------------------------
+
+def _srv(name, **kw):
+    base = {"name": name, "host": name, "user": "u", "enabled": True}
+    base.update(kw)
+    return base
+
+
+class TestOrderTree:
+    def test_legacy_parallel_matches_runtime_order(self, env):
+        from eneru.monitor import compute_effective_order
+        cfg = build({"ups": {"name": "u@h"},
+                     "remote_servers": [
+                         _srv("a"), _srv("s1", parallel=False), _srv("b"),
+                         _srv("s2", parallel=False),
+                         _srv("off", enabled=False)]})
+        (group,) = cc.shutdown_order_tree(cfg)
+        remote = [p for p in group["phases"] if p["kind"] == "remote"]
+        want = {}
+        for order, s in compute_effective_order(
+                [s for s in cfg.ups_groups[0].remote_servers if s.enabled]):
+            want.setdefault(order, []).append(s.name)
+        assert [(p["order"], [s["name"] for s in p["servers"]])
+                for p in remote] == sorted(want.items())
+        assert [p["order"] for p in remote] == [-2, -1, 0]
+        assert remote[0]["title"] == "legacy parallel: false"
+        assert remote[2]["title"] == "no shutdown_order, default batch"
+        assert remote[2]["parallel"] and not remote[0]["parallel"]
+        assert [s["index"] for s in remote[2]["servers"]] == [0, 2]
+        assert group["disabled"] == ["off"]
+        assert "  Skipped (enabled: false): off" in cc.format_order_tree([group])
+        assert group["kind"] == "ups" and group["index"] == 0
+        assert group["role"] == "protects this host"
+        # Every phase waits for the previous one; the first waits for none.
+        assert [p["waitsFor"] for p in group["phases"]] == [
+            None] + [p["number"] - 1 for p in group["phases"][1:]]
+        assert group["phases"][-1]["kind"] == "final"
+        assert "this host powers off" in group["phases"][-1]["title"]
+
+    def test_same_servers_as_dashboard_plan(self, env):
+        from eneru.shutdown.plan import build_shutdown_plan
+        cfg = build({"ups": {"name": "u@h"},
+                     "remote_servers": [
+                         _srv("z", shutdown_order=3), _srv("lb",
+                         is_host_loopback=True, pre_shutdown_commands=[
+                             {"action": "sync"}]),
+                         _srv("x", shutdown_order=1),
+                         _srv("y", shutdown_order=1)]})
+        (group,) = cc.shutdown_order_tree(cfg)
+        tree_names = [s["name"] for p in group["phases"] for s in p["servers"]]
+        plan = build_shutdown_plan(cc._group_config(cfg, cfg.ups_groups[0]))
+        remote = next(p for p in plan["phases"] if p["id"] == "remote")
+        assert tree_names == [s["label"] for s in remote["steps"]]
+        kinds = [p["kind"] for p in group["phases"]]
+        assert kinds == ["local", "loopback-pre", "remote", "remote",
+                         "loopback-poweroff", "final"]
+        assert group["phases"][2]["title"] == "shutdown_order 1"
+
+    def test_step_labels(self):
+        from eneru.shutdown.plan import pre_shutdown_label
+        assert pre_shutdown_label(RemoteCommandConfig(
+            action="stop_compose", path="/a.yml")) == "stop_compose /a.yml"
+        assert pre_shutdown_label(RemoteCommandConfig(
+            action="unmount_filesystems",
+            mounts=[{"path": "/m"}, {"options": "-l"}])) == (
+                "unmount_filesystems (/m)")
+        assert pre_shutdown_label(RemoteCommandConfig(command="echo")) == "echo"
+        assert pre_shutdown_label(RemoteCommandConfig()) == "?"
+
+    def test_render_single_host(self, env):
+        cfg = build({
+            "ups": {"name": "u@h"},
+            "virtual_machines": {"enabled": True},
+            "containers": {"enabled": True},
+            "filesystems": {"sync_enabled": True, "unmount": {
+                "enabled": True, "mounts": ["/mnt/a", {"path": "/mnt/b",
+                                                       "options": "-l"}]}},
+            "remote_servers": [
+                _srv("nas", pre_shutdown_commands=[
+                    {"action": "stop_containers"}, {"command": "echo bye"}],
+                    shutdown_command="poweroff", shutdown_order=1),
+                _srv("a", shutdown_order=2), _srv("b", shutdown_order=2)]})
+        text = "\n".join(cc.format_order_tree(cc.shutdown_order_tree(cfg)))
+        assert "UPS u@h (protects this host)" in text
+        assert ("Phase 1: this host (always first)\n      stop VMs -> stop "
+                "containers -> sync -> unmount /mnt/a, /mnt/b") in text
+        assert ("Phase 2: 1 server (shutdown_order 1)  [waits for phase 1]\n"
+                "    └─ nas (u@nas): stop_containers -> echo bye -> poweroff"
+                ) in text
+        assert ("Phase 3: 2 servers in parallel (shutdown_order 2)  "
+                "[waits for phase 2]\n    ├─ a (u@a): sudo shutdown -h now\n"
+                "    └─ b (u@b)") in text
+        assert ("Phase 4: final sync, then this host powers off: "
+                "shutdown -h now (always last)  [waits for phase 3]") in text
+        assert "\033[" not in text
+
+    def test_loopback_bracket_bare_metal(self, env):
+        cfg = build({"ups": {"name": "u@h"},
+                     "filesystems": {"sync_enabled": False},
+                     "remote_servers": [
+                         _srv("host", is_host_loopback=True,
+                              pre_shutdown_commands=[{"action": "stop_vms"}],
+                              shutdown_command="poweroff"),
+                         _srv("host2", is_host_loopback=True),
+                         _srv("nas")]})
+        text = "\n".join(cc.format_order_tree(cc.shutdown_order_tree(cfg)))
+        assert ("Phase 1: loopback pre-actions, before any other server\n"
+                "    └─ host (u@host): stop_vms") in text
+        assert "Phase 2: 1 server (no shutdown_order, default batch)" in text
+        assert ("Phase 3: this host powers off via the loopback delegate, "
+                "one after another  [waits for phase 2]\n"
+                "    ├─ host (u@host): poweroff\n"
+                "    └─ host2 (u@host2): sudo shutdown -h now") in text
+
+    def test_container_delegation_via_check_mapping(self, env, tmp_path,
+                                                    monkeypatch):
+        env.runtime = "container (Docker)"
+        report = cc.check_mapping({
+            "ups": {"name": "u@h"},
+            "virtual_machines": {"enabled": True},
+            "remote_servers": [_srv("host", host="127.0.0.1", user="root",
+                                    is_host_loopback=True,
+                                    shutdown_command="shutdown -h now")]},
+            probes=False)
+        text = "\n".join(report.order)
+        # Local work is delegated: it runs as the loopback's pre-actions.
+        assert "this host (always first)" not in text
+        assert ("Phase 1: loopback pre-actions, before any other server\n"
+                "    └─ host (root@127.0.0.1): stop_vms -> sync") in text
+        assert "Phase 2: this host powers off via the loopback delegate" in text
+        assert "Phase 3" not in text
+
+    def test_multi_ups_and_redundancy(self, env):
+        cfg = build({
+            "ups": [{"name": "a@h", "is_local": True,
+                     "remote_servers": [_srv("r1")]},
+                    {"name": "b@h"}, {"name": "c@h"}],
+            "redundancy_groups": [{
+                "name": "rg", "ups_sources": ["b@h", "c@h"], "min_healthy": 1,
+                "remote_servers": [_srv("n1", shutdown_order=1),
+                                   _srv("n2", shutdown_order=1),
+                                   _srv("sw", shutdown_order=2)]}]})
+        tree = cc.shutdown_order_tree(cfg)
+        assert [(g["kind"], g["index"], g["group"]) for g in tree] == [
+            ("ups", 0, "a@h"), ("ups", 1, "b@h"), ("ups", 2, "c@h"),
+            ("redundancy", 0, "rg")]
+        text = "\n".join(cc.format_order_tree(tree))
+        local, rest = text.split("UPS b@h")
+        assert "report done to the coordinator" in local
+        assert ("UPS b@h (monitoring / remote-only)\n"
+                "  Nothing to shut down: notify only.") in "UPS b@h" + rest
+        rg = rest.split("Redundancy group rg (redundancy group)")[1]
+        assert "Phase 1: 2 servers in parallel (shutdown_order 1)\n" in rg
+        assert "Phase 2: 1 server (shutdown_order 2)  [waits for phase 1]" in rg
+        assert "this host" not in rg
+
+    def test_host_stays_on(self, env):
+        cfg = build({"ups": {"name": "u@h"},
+                     "local_shutdown": {"enabled": False},
+                     "filesystems": {"sync_enabled": True}})
+        (group,) = cc.shutdown_order_tree(cfg)
+        assert group["hostStaysOn"]
+        assert group["phases"][-1]["title"] == "final sync"
+        text = "\n".join(cc.format_order_tree([group]))
+        assert "This host stays on (local_shutdown.enabled: false)." in text
+        cfg = build({"ups": {"name": "u@h"},
+                     "local_shutdown": {"enabled": False},
+                     "filesystems": {"sync_enabled": False}})
+        (group,) = cc.shutdown_order_tree(cfg)
+        assert group["phases"] == []
+        assert "Nothing to shut down" in "\n".join(
+            cc.format_order_tree([group]))
+
+    def test_coordinator_with_local_shutdown_disabled_keeps_host_on(self, env):
+        """F-179: the coordinator skips the poweroff when local_shutdown is
+        off (multi_ups.py), so the tree must not promise one."""
+        cfg = build({"ups": [{"name": "a@h", "is_local": True},
+                             {"name": "b@h"}],
+                     "local_shutdown": {"enabled": False},
+                     "filesystems": {"sync_enabled": True}})
+        local, other = cc.shutdown_order_tree(cfg)
+        assert local["phases"][-1]["title"] == (
+            "final sync, then report done to the coordinator "
+            "(this host stays on)")
+        assert local["hostStaysOn"] is True
+        text = "\n".join(cc.format_order_tree([local]))
+        assert "which powers off this host" not in text
+        assert "This host stays on (local_shutdown.enabled: false)." in text
+        # K05: a non-local (monitoring-only) group's skipped poweroff is not
+        # "local_shutdown disabled" -- no stays-on line for it.
+        assert other["hostStaysOn"] is False
+        on = build({"ups": [{"name": "a@h", "is_local": True},
+                            {"name": "b@h"}]})
+        local_on, other_on = cc.shutdown_order_tree(on)
+        assert local_on["hostStaysOn"] is False
+        assert other_on["hostStaysOn"] is False
+        assert "which powers off this host" in local_on["phases"][-1]["title"]
+
+    def test_single_ups_list_without_is_local_matches_runtime(self, env):
+        """F-178: a one-entry ``ups:`` list with no is_local runs no local
+        drains (runtime gates them on is_local) but still powers the host
+        off (gated on local_shutdown only). The tree and the API plan agree."""
+        from eneru.shutdown.plan import build_shutdown_plan
+        cfg = build({"ups": [{"name": "u@h"}],
+                     "virtual_machines": {"enabled": True},
+                     "filesystems": {"sync_enabled": True}})
+        assert not cfg.multi_ups and cfg.ups_groups[0].is_local is False
+        (group,) = cc.shutdown_order_tree(cfg)
+        assert [p["kind"] for p in group["phases"]] == ["final"]
+        assert group["phases"][0]["title"] == (
+            "this host powers off: shutdown -h now")
+        api = build_shutdown_plan(cfg, is_local=False)
+        tree_plan = cc._plan_for_group(cfg, cfg.ups_groups[0])
+        assert ([(p["id"], p["enabled"]) for p in api["phases"]]
+                == [(p["id"], p["enabled"]) for p in tree_plan["phases"]])
+
+    def test_format_report_section(self, env):
+        report = cc.CheckReport(order=["UPS x", "  Phase 1: \x1b[2Jevil"])
+        text = cc.format_report(report)
+        assert "== Shutdown order ==\n  UPS x\n  " in text
+        assert "\x1b[2J" not in text
+        assert "\033[1m== Shutdown order ==" in cc.format_report(
+            report, color=True)
+        assert "== Shutdown order ==" not in cc.format_report(cc.CheckReport())
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
@@ -1041,6 +1320,14 @@ class TestCli:
         with pytest.raises(SystemExit):
             cli._cmd_config_edit(argparse.Namespace(config=str(p)))
         assert not seen["doc"].has(("behavior",))
+
+    def test_edit_exit_code_is_the_editors(self, monkeypatch, tmp_path):
+        self._tty(monkeypatch)
+        from eneru import config_tui
+        monkeypatch.setattr(config_tui, "run_editor", lambda doc, mode: 3)
+        with pytest.raises(SystemExit) as exc:
+            cli._cmd_config_edit(argparse.Namespace(config=str(tmp_path / "c.yaml")))
+        assert exc.value.code == 3
 
     def test_argparse_wiring(self, monkeypatch, tmp_path):
         p = tmp_path / "c.yaml"
@@ -1476,3 +1763,150 @@ def test_path_findings_skip_wrongly_typed_paths(env):
     config.statistics.db_directory = 123
     config.logging.file = ["not", "a", "path"]
     assert isinstance(cc._path_findings(config), list)  # no TypeError
+
+
+class TestStepSudoAndBuiltins:
+    """6.2.0 release review F-098: per-step sudo + shell builtins."""
+
+    def test_builtin_under_sudo_is_an_error_without_misleading_checks(self):
+        checks, notes = cc.command_checks("cd /opt/app && docker compose down", True)
+        assert checks == []
+        assert "shell builtin 'cd'" in notes[0] and "use_sudo: false" in notes[0]
+        checks, notes = cc.command_checks("sudo -n export X=1", False)
+        assert checks == [] and "shell builtin 'export'" in notes[0]
+        # Without sudo, a builtin is just a normal (unchecked-by-sudo) command.
+        checks, notes = cc.command_checks("cd /opt && ls", False)
+        assert [c.kind for c in checks] == ["exists"]
+
+    def test_remote_checks_follow_each_steps_own_use_sudo(self):
+        srv = server(use_sudo=True, shutdown_command="shutdown -h now",
+                     pre_shutdown_commands=[
+                         RemoteCommandConfig(command="systemctl --user stop a",
+                                             use_sudo=False),
+                         RemoteCommandConfig(command="systemctl stop b"),
+                         RemoteCommandConfig(action="stop_vms", use_sudo=False)])
+        checks, _ = cc.remote_checks(Config(), srv)
+        scripts = [c.script for c in checks]
+        assert "sudo -n -l systemctl --user stop a" not in scripts
+        assert "sudo -n -l systemctl stop b" in scripts
+        assert not [s for s in scripts if "sudo -n virsh" in s]
+
+    def test_builtin_note_is_reported_as_error(self, env):
+        srv = server(use_sudo=True, shutdown_command="shutdown -h now",
+                     pre_shutdown_commands=[RemoteCommandConfig(
+                         command="cd /opt && make stop")])
+        with patch("eneru.remote_health.run_remote_probe", return_value=(True, "", 1)), \
+                patch.object(cc, "_run", return_value=(0, "", "")):
+            out = cc.probe_remote(Config(), srv)
+        assert any(f.level == "error" and "shell builtin 'cd'" in f.message
+                   for f in out)
+
+
+
+def test_scheme_less_mqtt_broker_credentials_are_redacted():
+    config = build({"ups": {"name": "u@h"},
+                    "mqtt": {"enabled": True, "broker": "alice:s3cret@broker:1883"}})
+    out = cc._feature_findings(config)
+    msgs = " ".join(f.message for f in out)
+    assert "scheme" in msgs and "s3cret" not in msgs
+
+
+class TestGroupIReviewFixes:
+    """6.2.0 release review F-124/F-125: check/runtime parity + wiring."""
+
+    # -- F-124: the check inspects exactly the command the runtime sends --
+
+    @pytest.mark.parametrize("command", [
+        "shutdown -h now", "   shutdown -h now", "sudo shutdown -h now",
+        "sudo\tshutdown -h now", "/usr/bin/sudo shutdown -h now",
+        "  sudo -n systemctl stop x", "sudo", "sudoedit /etc/hosts",
+    ])
+    @pytest.mark.parametrize("use_sudo", [True, False])
+    def test_effective_command_matches_the_runtime(self, command, use_sudo):
+        from eneru.shutdown.remote import RemoteShutdownMixin
+        with patch.object(cc, "command_binary", wraps=cc.command_binary) as spy:
+            cc.command_checks(command, use_sudo)
+        assert spy.call_args_list[0].args[0] == \
+            RemoteShutdownMixin._with_sudo(command, use_sudo)
+
+    def test_tab_and_absolute_sudo_are_not_double_prefixed(self):
+        for command in ("sudo\tsystemctl stop a", "/usr/bin/sudo systemctl stop a"):
+            checks, notes = cc.command_checks(command, True)
+            assert checks[-1].script == "sudo -n -l systemctl stop a", command
+            assert notes == []
+
+    @pytest.mark.parametrize("command,token", [
+        ("(systemctl stop a)", "(systemctl"),
+        ("{ systemctl stop a; }", "{"),
+        ("if true; then systemctl stop a; fi", "if"),
+        ("for u in a b; do systemctl stop $u; done", "for"),
+        ("while false; do :; done", "while"),
+        ("case x in x) systemctl stop a;; esac", "case"),
+        ("! systemctl is-active a", "!"),
+    ])
+    def test_compound_first_token_under_sudo_is_flagged(self, command, token):
+        checks, notes = cc.command_checks(command, True)
+        assert checks == []
+        assert f"'{token}' through sudo" in notes[0]
+        assert "which cannot work" in notes[0]
+        # Without sudo the shell runs it normally: no such note.
+        _, notes = cc.command_checks(command, False)
+        assert not any("which cannot work" in n for n in notes)
+
+    # -- F-125: static_findings wiring --
+
+    def test_loopback_contract_error_reaches_static_findings(self, env):
+        # A container with local actions and an explicit "no loopback":
+        # `eneru run` exits 1, so the check must report the same ERROR.
+        env.runtime = "container (Docker)"
+        data = {"ups": {"name": "ups@h"},
+                "virtual_machines": {"enabled": True},
+                "remote_servers": [{"name": "nas", "enabled": True,
+                                    "host": "10.0.0.2", "user": "root",
+                                    "is_host_loopback": False}]}
+        out = cc.static_findings(build(data), data)
+        assert any(f.level == "error"
+                   and "no enabled is_host_loopback delegate" in f.message
+                   for f in out), joined(out)
+
+    def test_privilege_findings_reach_static_findings(self, env):
+        env.euid = 10001
+        data = {"ups": {"name": "ups@h"}, "virtual_machines": {"enabled": True}}
+        out = cc.static_findings(build(data), data)
+        assert any(f.level == "warning" and "must run as root" in f.message
+                   for f in out), joined(out)
+
+    def test_loopback_delegate_is_synthesized_without_the_key(self, env):
+        # The check prepares non-strictly: a missing default key is reported
+        # (as the ERROR `eneru run` would hit) but the delegate is still
+        # synthesized, so its delegated view is checked instead of a
+        # misleading "no loopback" contract error.
+        env.runtime = "container (Docker)"
+        env.euid = 10001
+        data = {"ups": {"name": "ups@h"}}
+        config = build(data)
+        real_stat = Path.stat
+        key = cli._LOOPBACK_DEFAULT_SSH_KEY_PATH
+
+        def fake_stat(self, *a, **k):
+            if str(self) == key:
+                raise FileNotFoundError(2, "No such file", key)
+            return real_stat(self, *a, **k)
+        with patch.object(Path, "stat", fake_stat):
+            out = cc.static_findings(config, data)
+        assert cli._find_host_loopback(config) is not None
+        assert not any("no enabled is_host_loopback" in f.message for f in out)
+        assert any("delegated to the host over loopback SSH" in f.message
+                   for f in out), joined(out)
+
+    # -- F-125: remote probe script hardening --
+
+    def test_probe_script_wraps_every_check_in_timeout(self):
+        script = cc.build_remote_script([
+            cc.RemoteCheck("a", "true", "run"), cc.RemoteCheck("b", "false", "run")])
+        assert f'T="timeout {cc.REMOTE_CHECK_TIMEOUT}"' in script
+        assert script.count("out=$($T sh -c ") == 2
+
+    def test_parse_remote_output_ignores_unmarked_lines(self):
+        text = (f"junk 0 0 ok\n7 1 fake\n{cc._REMOTE_MARKER} 1 0 real\n")
+        assert cc.parse_remote_output(text) == {1: (0, "real")}

@@ -60,6 +60,19 @@ MAX_CONCURRENT_REQUESTS = 32
 # (dashboards hold ~1-2 each) without letting a flood grow the thread count.
 MAX_CONCURRENT_CONNECTIONS = 64
 
+# F-100 (slowloris): REQUEST_READ_TIMEOUT_SECONDS bounds each socket read, so
+# a client dripping one header byte every few seconds never trips it and holds
+# its connection (and slot) forever. This is a WALL-CLOCK bound on reading the
+# request line + headers of one request; past it the read side is shut down
+# and the connection closed. It is longer than the idle timeout so a
+# keep-alive client that waits (up to the idle timeout) and then sends a
+# normal request is never cut off.
+REQUEST_HEADER_DEADLINE_SECONDS = 20
+# F-100: connection slots only loopback peers may use, so the container
+# HEALTHCHECK (127.0.0.1) and local probes still get in while a remote flood
+# holds every other slot.
+LOOPBACK_RESERVED_CONNECTIONS = 8
+
 # ISS-032: in-memory per-source-IP login throttle. After LOGIN_FAIL_MAX failed
 # logins within LOGIN_FAIL_WINDOW_SECONDS, further attempts from that IP get 429
 # until the window rolls off. Process-local (resets on restart) and best-effort
@@ -337,6 +350,59 @@ def _auth_is_active(config: Any) -> bool:
     return auth_is_active(getattr(getattr(config, "api", None), "auth", None))
 
 
+_AUDIT_EVENT_TYPE_BY_KIND = {
+    "command": "CONTROL_COMMAND",
+    "variable": "CONTROL_VARIABLE",
+    "config": "CONFIG_RELOAD",
+    "events": "EVENTS_DELETED",
+    "self-test": "CONTROL_SELF_TEST",
+    "login": "LOGIN_FAILURE",
+}
+# Every event type the audit trail writes ("CONTROL" is _audit's fallback).
+# The API never deletes these (F-108) and hides them from anonymous readers
+# (F-109).
+AUDIT_EVENT_TYPES = frozenset(_AUDIT_EVENT_TYPE_BY_KIND.values()) | {"CONTROL"}
+# What an anonymous /remote-health reader sees instead of last_error (F-110).
+REDACTED_REMOTE_ERROR = "check failed; sign in for details"
+
+
+def _redact_loopback_error(payload: Dict[str, Any]) -> None:
+    """F-110: the loopback delegate's lastError (copied from remote health)
+    can carry both machine-ids; anonymous /ready and /api/v1/ups readers get
+    the same generic text as anonymous /remote-health readers."""
+    delegate = (payload.get("runtime") or {}).get("loopbackDelegate") or {}
+    if delegate.get("lastError"):
+        delegate["lastError"] = REDACTED_REMOTE_ERROR
+
+
+def _redact_remote_rows(rows: Any) -> Any:
+    """F-110: copies of remote-health rows with last_error replaced."""
+    if not isinstance(rows, list):
+        return rows
+    return [dict(r, last_error=REDACTED_REMOTE_ERROR)
+            if isinstance(r, dict) and r.get("last_error") else r
+            for r in rows]
+
+
+def _redact_ups_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy of one UPS/redundancy status row with its embedded
+    remote-health errors redacted."""
+    if not row.get("remoteHealth"):
+        return row
+    return dict(row, remoteHealth=_redact_remote_rows(row["remoteHealth"]))
+
+
+def _redact_status_payload(payload: Dict[str, Any]) -> None:
+    """F-110 for /api/v1/ups: the loopback summary plus every remote-health
+    row nested under ``ups[]`` and ``redundancyGroups[]``."""
+    _redact_loopback_error(payload)
+    for key in ("ups", "redundancyGroups"):
+        rows = payload.get(key)
+        if isinstance(rows, list):
+            payload[key] = [_redact_ups_row(r) if isinstance(r, dict) else r
+                            for r in rows]
+
+
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer with a hard cap on concurrent connections.
 
@@ -360,10 +426,34 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
         super().__init__(*args, **kwargs)
         self._connection_slots = threading.BoundedSemaphore(
             self.max_connections)
+        # F-100: non-loopback peers must ALSO hold one of these, so the last
+        # LOOPBACK_RESERVED_CONNECTIONS slots stay available to local probes.
+        self._public_slots = threading.BoundedSemaphore(
+            max(1, self.max_connections - LOOPBACK_RESERVED_CONNECTIONS))
+
+    @staticmethod
+    def _is_loopback_peer(client_address: Any) -> bool:
+        try:
+            return ipaddress.ip_address(client_address[0]).is_loopback
+        except (ValueError, TypeError, IndexError):
+            return False
+
+    def _public_gate(self, client_address: Any) -> Optional[Any]:
+        """The extra semaphore a non-loopback peer must hold, if any."""
+        public = getattr(self, "_public_slots", None)
+        if public is None or self._is_loopback_peer(client_address):
+            return None
+        return public
 
     def process_request(self, request: Any, client_address: Any) -> None:
+        public = self._public_gate(client_address)
+        if public is not None and not public.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
         if not self._connection_slots.acquire(blocking=False):
             # Saturated: refuse before a thread exists to leak.
+            if public is not None:
+                public.release()
             self.shutdown_request(request)
             return
         try:
@@ -376,6 +466,8 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # never both fire; BoundedSemaphore would raise loudly if a
             # future stdlib change broke that.
             self._connection_slots.release()
+            if public is not None:
+                public.release()
             raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
@@ -386,6 +478,9 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._connection_slots.release()
+            public = self._public_gate(client_address)
+            if public is not None:
+                public.release()
 
 
 class EneruAPIServer:
@@ -577,6 +672,54 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
     _host_rejection_lock = threading.Lock()
 
     server_version = "EneruAPI/1.0"
+
+    def handle_one_request(self):
+        """F-100: bound the request line + headers by wall-clock time.
+
+        ELI5: the doorman already hangs up on a caller who goes silent for
+        10 s, but a caller who mumbles one syllable every 9 s could keep the
+        line forever. A stopwatch now starts with each request; if the
+        caller hasn't finished saying who they are (request line + headers)
+        when it rings, the doorman stops listening (shutdown of the read
+        side), the half-read request fails and the connection closes. The
+        stopwatch stops as soon as the headers are parsed, so a slow HANDLER
+        (e.g. a long self-test issue) is never cut off.
+        """
+        timer = None
+        connection = getattr(self, "connection", None)
+        if connection is not None:
+            timer = threading.Timer(REQUEST_HEADER_DEADLINE_SECONDS,
+                                    self._abort_slow_headers)
+            timer.daemon = True
+            timer.start()
+        self._header_timer = timer
+        self._header_deadline_hit = False
+        try:
+            super().handle_one_request()
+        finally:
+            if timer is not None:
+                timer.cancel()
+
+    def parse_request(self):
+        ok = super().parse_request()
+        timer = getattr(self, "_header_timer", None)
+        if timer is not None:
+            timer.cancel()  # headers are in: the handler may take its time
+        if getattr(self, "_header_deadline_hit", False):
+            # The read side was shut down mid-headers, so the stdlib parsed
+            # a truncated header block as complete (and reset
+            # close_connection). Never dispatch that request.
+            self.close_connection = True
+            return False
+        return ok
+
+    def _abort_slow_headers(self) -> None:
+        self._header_deadline_hit = True
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
 
     def do_GET(self):  # noqa: N802 - stdlib hook
         self._dispatch(self._route)
@@ -958,6 +1101,13 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             raise APIUnauthorized("authentication required")
         return principal
 
+    def _redact_for(self, principal: Optional[Dict[str, Any]]) -> bool:
+        """True for an anonymous reader while auth is active (F-109/F-110).
+
+        With auth off there are no identities: the API is a trusted surface
+        and the dashboard keeps showing why a remote check failed."""
+        return principal is None and self._auth_active()
+
     def _read_json_body(self) -> Dict[str, Any]:
         """Read + parse a JSON object body, bounded by ``MAX_BODY_BYTES``."""
         # ISS-061: the body reader is strictly Content-Length framed. A
@@ -1065,6 +1215,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     and getattr(auth_cfg, "require_for_reads", False)
                     and self._authenticate_request(strict=False) is None):
                 return status, "application/json", {"ready": payload["ready"]}
+            if (self._auth_active()
+                    and self._authenticate_request(strict=False) is None):
+                _redact_loopback_error(payload)
             return status, "application/json", payload
 
         # Auth bootstrap must stay open even when require_for_reads=true;
@@ -1096,7 +1249,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return 200, "application/json", self._api_index()
 
         if path == "/api/v1/ups":
-            return 200, "application/json", collect_status(self.api_source)
+            payload = collect_status(self.api_source)
+            if self._redact_for(principal):
+                _redact_status_payload(payload)
+            return 200, "application/json", payload
 
         if path.startswith("/api/v1/redundancy-groups/"):
             parts = path.split("/")
@@ -1153,6 +1309,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     "upsSources": list(group.ups_sources),
                     "minHealthy": group.min_healthy,
                     "plan": plan,
+                    **_redundancy_plan_extras(group, self.api_config, executor),
                 }
 
         if path.startswith("/api/v1/ups/"):
@@ -1163,6 +1320,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 row = find_status(payload, ups_name)
                 if row is None:
                     return 404, "application/json", self._not_found("UPS not found")
+                if self._redact_for(principal):
+                    row = _redact_ups_row(row)
+                # H4: one-UPS reads carry the server clock too.
+                row = dict(row, generatedAt=payload.get("generatedAt"))
                 return 200, "application/json", row
             if len(parts) == 6 and parts[5] == "history":
                 metric = (qs.get("metric") or ["charge"])[0]
@@ -1231,7 +1392,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     # config_summary(extended=True) / remote-health contract,
                     # which never reveals raw commands even to authenticated users.
                     reveal_commands=False)
-                return 200, "application/json", {"ups": ups_name, "plan": plan}
+                return 200, "application/json", {
+                    "ups": ups_name, "plan": plan,
+                    **_ups_plan_extras(mon, self.api_config)}
             if len(parts) == 6 and parts[5] == "shutdown-progress":
                 mon = self._monitor_for(ups_name)
                 if mon is None:
@@ -1289,7 +1452,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         for d, a in sorted(buckets.items())]
                 # Replacement-date projection for the red marker + threshold line.
                 replacement: Dict[str, Any] = {
-                    "etaTs": None, "etaSource": None, "thresholdScore": None}
+                    "etaTs": None, "etaSource": None, "thresholdScore": None,
+                    "days": None, "years": None, "text": "unknown",
+                    "capped": False, "beyond": False}
                 try:
                     cfg = mon._resolve_battery_health_config()
                 except Exception:
@@ -1298,7 +1463,9 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                     rep = cfg.replacement
                     history = [(float(r["ts"]), float(r["score"]))
                                for r in rows if r.get("score") is not None]
-                    eta, src = prediction.replacement_eta(
+                    # H6: the same capped estimate the status block publishes,
+                    # so the chart marker and the "Replace in" label agree.
+                    replacement = prediction.bounded_replacement_eta(
                         history,
                         threshold_score=rep.threshold_score,
                         horizon_days=rep.horizon_days,
@@ -1306,8 +1473,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                         battery_install_date=cfg.battery_install_date,
                         expected_life_years=cfg.expected_life_years,
                         now=now_ts)
-                    replacement = {"etaTs": eta, "etaSource": src,
-                                   "thresholdScore": rep.threshold_score}
+                    replacement["thresholdScore"] = rep.threshold_score
                 return 200, "application/json", {
                     "ups": ups_name, "from": start, "to": end,
                     "data": data, "replacement": replacement}
@@ -1382,7 +1548,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
                 "events": query_events(
                     self.api_config, limit=limit, verbosity=verbosity,
                     start_ts=start_ts, end_ts=end_ts, before_ts=before_ts,
-                    before_cursor=before_cursor),
+                    before_cursor=before_cursor,
+                    # F-109: audit rows name the admin who acted and the IPs of
+                    # failed logins; only signed-in readers see them.
+                    hide_types=(AUDIT_EVENT_TYPES if self._redact_for(principal)
+                                else None)),
             }
 
         if path == "/api/v1/config":
@@ -1397,6 +1567,12 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/remote-health":
             rows = live_remote_health(self.api_source, self.api_config)
+            if self._redact_for(principal):
+                # F-110: last_error can quote raw ssh stderr and, for a
+                # loopback, both machine-ids (a stable host fingerprint).
+                # Anonymous readers learn only THAT the check failed.
+                rows = [dict(r, last_error=REDACTED_REMOTE_ERROR)
+                        if r.get("last_error") else r for r in rows]
             return 200, "application/json", {"generatedAt": time.time(), "servers": rows}
 
         return 404, "application/json", self._not_found("Endpoint not found")
@@ -1528,6 +1704,11 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             if not isinstance(event_type, str) or not event_type:
                 raise APIBadRequest("item 'eventType' is required")
             normalized.append((event_id, ts, event_type))
+        # F-108: the audit trail can't be erased through the API. Audit rows
+        # are skipped (not a 400, so a dashboard "delete selected" that
+        # includes one still removes the rest) and counted as `protected`.
+        protected = sum(1 for _i, _t, et in normalized if et in AUDIT_EVENT_TYPES)
+        normalized = [n for n in normalized if n[2] not in AUDIT_EVENT_TYPES]
         real = self._resolve_ups_name(ups_name)
         if real is None:
             return 404, "application/json", self._not_found("UPS not found")
@@ -1537,8 +1718,10 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
         if deleted is None:
             return 503, "application/json", self._error(
                 "STATS_UNAVAILABLE", "the statistics store is unavailable")
-        self._audit(principal, "events", f"{real}:delete", f"{deleted} rows")
-        return 200, "application/json", {"ups": real, "deleted": deleted}
+        note = f"{deleted} rows" + (f", {protected} audit rows kept" if protected else "")
+        self._audit(principal, "events", f"{real}:delete", note)
+        return 200, "application/json", {"ups": real, "deleted": deleted,
+                                         "protected": protected}
 
     def _route_put(self) -> Tuple[int, str, Any]:
         parsed = urlparse(self.path)
@@ -1804,14 +1987,7 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return f"apikey:{principal.get('label', principal.get('id'))}"
         return str(principal.get("username", "unknown"))
 
-    _AUDIT_EVENT_TYPES = {
-        "command": "CONTROL_COMMAND",
-        "variable": "CONTROL_VARIABLE",
-        "config": "CONFIG_RELOAD",
-        "events": "EVENTS_DELETED",
-        "self-test": "CONTROL_SELF_TEST",
-        "login": "LOGIN_FAILURE",
-    }
+    _AUDIT_EVENT_TYPES = _AUDIT_EVENT_TYPE_BY_KIND
 
     @staticmethod
     def _scrub(text: str) -> str:
@@ -1903,6 +2079,53 @@ class EneruAPIHandler(BaseHTTPRequestHandler):
             return True
 
         return [dict(e) for e in API_ENDPOINTS if _visible(e["path"])]
+
+
+def _ups_plan_extras(mon: Any, api_config: Any) -> Dict[str, Any]:
+    """H3c: the full trigger list + role next to the per-UPS shutdown plan."""
+    try:
+        from eneru.outlook import (
+            describe_trigger_conditions, monitor_outlook)
+        blocks = monitor_outlook(mon, api_config)
+        outlook = blocks["triggerOutlook"]
+        armed = any(t["id"] == "selfTestFailure" and t["enabled"]
+                    for t in outlook["triggers"])
+        triggers = mon.config.triggers
+        return {
+            "triggers": {
+                "conditions": describe_trigger_conditions(
+                    triggers, self_test_failure_armed=armed),
+                "stabilizationDelay": triggers.on_battery_stabilization_delay,
+                "outlook": outlook,
+                "action": outlook["action"],
+            },
+            "role": blocks["role"],
+        }
+    except Exception:
+        return {"triggers": None, "role": None}
+
+
+def _redundancy_plan_extras(group: Any, api_config: Any,
+                            executor: Any) -> Dict[str, Any]:
+    """H3c for redundancy groups: quorum rule + member criticality rules."""
+    try:
+        from eneru.outlook import (
+            describe_trigger_conditions, redundancy_role, trigger_action)
+        role = redundancy_role(group, api_config, executor)
+        members = len(group.ups_sources)
+        return {
+            "triggers": {
+                "conditions": [
+                    f"fewer than {group.min_healthy} of {members} members healthy",
+                ],
+                "memberConditions": describe_trigger_conditions(group.triggers),
+                "stabilizationDelay": group.triggers.on_battery_stabilization_delay,
+                "action": trigger_action(role),
+            },
+            "role": role,
+        }
+    except Exception:
+        return {"triggers": None, "role": None}
 
 
 def _parse_int_param(

@@ -164,6 +164,14 @@ def test_set_same_value_is_noop(tmp_path):
     assert d.dumps() == REF_LIKE
 
 
+def test_set_equal_value_of_other_type_is_a_change(tmp_path):
+    """F-138/D13: 1 == True in Python, but `1` and `true` differ in YAML."""
+    d = _doc(tmp_path, REF_LIKE)
+    d.set(("ups", "check_interval"), True)
+    assert d.modified
+    assert "check_interval: true" in d.dumps()
+
+
 def test_set_new_key_writes_comment_and_lands_before_heading(tmp_path):
     d = _doc(tmp_path, REF_LIKE)
     d.set(("ups", "display_name"), "Lab", comment="Friendly name.")
@@ -911,6 +919,17 @@ def test_backup_never_follows_a_planted_symlink(tmp_path):
     assert p.read_text() == "a: 2\n"
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW")
+def test_backup_temp_file_is_opened_with_o_nofollow(tmp_path):
+    """F-138/D11: the backup's temp file never follows a symlink."""
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    with patch.object(cd.os, "open", wraps=os.open) as spy:
+        ConfigDocument._write_backup(p)
+    flags = [c.args[1] for c in spy.call_args_list if ".bak." in str(c.args[0])]
+    assert flags and all(f & os.O_NOFOLLOW for f in flags)
+
+
 def test_save_preserves_owner_as_root(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("a: 1\n")
@@ -918,7 +937,7 @@ def test_save_preserves_owner_as_root(tmp_path):
     doc.set(("a",), 2)
     st = p.stat()
     with patch.object(cd.os, "geteuid", return_value=0), \
-            patch.object(cd.os, "chown") as chown:
+            patch.object(cd.os, "fchown") as chown:
         doc.save()
     chown.assert_called_once()
     assert chown.call_args[0][1:] == (st.st_uid, st.st_gid)
@@ -930,7 +949,7 @@ def test_save_no_chown_when_not_root(tmp_path):
     doc = ConfigDocument.load(p)
     doc.set(("a",), 2)
     with patch.object(cd.os, "geteuid", return_value=1000), \
-            patch.object(cd.os, "chown") as chown:
+            patch.object(cd.os, "fchown") as chown:
         doc.save()
     chown.assert_not_called()
 
@@ -1222,3 +1241,110 @@ def test_relative_or_bogus_backup_dir_is_ignored(tmp_path):
     p.write_text("x\n")
     assert ConfigDocument._write_backup(p, "relative/dir").parent == tmp_path
     assert ConfigDocument._write_backup(p, 123).parent == tmp_path
+
+
+# --- F-107: no writing through a symlink swapped in after load -------------
+
+@pytest.mark.unit
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW")
+def test_swap_while_loading_cannot_retarget_the_save(tmp_path):
+    """The owner swaps the path for a symlink between root resolving it and
+    opening it: the load refuses (O_NOFOLLOW) instead of reading the
+    swapped-in file and adopting it as the save baseline."""
+    p = tmp_path / "config.yaml"
+    p.write_text("a: 1\n")
+    victim = tmp_path / "authorized_keys"
+    victim.write_text("keep: 1\n")
+    real_os_open = os.open
+
+    def swapping_open(file, *args, **kwargs):
+        p.unlink()
+        p.symlink_to(victim)
+        return real_os_open(file, *args, **kwargs)
+
+    with patch("os.open", swapping_open), pytest.raises(OSError):
+        ConfigDocument.load(p)
+    assert victim.read_text() == "keep: 1\n"
+
+
+@pytest.mark.unit
+def test_save_refuses_a_symlink_swapped_in_after_load(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("a: 1\n")
+    victim = tmp_path / "authorized_keys"
+    victim.write_text("keep\n")
+    doc = ConfigDocument.load(p)
+    doc.set(("a",), 2)
+    p.unlink()
+    p.symlink_to(victim)  # the file's owner swaps it while root edits
+    with pytest.raises(PermissionError):
+        doc.save()
+    assert victim.read_text() == "keep\n"
+
+
+@pytest.mark.unit
+def test_save_through_a_symlink_that_was_there_at_load_is_fine(tmp_path):
+    real = tmp_path / "real.yaml"
+    real.write_text("a: 1\n")
+    link = tmp_path / "config.yaml"
+    link.symlink_to(real)
+    doc = ConfigDocument.load(link)
+    doc.set(("a",), 2)
+    doc.save()
+    assert link.is_symlink() and real.read_text() == "a: 2\n"
+    doc.set(("a",), 3)
+    doc.save()  # still the same target after our own save
+    assert real.read_text() == "a: 3\n"
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="no O_NOFOLLOW")
+def test_in_place_write_refuses_to_follow_a_symlink(tmp_path):
+    target = tmp_path / "t.yaml"
+    victim = tmp_path / "victim"
+    victim.write_text("keep\n")
+    target.symlink_to(victim)
+    with pytest.raises(OSError):
+        cd._write_in_place(target, "x: 1\n")
+    assert victim.read_text() == "keep\n"
+
+
+@pytest.mark.unit
+def test_temp_file_mode_is_set_through_the_descriptor(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("a: 1\n")
+    os.chmod(p, 0o640)
+    doc = ConfigDocument.load(p)
+    doc.set(("a",), 2)
+    with patch.object(cd.os, "chmod", side_effect=AssertionError("path chmod")):
+        doc.save(backup=False)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o640
+
+
+def test_append_to_new_empty_list_keeps_the_next_heading_below(tmp_path):
+    doc = _doc(tmp_path, "ups:\n  name: a\n\n# ==== TRIGGERS ====\ntriggers:\n"
+               "  low_battery_threshold: 20\n")
+    doc.set(("ups", "remote_servers"), [])
+    doc.append(("ups", "remote_servers"), {"name": "x"})
+    text = doc.dumps()
+    assert text.index("name: x") < text.index("# ==== TRIGGERS")
+    assert doc.daemon_view()["ups"]["remote_servers"] == [{"name": "x"}]
+
+
+def test_append_to_flow_empty_list_with_eol_comment(tmp_path):
+    doc = _doc(tmp_path, "mounts: []  # none yet\n# next\nother: 1\n")
+    doc.append(("mounts",), "/mnt/a")
+    text = doc.dumps()
+    assert text.index("/mnt/a") < text.index("# next")
+    assert doc.daemon_view() == {"mounts": ["/mnt/a"], "other": 1}
+
+
+def test_restore_undoes_to_earlier_text(tmp_path):
+    doc = _doc(tmp_path, "# head\nups:\n  name: a  # eol\n")
+    before = doc.dumps()
+    doc.set(("remote_servers",), [], comment_lookup=lambda p: "Servers.")
+    doc.append(("remote_servers",), {"name": "x"})
+    assert doc.restore(before) is True
+    assert doc.dumps() == before
+    assert doc.restore("") is False and doc.restore("- a\n") is False
+    assert doc.dumps() == before

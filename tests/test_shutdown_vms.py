@@ -24,6 +24,21 @@ from eneru import (
 )
 
 
+def _virtual_clock():
+    """Patch the VM phase's monotonic clock + sleep with a fake clock that
+    only advances on sleep (F-136: patching sleep alone left the deadline loop
+    spinning for max_wait REAL seconds)."""
+    clock = [0.0]
+
+    def fake_sleep(seconds):
+        clock[0] += seconds
+
+    return (
+        patch("eneru.shutdown.vms.time.monotonic", side_effect=lambda: clock[0]),
+        patch("eneru.shutdown.vms.time.sleep", side_effect=fake_sleep),
+    )
+
+
 def _make_vm_monitor(tmp_path, *, vm_enabled=True, max_wait=15, dry_run=False):
     config = Config(
         ups_groups=[UPSGroupConfig(
@@ -197,9 +212,10 @@ def test_shutdown_vms_force_destroys_after_timeout(tmp_path):
             return (0, "vm1\nvm2\n", "")
         return (0, "", "")
 
+    clock_patch, sleep_patch = _virtual_clock()
     with patch("eneru.shutdown.vms.command_exists", return_value=True), \
          patch("eneru.shutdown.vms.run_command", side_effect=fake_run) as mock_run, \
-         patch("eneru.shutdown.vms.time.sleep"):
+         clock_patch, sleep_patch:
         monitor._shutdown_vms()
 
     # Confirm at least one virsh destroy was issued for each stuck VM
@@ -224,9 +240,10 @@ def test_shutdown_vms_reports_failed_rc(tmp_path):
             return (1, "", "domain not found")
         return (0, "", "")
 
+    clock_patch, sleep_patch = _virtual_clock()
     with patch("eneru.shutdown.vms.command_exists", return_value=True), \
          patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
-         patch("eneru.shutdown.vms.time.sleep"):
+         clock_patch, sleep_patch:
         monitor._shutdown_vms()
 
     assert any("virsh shutdown vm1 returned rc=1" in m for m in logs), logs
@@ -329,9 +346,10 @@ def test_shutdown_vms_summary_success_when_destroy_succeeds(tmp_path):
             return (0, "", "")
         return (0, "", "")
 
+    clock_patch, sleep_patch = _virtual_clock()
     with patch("eneru.shutdown.vms.command_exists", return_value=True), \
          patch("eneru.shutdown.vms.run_command", side_effect=fake_run), \
-         patch("eneru.shutdown.vms.time.sleep"):
+         clock_patch, sleep_patch:
         monitor._shutdown_vms()
 
     assert any("All VMs shutdown complete" in m for m in logs), logs

@@ -52,7 +52,8 @@ def _write_in_place(target: Path, text: str) -> None:
     Opened without truncation, written, then trimmed: a failed write can't
     leave an empty config (the `.bak` covers the rest).
     """
-    with open(target, "r+", encoding="utf-8", newline="") as fh:
+    fd = os.open(str(target), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r+", encoding="utf-8", newline="") as fh:
         fh.write(text)
         fh.truncate()
         fh.flush()
@@ -221,6 +222,11 @@ def _detach_trailing_comment(node: Any) -> Any:
     container, key = _last_comment_slot(node)
     if container is None:
         return None
+    return _detach_slot_comment(container, key)
+
+
+def _detach_slot_comment(container: Any, key: Any) -> Any:
+    """Cut the block after ``container[key]``'s line (its EOL comment stays)."""
     entry = container.ca.items.get(key)
     pos = _comment_pos(container)
     if not entry or len(entry) <= pos or entry[pos] is None:
@@ -356,7 +362,8 @@ class ConfigDocument:
 
     def __init__(self, path: Union[str, Path], data: CommentedMap, *,
                  existed: bool, mapping: int = 2, offset: int = 2,
-                 original_text: str = ""):
+                 original_text: str = "",
+                 loaded_realpath: Optional[str] = None):
         self.path = Path(path)
         self.data = data
         self.existed = existed
@@ -368,6 +375,11 @@ class ConfigDocument:
         self._pending_trailing: List[Tuple[Any, Any]] = []
         self.newline = "\n"
         self.last_backup: Optional[Path] = None
+        # F-107: where the path resolved when loaded. A save refuses to follow
+        # a symlink swapped in afterwards (e.g. by the unprivileged owner of
+        # the file while root has the editor open).
+        self._loaded_realpath = (loaded_realpath
+                                 or os.path.realpath(self.path))
 
     # -- construction ---------------------------------------------------
 
@@ -382,7 +394,12 @@ class ConfigDocument:
             data = CommentedMap()
             data.yaml_set_start_comment(NEW_FILE_HEADER)
             return cls(p, data, existed=False)
-        with open(p, "r", encoding="utf-8", newline="") as fh:
+        # F-107: resolve first, then read that resolved file without
+        # following a symlink swapped in meanwhile (O_NOFOLLOW), so the
+        # content and the save baseline always name the same file.
+        real = os.path.realpath(p)
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8", newline="") as fh:
             raw = fh.read()
         newline = "\r\n" if "\r\n" in raw else "\n"
         text = raw.replace("\r\n", "\n")
@@ -394,7 +411,7 @@ class ConfigDocument:
         if not isinstance(data, CommentedMap):
             raise ValueError(f"{p}: the config root must be a YAML mapping")
         doc = cls(p, data, existed=True, mapping=mapping, offset=offset,
-                  original_text=raw)
+                  original_text=raw, loaded_realpath=real)
         doc.newline = newline
         return doc
 
@@ -650,6 +667,12 @@ class ConfigDocument:
             self.set(path, [])
             seq = self.get(path)
         trailing = _detach_trailing_comment(seq)
+        parent = self.get(path[:-1], None) if len(path) > 1 else self.data
+        if (trailing is None and not len(seq) and isinstance(parent, CommentedMap)
+                and path[-1] in parent):
+            # An empty list (`key: []`, or one set() just created) carries the
+            # next section's heading on its own key: move it below the item.
+            trailing = _detach_slot_comment(parent, path[-1])
         item = _plain_to_commented(value)
         seq.append(item)
         if trailing is not None:
@@ -797,6 +820,11 @@ class ConfigDocument:
         where the previous version went.
         """
         target = Path(os.path.realpath(path if path else self.path))
+        if path is None and str(target) != self._loaded_realpath:
+            raise PermissionError(
+                errno.EPERM, "the config path now points somewhere else than "
+                "when it was opened (symlink swapped?); refusing to write "
+                "through it", str(self.path))
         text = self._serialized()
         target.parent.mkdir(parents=True, exist_ok=True)
         mode, owner = 0o600, None
@@ -820,12 +848,15 @@ class ConfigDocument:
             return self._saved(target, text)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                # Mode/owner through the descriptor, never the path, so a
+                # swapped temp name can't redirect root's chmod/chown.
+                os.fchmod(fh.fileno(), mode)
+                if (owner is not None and hasattr(os, "geteuid")
+                        and os.geteuid() == 0):
+                    os.fchown(fh.fileno(), *owner)
                 fh.write(text)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.chmod(tmp, mode)
-            if owner is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
-                os.chown(tmp, *owner)
             try:
                 os.replace(tmp, target)
             except OSError as exc:
@@ -843,6 +874,7 @@ class ConfigDocument:
         return self._saved(target, text)
 
     def _saved(self, target: Path, text: str) -> Path:
+        self._loaded_realpath = os.path.realpath(target)
         self.path = target
         self.existed = True
         self.modified = False
@@ -905,3 +937,16 @@ class ConfigDocument:
     def snapshot(self) -> CommentedMap:
         """Deep copy for undo/cancel of a sub-editor."""
         return copy.deepcopy(self.data)
+
+    def restore(self, text: str) -> bool:
+        """Undo back to ``text`` (an earlier ``dumps()``); False = not done.
+
+        Re-parsing keeps every comment and block style exactly (a deep copy
+        of the ruamel tree doesn't). Only a mapping document is restored.
+        """
+        data = self._yaml.load(text) if text.strip() else None
+        if not isinstance(data, CommentedMap):
+            return False
+        self.data = data
+        self._pending_trailing = []
+        return True

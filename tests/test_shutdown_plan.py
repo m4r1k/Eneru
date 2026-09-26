@@ -67,18 +67,31 @@ def test_delegated_skips_local_but_runs_remote(cfg):
 def test_non_local_group_skips_local_drain(cfg):
     # A non-local group can't manage the host's VMs/containers/filesystems
     # (those belong to the host that owns the UPS); remote shutdown still runs.
-    cfg.local_shutdown.enabled = True   # even with poweroff enabled...
+    cfg.local_shutdown.enabled = True
     plan = build_shutdown_plan(cfg, is_local=False)
     by = _by_id(plan)
     for pid in ("vms", "containers", "filesystem-sync", "filesystem-unmount"):
         assert by[pid]["skipped"] == "non-local group"
         assert not by[pid]["enabled"]
-    # ...host poweroff is a local-ownership action too, so a non-local group
-    # never powers off this host.
-    assert not by["local-poweroff"]["enabled"]
-    assert by["local-poweroff"]["skipped"] == "non-local group"
+    assert by["final-sync"]["skipped"] == "non-local group"
+    # F-178: the single-UPS runtime gates the poweroff on local_shutdown
+    # alone (monitor.py `local_shutdown.enabled and not delegated`), so the
+    # plan must say the host still powers off.
+    assert by["local-poweroff"]["enabled"]
+    assert by["local-poweroff"]["skipped"] is None
     assert by["remote"]["enabled"]
+    assert "still powers off" in plan["note"]
+    # Coordinator mode: a non-local group never powers off this host.
+    plan = build_shutdown_plan(cfg, is_local=False, coordinator_mode=True)
+    by = _by_id(plan)
+    assert not by["local-poweroff"]["enabled"]
     assert plan["note"] and "non-local" in plan["note"].lower()
+    # Single-UPS with local_shutdown disabled: nothing local runs at all.
+    cfg.local_shutdown.enabled = False
+    plan = build_shutdown_plan(cfg, is_local=False)
+    by = _by_id(plan)
+    assert by["local-poweroff"]["skipped"] == "disabled"
+    assert "non-local" in plan["note"].lower()
 
 
 @pytest.mark.unit

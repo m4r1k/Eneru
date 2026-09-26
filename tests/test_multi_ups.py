@@ -3,6 +3,7 @@
 import pytest
 import signal
 import threading
+import time
 import tempfile
 import os
 from pathlib import Path
@@ -630,10 +631,56 @@ class TestMultiUPSCoordinator:
         coord2._notification_worker = None
         with patch("eneru.multi_ups.run_command",
                    return_value=(1, "", "poweroff refused")), \
+             patch("eneru.multi_ups.time.sleep") as no_worker_sleep, \
              patch("eneru.multi_ups.write_shutdown_marker"), \
              patch("eneru.multi_ups.delete_shutdown_marker") as del_marker2:
             coord2._handle_local_shutdown("UPS1")
         del_marker2.assert_called_once()
+        # F-136: the no-worker 5 s grace is patched, not waited out for real.
+        no_worker_sleep.assert_called_once_with(5)
+
+    @pytest.mark.unit
+    def test_flush_and_marker_precede_poweroff(self, tmp_path):
+        """F-128 (coordinator): the 'Sequence Complete' flush and the
+        completion marker must land BEFORE the host poweroff."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+        parent = MagicMock()
+        parent.attach_mock(coord._notification_worker.send, "send")
+        parent.attach_mock(coord._notification_worker.flush, "flush")
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            parent.attach_mock(run_cmd, "poweroff")
+            parent.attach_mock(write_marker, "marker")
+            coord._handle_local_shutdown("UPS1")
+
+        names = [c[0] for c in parent.mock_calls]
+        assert names == ["send", "flush", "marker", "poweroff"], names
+
+    @pytest.mark.unit
+    def test_reload_disabling_notifications_mid_shutdown_still_powers_off(
+            self, tmp_path):
+        """F-122: a SIGHUP reload (notifications.enabled -> false) that lands
+        between send() and flush() nulls ``_notification_worker``. Re-reading
+        the attribute raised AttributeError and skipped the host poweroff."""
+        coord = self._make_local_shutdown_coord(tmp_path)
+        worker = coord._notification_worker
+
+        def send_then_reload(*_a, **_k):
+            # Main-thread reload runs while this monitor thread is in send().
+            coord._notification_worker = None
+
+        worker.send.side_effect = send_then_reload
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker"):
+            outcome = coord._handle_local_shutdown("UPS1")
+
+        run_cmd.assert_called_once()
+        worker.flush.assert_called_once_with(timeout=5)
+        assert outcome == "succeeded"
 
     @pytest.mark.unit
     def test_local_poweroff_zero_keeps_marker(self, tmp_path):
@@ -739,6 +786,31 @@ class TestMultiUPSCoordinator:
             for c in coord._notification_worker.send.call_args_list
         )
         coord._notification_worker.flush.assert_called_once()
+
+    @pytest.mark.unit
+    def test_delegated_reload_nulling_worker_mid_send_still_completes(
+            self, tmp_path):
+        """F-122 (delegated site): a SIGHUP reload that disables notifications
+        lands during ``send()`` and nulls ``_notification_worker``. The
+        delegated completion must still flush and write the recovery marker."""
+        coord = self._make_delegated_coord(tmp_path)
+        worker = coord._notification_worker
+
+        def send_then_reload(*_a, **_k):
+            coord._notification_worker = None
+
+        worker.send.side_effect = send_then_reload
+
+        with patch("eneru.runtime._detect_runtime_context",
+                   return_value="container (Docker)"), \
+             patch("eneru.multi_ups.run_command") as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker") as write_marker:
+            coord._handle_local_shutdown(
+                "UPS1", loopback_results=[self._loopback_result(sent=True)])
+
+        run_cmd.assert_not_called()
+        worker.flush.assert_called_once_with(timeout=5)
+        write_marker.assert_called_once()
 
     @pytest.mark.unit
     @pytest.mark.parametrize("results", [
@@ -1426,6 +1498,37 @@ class TestDrainOnLocalShutdown:
 
         # And the peer drain must still have happened.
         mock_monitor._execute_shutdown_sequence.assert_called_once()
+
+    @pytest.mark.unit
+    def test_drain_stops_peer_loops_before_their_sequences(self, tmp_path):
+        """F-132: peers' poll loops are signalled to stop (and joined) BEFORE
+        their shutdown sequences run; otherwise a live poll loop races its
+        own _execute_shutdown_sequence (the double-path race)."""
+        config = _coord_config(
+            tmp_path,
+            local_shutdown=LocalShutdownConfig(
+                enabled=False, drain_on_local_shutdown=True),
+        )
+        coord = MultiUPSCoordinator(config)
+        coord._log = lambda msg: None
+        events = []
+
+        peer_thread = MagicMock()
+        peer_thread.is_alive.return_value = False
+        peer_thread.join.side_effect = lambda timeout=None: events.append(
+            ("join", coord._stop_event.is_set()))
+
+        mock_monitor = MagicMock()
+        mock_monitor._log_prefix = "[UPS2] "
+        mock_monitor._shutdown_flag_path = tmp_path / "flag-ups2"  # absent
+        mock_monitor._execute_shutdown_sequence.side_effect = (
+            lambda: events.append(("sequence", coord._stop_event.is_set())))
+        coord._monitors = [mock_monitor]
+        coord._threads = [peer_thread]
+
+        coord._drain_all_groups(timeout=4)
+
+        assert events[:2] == [("join", True), ("sequence", True)], events
 
     @pytest.mark.unit
     def test_drain_not_called_when_disabled(self, tmp_path):
@@ -2173,6 +2276,30 @@ class TestCoordinatorDrainEdgeCases:
         # then a final wait once the per-monitor shutdown sequences have run.
         assert live_thread.join.called
         assert any("still running after drain timeout" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_drain_join_window_ignores_wall_clock_step(self, tmp_path):
+        """R2-01: an NTP step forward mid-drain must not collapse the join
+        windows to zero -- deadlines are on the monotonic clock."""
+        coord = MultiUPSCoordinator(_coord_config(tmp_path))
+        coord._log = lambda msg: None
+        coord._monitors = []
+        thread = MagicMock()
+        thread.is_alive.return_value = False
+        coord._threads = [thread]
+        wall = [1_000_000.0]
+
+        def jumping_wall():
+            wall[0] += 3600.0
+            return wall[0]
+
+        with patch("eneru.multi_ups.time.time", side_effect=jumping_wall):
+            coord._drain_all_groups(timeout=120)
+
+        timeouts = [c.kwargs["timeout"] for c in thread.join.call_args_list]
+        assert len(timeouts) == 2
+        assert timeouts[0] > 25  # ~ timeout // 4
+        assert timeouts[1] > 100  # ~ timeout
 
 
 # ==============================================================================
@@ -3551,6 +3678,42 @@ class TestCoordinatorShutdownJoinAndAudit:
         assert coord._shutdown_join_deadline() == 75 + 120
 
     @pytest.mark.unit
+    def test_signal_in_flight_joins_within_shared_budget(self, tmp_path):
+        """F-130: a SIGTERM while a shutdown is in flight waits the
+        config-derived budget (not the brisk 5 s) and the budget is SHARED
+        across threads (deadline-based), never N x budget."""
+        coord = MultiUPSCoordinator(self._cfg(tmp_path))
+        coord._log = MagicMock()
+        coord._notification_worker = None
+        coord._local_shutdown_in_flight = True
+        budget = coord._shutdown_join_deadline()
+        assert budget == 120
+
+        clock = [1000.0]
+        joins = []
+
+        class StuckThread:
+            """Never finishes: every join burns its full timeout."""
+
+            def join(self, timeout=None):
+                joins.append(timeout)
+                clock[0] += timeout
+
+            def is_alive(self):
+                return True
+
+        coord._threads = [StuckThread(), StuckThread()]
+        coord._evaluator_threads = [StuckThread()]
+
+        with patch("eneru.multi_ups.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("eneru.multi_ups.sys.exit"):
+            coord._handle_signal(signal.SIGTERM, None)
+
+        assert joins[0] == budget
+        assert sum(joins) == budget
+        assert len(joins) == 3
+
+    @pytest.mark.unit
     def test_shutdown_join_deadline_ignores_non_int_timeout(self, tmp_path):
         """A server with a non-int timeout is skipped in the budget calc, not
         crashed (defensive int() guard)."""
@@ -3794,6 +3957,56 @@ class TestHandleLocalShutdownRace:
 
         assert not t1.is_alive() and not t2.is_alive()
         # Exactly one poweroff argv was executed despite the race.
+        run_cmd.assert_called_once()
+
+    @pytest.mark.unit
+    def test_lock_holds_when_first_caller_stalls_inside_guard(self, tmp_path):
+        """F-131: the Barrier race above passes even without the lock (no
+        yield point between check and set under the GIL). Stall thread 1
+        INSIDE the check-then-set so thread 2 genuinely arrives mid-section:
+        only the lock keeps it out."""
+        inside = threading.Event()
+
+        class StallingCoordinator(MultiUPSCoordinator):
+            @property
+            def _local_shutdown_initiated(self):
+                value = self.__dict__.get("_lsi", False)  # the "check"
+                if not inside.is_set():
+                    inside.set()
+                    # Give thread 2 time to reach the guard. With the lock it
+                    # blocks on it; without, it reads the same "False".
+                    time.sleep(0.3)
+                return value
+
+            @_local_shutdown_initiated.setter
+            def _local_shutdown_initiated(self, value):
+                self.__dict__["_lsi"] = value
+
+        config = _coord_config(
+            tmp_path,
+            behavior=BehaviorConfig(dry_run=False),
+            local_shutdown=LocalShutdownConfig(
+                enabled=True, command="systemctl poweroff"),
+        )
+        coord = StallingCoordinator(config)
+        coord._log = MagicMock()
+        coord._notification_worker = MagicMock()
+
+        with patch("eneru.multi_ups.run_command",
+                   return_value=(0, "", "")) as run_cmd, \
+             patch("eneru.multi_ups.write_shutdown_marker"), \
+             patch("eneru.multi_ups.delete_shutdown_marker"):
+            t1 = threading.Thread(
+                target=coord._handle_local_shutdown, args=("UPS1",))
+            t1.start()
+            assert inside.wait(timeout=2)
+            t2 = threading.Thread(
+                target=coord._handle_local_shutdown, args=("UPS2",))
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        assert not t1.is_alive() and not t2.is_alive()
         run_cmd.assert_called_once()
 
 

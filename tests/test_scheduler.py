@@ -183,6 +183,20 @@ class TestWeeklyDue:
         assert s.last_occurrence(now, UTC) == _epoch(2026, 6, 1, 6, 0)
 
 
+class TestLastRunAtOccurrence:
+    @pytest.mark.unit
+    @pytest.mark.parametrize("sched,occ", [
+        (Schedule.daily("08:00"), _epoch(2026, 6, 1, 8, 0)),
+        (Schedule.weekly("monday", "08:00"), _epoch(2026, 6, 1, 8, 0)),
+        (Schedule.monthly(1, "08:00"), _epoch(2026, 6, 1, 8, 0)),
+    ])
+    def test_run_stamped_exactly_at_occurrence_does_not_refire(self, sched, occ):
+        # F-154: a run recorded at the exact occurrence epoch already covers
+        # it, both at that instant and later the same period.
+        assert sched.due(occ, occ, UTC) is False
+        assert sched.due(occ + 3600, occ, UTC) is False
+
+
 class TestIntervalOccurrenceEdges:
     @pytest.mark.unit
     def test_interval_last_occurrence_raises(self):

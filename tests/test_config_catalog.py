@@ -257,8 +257,17 @@ def test_has_tier():
      cat.child(cat.REMOTE_SERVER_SECTION, "use_sudo").help),
     (("remote_servers", 0, "pre_shutdown_commands", 2, "action"),
      cat.child(cat.PRE_SHUTDOWN_SECTION, "action").help),
-    (("redundancy_groups", 0, "triggers", "depletion", "window"),
-     cat.child(cat.child(cat.TRIGGERS_SECTION, "depletion"), "window").help),
+    (("redundancy_groups", 0, "triggers", "depletion", "grace_period"),
+     cat.child(cat.child(cat.TRIGGERS_SECTION, "depletion"), "grace_period").help),
+    # F-126: the loader rejects depletion.window on a redundancy group, so
+    # the editor doesn't offer (or explain) it there.
+    (("redundancy_groups", 0, "triggers", "depletion", "window"), None),
+    # R2-14: the group evaluator never reads these; per-UPS triggers do.
+    (("redundancy_groups", 0, "triggers", "voltage_sensitivity"), None),
+    (("redundancy_groups", 0, "triggers",
+      "self_test_failure_shutdown_delay"), None),
+    (("triggers", "voltage_sensitivity"),
+     cat.child(cat.TRIGGERS_SECTION, "voltage_sensitivity").help),
     (("containers", "compose_files", 0, "stop_timeout"),
      cat.child(cat.COMPOSE_FILE_SECTION, "stop_timeout").help),
     (("notifications", "urls", 0), cat.child(cat.NOTIFICATIONS_SECTION, "urls").help),
@@ -313,3 +322,110 @@ def test_hand_written_bounds_match_the_loader(path, good, bad):
     for v in bad:
         assert not parse_input(opt, str(v))[0], (path, v)
         assert loader_errors(v), (path, v)
+
+
+# ---------------------------------------------------------------------------
+# F-126: every numeric bound agrees with the loader; defaults validate clean
+# ---------------------------------------------------------------------------
+
+def _catalog_defaults(node):
+    """A plain document holding every catalog default (one item per list,
+    seeded from the list's ``new_item`` template like the editor does)."""
+    if isinstance(node, cat.Option):
+        return node.default
+    if isinstance(node, cat.ListSection):
+        item = _catalog_defaults(node.item)
+        item.update(dict(node.new_item))
+        return [item]
+    out = {}
+    for c in node.children:
+        value = _catalog_defaults(c)
+        if value is not None and value != {}:
+            out[c.key] = value
+    return out
+
+
+def _single_ups_defaults():
+    data = {s.key: _catalog_defaults(s) for s in cat.ROOT_SECTIONS}
+    # A redundancy group needs >= 2 UPS sources, i.e. multi-UPS mode.
+    del data["redundancy_groups"]
+    return data
+
+
+def _multi_ups_defaults():
+    data = {s.key: _catalog_defaults(s) for s in cat.ROOT_SECTIONS}
+    entry = _catalog_defaults(cat.UPS_ENTRY_SECTION)
+    data["ups"] = [dict(entry, name="a@h", is_local=True),
+                   dict(entry, name="b@h", is_local=False)]
+    # The only field an operator must type: which UPSes feed the group.
+    data["redundancy_groups"][0]["ups_sources"] = ["a@h", "b@h"]
+    return data
+
+
+def _loader_errors(data):
+    from eneru.config import ConfigLoader
+    config = ConfigLoader._parse_config(data)
+    return [m for m in ConfigLoader.validate_config(config, raw_data=data)
+            if m.startswith("ERROR")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder", [_single_ups_defaults, _multi_ups_defaults])
+def test_document_of_all_catalog_defaults_validates(builder):
+    """Every value the editor would write by default must load cleanly (this
+    is what catches an option offered where the loader forbids it, like
+    redundancy_groups[].triggers.depletion.window)."""
+    assert _loader_errors(builder()) == []
+
+
+def _numeric_options():
+    for node, prefix, builder in (
+            [(s, (s.key,), _single_ups_defaults) for s in cat.ROOT_SECTIONS
+             if s.key != "redundancy_groups"]
+            + [(cat.REDUNDANCY_LIST, ("redundancy_groups",), _multi_ups_defaults),
+               (cat.UPS_LIST, ("ups",), _multi_ups_defaults)]):
+        for path, opt in cat.iter_options(node, prefix):
+            if opt.kind in ("int", "float"):
+                yield pytest.param(path, opt, builder, id=".".join(path))
+
+
+def _put(data, path, value):
+    node = data
+    for key in path[:-1]:
+        node = node[0] if key == "[]" else node.setdefault(key, {})
+    node[path[-1]] = value
+    return data
+
+
+# Cross-field rules, not bounds: the loader wants critical_score < warn_score,
+# so each extreme is only invalid against the OTHER key's default.
+_RELATIONAL = {("battery_health", "warn_score", "min"),
+               ("battery_health", "critical_score", "max")}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path,opt,builder", list(_numeric_options()))
+def test_every_numeric_bound_is_accepted_by_the_loader(path, opt, builder):
+    """Walks EVERY numeric catalog option: a value the editor accepts at its
+    boundary must also pass the loader, and one step past the boundary the
+    editor refuses it. (The loader being looser than the editor for a few
+    keys is a known, deferred gap, so that direction isn't asserted.)"""
+    from eneru.config_tui import parse_input
+    step = 1 if opt.kind == "int" else 0.5
+    edges = []
+    if opt.minimum is not None:
+        low = opt.minimum + (step if opt.minimum_exclusive else 0)
+        edges.append(("min", low, opt.minimum if opt.minimum_exclusive
+                      else opt.minimum - step))
+    if opt.maximum is not None:
+        edges.append(("max", opt.maximum, opt.maximum + step))
+    assert edges, f"{path}: numeric option without a bound"
+    for tag, inside, outside in edges:
+        inside = int(inside) if opt.kind == "int" else inside
+        outside = int(outside) if opt.kind == "int" else outside
+        assert parse_input(opt, str(inside))[0], (path, inside)
+        assert not parse_input(opt, str(outside))[0], (path, outside)
+        if path[-2:] + (tag,) in _RELATIONAL:
+            continue
+        errors = _loader_errors(_put(builder(), path, inside))
+        assert errors == [], (path, inside, errors)

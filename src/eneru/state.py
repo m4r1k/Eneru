@@ -46,13 +46,19 @@ HealthSnapshot = namedtuple(
         "real_power",         # latest ups.realpower (W)
         "real_power_nominal", # latest ups.realpower.nominal (W)
         "power_nominal",      # latest ups.power.nominal (VA)
+        # R2-01: monotonic twins of last_update_time / connection_lost_time.
+        # Data age and grace age are computed from these so a wall-clock
+        # step (NTP correcting the clock after boot) can't make every
+        # member look stale at once. The wall fields stay for display/API.
+        "last_update_mono",    # ``time.monotonic()`` of the last successful poll
+        "connection_lost_mono", # ``time.monotonic()`` when grace started
     ],
 )
 # Back-compat for tests / third-party code still constructing the old
 # 10-field HealthSnapshot shape directly.
 HealthSnapshot.__new__.__defaults__ = (
     0, 0.0, "", "", "", "", "", "", "NORMAL", "INACTIVE", "INACTIVE",
-    "INACTIVE", 230.0, 0.0, 0.0, "", "", "",
+    "INACTIVE", 230.0, 0.0, 0.0, "", "", "", 0.0, 0.0,
 )
 
 
@@ -74,6 +80,9 @@ class MonitorState:
     overload_state: str = "INACTIVE"
     connection_state: str = "OK"
     connection_lost_time: float = 0.0
+    # R2-01: monotonic companion to connection_lost_time; grace timing uses
+    # this (wall fallback only when unset), the wall value is display-only.
+    connection_lost_mono: float = 0.0
     connection_flap_count: int = 0
     connection_first_flap_time: float = 0.0
     stale_data_count: int = 0
@@ -160,6 +169,7 @@ class MonitorState:
     latest_depletion_rate: float = 0.0
     latest_time_on_battery: int = 0
     latest_update_time: float = 0.0
+    latest_update_mono: float = 0.0
     # Set by the monitor's advisory-mode branch when this UPS belongs to a
     # redundancy group: instead of triggering a local shutdown the monitor
     # records the trigger here for the group evaluator to act on.
@@ -221,4 +231,6 @@ class MonitorState:
                 real_power=self.latest_real_power,
                 real_power_nominal=self.latest_real_power_nominal,
                 power_nominal=self.latest_power_nominal,
+                last_update_mono=self.latest_update_mono,
+                connection_lost_mono=self.connection_lost_mono,
             )

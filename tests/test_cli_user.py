@@ -35,10 +35,10 @@ def test_user_create_generate(db, capsys):
 
 @pytest.mark.unit
 def test_user_create_password_stdin(db, capsys, monkeypatch):
-    monkeypatch.setattr("sys.stdin", io.StringIO("hunter2pw\n"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("hunter2pw-long\n"))
     cli._cmd_user_create(_ns(username="bob", auth_db=db, password_stdin=True))
     capsys.readouterr()
-    assert auth.AuthStore(db).authenticate("bob", "hunter2pw") is not None
+    assert auth.AuthStore(db).authenticate("bob", "hunter2pw-long") is not None
 
 
 @pytest.mark.unit
@@ -48,12 +48,12 @@ def test_user_create_password_stdin_tty_prompts_hidden(db, capsys, monkeypatch):
             return True
 
     monkeypatch.setattr("sys.stdin", _TTY())
-    monkeypatch.setattr(getpass, "getpass", lambda prompt: "hiddenpw")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "hiddenpw-long")
 
     cli._cmd_user_create(_ns(username="bob", auth_db=db, password_stdin=True))
 
     capsys.readouterr()
-    assert auth.AuthStore(db).authenticate("bob", "hiddenpw") is not None
+    assert auth.AuthStore(db).authenticate("bob", "hiddenpw-long") is not None
 
 
 @pytest.mark.unit
@@ -82,10 +82,10 @@ def test_user_create_interactive_empty_errors(db, monkeypatch):
 @pytest.mark.unit
 def test_user_create_password_stdin_strips_crlf(db, capsys, monkeypatch):
     # A CRLF-terminated pipe (Windows/CI) must not leave a trailing \r.
-    monkeypatch.setattr("sys.stdin", io.StringIO("hunter2pw\r\n"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("hunter2pw-long\r\n"))
     cli._cmd_user_create(_ns(username="bob", auth_db=db, password_stdin=True))
     capsys.readouterr()
-    assert auth.AuthStore(db).authenticate("bob", "hunter2pw") is not None
+    assert auth.AuthStore(db).authenticate("bob", "hunter2pw-long") is not None
 
 
 @pytest.mark.unit
@@ -277,3 +277,39 @@ def test_fmt_ts_never_for_falsy():
     assert cli._fmt_ts(0) == "never"
     assert cli._fmt_ts(None) == "never"
     assert cli._fmt_ts(1_700_000_000) != "never"
+
+
+# ----- F-111: minimum length for operator-chosen passwords -----
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cmd", ["create", "passwd"])
+def test_short_password_rejected(db, monkeypatch, cmd):
+    if cmd == "passwd":
+        auth.AuthStore(db).create_user("bob", "a-long-enough-pw", role="admin")
+    short = "x" * (auth.MIN_PASSWORD_LENGTH - 1)
+    monkeypatch.setattr("sys.stdin", io.StringIO(short + "\n"))
+    fn = cli._cmd_user_create if cmd == "create" else cli._cmd_user_passwd
+    with pytest.raises(SystemExit, match="at least 12 characters"):
+        fn(_ns(username="bob", auth_db=db, password_stdin=True))
+    if cmd == "passwd":
+        # The old password is untouched.
+        assert auth.AuthStore(db).authenticate("bob", "a-long-enough-pw") is not None
+    else:
+        assert auth.AuthStore(db).get_user("bob") is None
+
+
+@pytest.mark.unit
+def test_exactly_minimum_length_password_accepted(db, capsys, monkeypatch):
+    pw = "y" * auth.MIN_PASSWORD_LENGTH
+    monkeypatch.setattr("sys.stdin", io.StringIO(pw))
+    cli._cmd_user_create(_ns(username="bob", auth_db=db, password_stdin=True))
+    capsys.readouterr()
+    assert auth.AuthStore(db).authenticate("bob", pw) is not None
+
+
+@pytest.mark.unit
+def test_generated_password_meets_minimum(db, capsys):
+    cli._cmd_user_create(_ns(username="bob", auth_db=db, generate=True))
+    out = capsys.readouterr().out
+    generated = out.split("Generated password: ", 1)[1].split()[0]
+    assert len(generated) >= auth.MIN_PASSWORD_LENGTH

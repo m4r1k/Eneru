@@ -19,8 +19,10 @@ from eneru import (
 from eneru import utils as eneru_utils
 from eneru.shutdown.remote import (
     REMOTE_PATH_PREFIX,
+    RemoteShutdownMixin,
     RemoteShutdownResult,
     loopback_poweroff_sent,
+    with_sudo,
 )
 
 
@@ -379,6 +381,45 @@ class TestRemotePreShutdownExecution:
                           return_value=(True, "")) as mock_run:
             remote_monitor._execute_remote_pre_shutdown(server)
         assert mock_run.call_args_list[0][0][1] == "systemctl stop app"
+
+    @pytest.mark.unit
+    def test_custom_command_log_shows_the_sudoed_command(self, remote_monitor):
+        """F-138/R6: the step log names the command that is really sent."""
+        server = RemoteServerConfig(
+            name="NAS", enabled=True, host="10.0.0.2", user="admin",
+            use_sudo=True, command_timeout=30,
+            pre_shutdown_commands=[RemoteCommandConfig(command="systemctl stop app")],
+        )
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")):
+            remote_monitor._execute_remote_pre_shutdown(server)
+        log_text = "\n".join(str(c) for c in remote_monitor.logger.log.call_args_list)
+        assert "[1/1] sudo -n systemctl stop app (timeout: 30s)" in log_text
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_loopback_poweroff_honors_use_sudo(self, remote_monitor, dry_run):
+        """F-123: the documented non-root `eneru-loopback` host user needs the
+        final poweroff sent through sudo, on the loopback path too."""
+        remote_monitor.config.behavior.dry_run = dry_run
+        server = RemoteServerConfig(
+            name="host-loopback", enabled=True, host="127.0.0.1",
+            user="eneru-loopback", use_sudo=True, is_host_loopback=True,
+            shutdown_command="shutdown -h now",
+        )
+        result = RemoteShutdownResult(server="host-loopback", host="127.0.0.1")
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as mock_run:
+            remote_monitor._shutdown_loopback_command(server, result)
+        log_text = "\n".join(str(c) for c in remote_monitor.logger.log.call_args_list)
+        if dry_run:
+            mock_run.assert_not_called()
+            assert ("[DRY-RUN] Would send command 'sudo -n shutdown -h now' "
+                    "to eneru-loopback@127.0.0.1") in log_text
+        else:
+            assert mock_run.call_args[0][1] == "sudo -n shutdown -h now"
+            assert mock_run.call_args.kwargs["is_final_shutdown"] is True
+        assert result.shutdown_sent is True
 
     @pytest.mark.unit
     def test_execute_pre_shutdown_with_custom_command(self, remote_monitor):
@@ -791,6 +832,43 @@ class TestRemotePreShutdownExecution:
 
         assert mock_run.call_count == 1          # poweroff attempted
         assert result.shutdown_sent is True
+
+    @pytest.mark.unit
+    def test_poweroff_reserve_survives_hung_pre_commands(self, remote_monitor):
+        """F-127 / H8, end to end with a fake clock: every hung pre-command
+        eats the whole time it is given. The final poweroff's slice
+        (command_timeout + SSH buffer = 60s of the 100s phase) must still be
+        left when the pre-phase is cut off, so the poweroff runs. Without the
+        reserve, the first hung step would burn all 100s and the host would
+        never be told to power off."""
+        clock = {"now": 0.0}
+        sent = []
+
+        def fake_run_command(cmd, timeout=None, **_kw):
+            sent.append((cmd[-1], timeout))
+            clock["now"] += timeout            # hangs until its timeout
+            return 124, "", ""
+
+        server = RemoteServerConfig(
+            name="slow", enabled=True, host="10.0.0.3", user="root",
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="sleep 999", timeout=60),
+                RemoteCommandConfig(command="sleep 998", timeout=60),
+            ],
+        )
+        with patch("eneru.shutdown.remote.run_command", side_effect=fake_run_command), \
+             patch("eneru.shutdown.remote.time.monotonic",
+                   side_effect=lambda: clock["now"]):
+            result = remote_monitor._shutdown_remote_server(server, deadline=100.0)
+
+        # Pre-phase: capped at the 40s left before the reserve, then stopped.
+        assert sent[0] == (REMOTE_PATH_PREFIX + "sleep 999", 40)
+        assert result.pre_commands.timed_out is True
+        # The poweroff still ran, with the full reserved slice.
+        assert sent[-1] == (REMOTE_PATH_PREFIX + "sudo shutdown -h now", 60)
+        assert len(sent) == 2
+        assert result.timed_out is False
 
     @pytest.mark.unit
     def test_full_deadline_blown_skips_final_shutdown(self, remote_monitor):
@@ -1296,9 +1374,13 @@ class TestLoopbackShutdownOrdering:
         assert final_row["outcome"] == "command-sent"
 
     @pytest.mark.unit
-    def test_peer_orchestration_exception_finishes_loopback_progress(
+    def test_peer_orchestration_exception_still_powers_off_the_host(
         self, remote_monitor
     ):
+        """F-118: a crash in Phase B (regular remotes) must not skip Phase C.
+        The loopback poweroff is still sent, its progress row is finished,
+        and the unfinished regulars come back as crashed rows next to the
+        loopback's result (callers need its shutdown_sent)."""
         loopback = RemoteServerConfig(
             name="host-loopback", enabled=True, host="127.0.0.1",
             user="root", is_host_loopback=True,
@@ -1313,14 +1395,44 @@ class TestLoopbackShutdownOrdering:
 
         with patch.object(
                 remote_monitor, "_shutdown_servers_parallel",
-                side_effect=RuntimeError("thread setup failed")):
-            with pytest.raises(RuntimeError, match="thread setup failed"):
-                remote_monitor._shutdown_remote_servers()
+                side_effect=RuntimeError("thread setup failed")), \
+                patch.object(remote_monitor, "_run_remote_command",
+                             return_value=(True, "")) as run:
+            results = remote_monitor._shutdown_remote_servers()
 
+        sent = [c.args[1] for c in run.call_args_list]
+        assert sent == ["shutdown -h now"]  # Phase C still ran
+        by_name = {r.server: r for r in results}
+        assert by_name["host-loopback"].shutdown_sent is True
+        assert by_name["NAS"].crashed is True
+        assert by_name["NAS"].success is False
+        assert "thread setup failed" in by_name["NAS"].error
         row = remote_monitor._shutdown_progress.snapshot()["remotes"][0]
-        assert row["state"] == "failed"
-        assert row["outcome"] == "not-sent"
         assert row["finishedAt"] is not None
+        assert row["outcome"] == "command-sent"
+
+    @pytest.mark.unit
+    def test_phase_b_crash_keeps_results_of_finished_phases(
+        self, remote_monitor
+    ):
+        """Only servers of the crashed (and later) phases become crashed
+        rows; an earlier phase's real result is kept as is."""
+        first = RemoteServerConfig(
+            name="first", enabled=True, host="10.0.0.1", user="root",
+            shutdown_order=1)
+        second = RemoteServerConfig(
+            name="second", enabled=True, host="10.0.0.2", user="root",
+            shutdown_order=2)
+        remote_monitor.config.ups_groups[0].remote_servers = [first, second]
+        done = RemoteShutdownResult(
+            server="first", host="10.0.0.1", shutdown_sent=True)
+        with patch.object(
+                remote_monitor, "_shutdown_servers_parallel",
+                side_effect=[[done], RuntimeError("boom")]):
+            results = remote_monitor._shutdown_remote_servers()
+        assert results[0] is done
+        assert [r.server for r in results] == ["first", "second"]
+        assert results[1].crashed is True and not results[1].completed
 
     @pytest.mark.unit
     def test_loopback_phase_c_exception_does_not_skip_other_loopbacks(
@@ -2039,3 +2151,160 @@ class TestRemoteWorkerStartFailure:
         # The host poweroff (Phase C) still ran, after the peer that started.
         assert by_host["127.0.0.1"].shutdown_sent is True
         assert sent.index("10.0.0.3") < sent.index("127.0.0.1")
+
+
+class TestGroupAReleaseReview:
+    """6.2.0 release review, fix group A (F-095, F-098, F-104, F-118)."""
+
+    @pytest.fixture
+    def remote_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        return monitor
+
+    @staticmethod
+    def _shutdown_argv(monitor, server, command="poweroff"):
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(0, "", "")) as run:
+            ok, _ = monitor._run_remote_command(server, command, 30, "t")
+        assert ok
+        return run.call_args[0][0]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("opts", [
+        ["-i", "/k"],
+        ["-p", "2222"],
+        ["-o Port=2222"],
+        ["StrictHostKeyChecking=no"],
+        ["-J", "jump"],
+        ["-i", "/k", "-p", "2222", "-o StrictHostKeyChecking=no",
+         "-o UserKnownHostsFile=/dev/null"],
+    ])
+    def test_shutdown_and_probe_build_the_same_ssh_argv(self, remote_monitor, opts):
+        """F-095: `["-i", "/k"]` used to become `-i -o /k …` on the shutdown
+        path (the key path parsed as the host) while the probe was right."""
+        from eneru.remote_health import build_ssh_probe_command
+        server = RemoteServerConfig(name="s", enabled=True, host="h",
+                                    user="u", ssh_options=list(opts))
+        shutdown = self._shutdown_argv(remote_monitor, server, "poweroff")
+        probe = build_ssh_probe_command(server, "PROBE")
+        assert shutdown[:-1] == probe[:-1]
+        assert shutdown[-1] == REMOTE_PATH_PREFIX + "poweroff"
+        # The option's value stays glued to its flag.
+        for flag in ("-i", "-p", "-J"):
+            if flag in opts:
+                assert shutdown[shutdown.index(flag) + 1] == \
+                    opts[opts.index(flag) + 1]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("item,flag,value", [
+        ("-i /root/.ssh/nas_key", "-i", "/root/.ssh/nas_key"),
+        ("-l admin", "-l", "admin"),
+        ("-J jump.example", "-J", "jump.example"),
+        ("-F /etc/eneru/ssh_config", "-F", "/etc/eneru/ssh_config"),
+        ("-p 2222", "-p", "2222"),
+    ])
+    def test_flag_and_value_in_one_item_split_the_same_everywhere(
+            self, remote_monitor, item, flag, value):
+        """R2-02: `"-i /root/.ssh/key"` as ONE list item must reach ssh as
+        two argv elements on the shutdown path, the remote-health probe and
+        `config check` alike (ssh would otherwise read " /root/..." as the
+        key path and fail BatchMode auth)."""
+        from eneru import config_check as cc
+        from eneru.config import Config
+        from eneru.remote_health import run_remote_probe
+        server = RemoteServerConfig(name="s", enabled=True, host="h",
+                                    user="u", ssh_options=[item],
+                                    shutdown_command="sudo shutdown -h now")
+        shutdown = self._shutdown_argv(remote_monitor, server, "poweroff")
+        with patch("eneru.remote_health.run_command",
+                   return_value=(0, "", "")) as run:
+            assert run_remote_probe(server, "PROBE")[0]
+        health = run.call_args[0][0]
+        with patch("eneru.remote_health.run_command",
+                   return_value=(0, "", "")), \
+                patch.object(cc, "command_exists", return_value=True), \
+                patch.object(cc, "_run", return_value=(0, "", "")) as cc_run:
+            cc.probe_remote(Config(), server)
+        check = cc_run.call_args[0][0]
+        for argv in (shutdown, health, check):
+            assert item not in argv
+            assert argv[argv.index(flag) + 1] == value
+        assert shutdown[:-1] == health[:-1] == check[:-1]
+
+    @pytest.mark.unit
+    def test_destination_follows_double_dash(self, remote_monitor):
+        """F-104: `--` ends ssh option parsing before user@host."""
+        server = RemoteServerConfig(name="s", enabled=True, host="h", user="u")
+        argv = self._shutdown_argv(remote_monitor, server)
+        assert argv[argv.index("--") + 1] == "u@h"
+
+    @pytest.mark.unit
+    def test_dangling_ssh_option_fails_the_step_not_the_sequence(self, remote_monitor):
+        server = RemoteServerConfig(name="s", enabled=True, host="h", user="u",
+                                    ssh_options=["-i"])
+        capture = {}
+        with patch("eneru.shutdown.remote.run_command") as run:
+            ok, err = remote_monitor._run_remote_command(
+                server, "poweroff", 30, "t", capture=capture)
+        assert not ok and "dangling" in err
+        run.assert_not_called()
+        assert capture == {}  # ssh never ran
+
+    @pytest.mark.unit
+    def test_step_use_sudo_overrides_the_server(self, remote_monitor):
+        """F-098: a step's own use_sudo wins; unset inherits the server."""
+        server = RemoteServerConfig(
+            name="s", enabled=True, host="h", user="deploy", use_sudo=True,
+            command_timeout=30,
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="systemctl --user stop app",
+                                    use_sudo=False),
+                RemoteCommandConfig(command="systemctl stop db"),
+                RemoteCommandConfig(action="stop_vms", use_sudo=False),
+            ],
+        )
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+        sent = [c.args[1] for c in run.call_args_list]
+        assert sent[0] == "systemctl --user stop app"
+        assert sent[1] == "sudo -n systemctl stop db"
+        assert "sudo -n virsh" not in sent[2] and "virsh list" in sent[2]
+
+        server.use_sudo = False
+        server.pre_shutdown_commands = [
+            RemoteCommandConfig(command="systemctl stop db", use_sudo=True)]
+        with patch.object(remote_monitor, "_run_remote_command",
+                          return_value=(True, "")) as run:
+            remote_monitor._execute_remote_pre_shutdown(server)
+        assert run.call_args.args[1] == "sudo -n systemctl stop db"
+
+
+class TestWithSudoHelper:
+    """F-124: one sudo-prefix rule shared by the runtime and config check."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("command,expected", [
+        ("shutdown -h now", "sudo -n shutdown -h now"),
+        ("  shutdown -h now", "sudo -n   shutdown -h now"),
+        ("sudo shutdown -h now", "sudo shutdown -h now"),
+        ("  sudo -n poweroff", "  sudo -n poweroff"),
+        ("sudo\tshutdown -h now", "sudo\tshutdown -h now"),
+        ("/usr/bin/sudo shutdown -h now", "/usr/bin/sudo shutdown -h now"),
+        ("sudo", "sudo"),
+        ("sudoedit /etc/x", "sudo -n sudoedit /etc/x"),
+        ("", "sudo -n "),
+    ])
+    def test_prefix_rule(self, command, expected):
+        assert with_sudo(command, True) == expected
+        assert with_sudo(command, False) == command
+        # The mixin's staticmethod is a thin alias of the shared helper.
+        assert RemoteShutdownMixin._with_sudo(command, True) == expected

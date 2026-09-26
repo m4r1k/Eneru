@@ -96,7 +96,63 @@ jobs:
           # runner user. The check is documented as a testing/dry-run
           # bypass; production containers never set it.
           ENERU_SKIP_PRIVILEGE_CHECK: "1"
-        run: bash tests/e2e/groups/${{ matrix.group }}.sh
+        run: |
+          # F-144: every group script ends with a completion line; requiring
+          # it catches an early `exit 0` that would skip the remaining tests
+          # while still reporting green.
+          set -o pipefail
+          bash tests/e2e/groups/${{ matrix.group }}.sh 2>&1 | tee /tmp/e2e-group-run.log
+          grep -qx "=== Group '${{ matrix.group }}' completed successfully ===" /tmp/e2e-group-run.log
+
+      - name: Verify every E2E group script has a matrix entry
+        if: matrix.group == 'cli'
+        run: |
+          # F-144: a new tests/e2e/groups/<name>.sh without a matrix entry
+          # would never run, and nothing else would notice. lib.sh is the
+          # shared helper file, not a group.
+          missing=0
+          for script in tests/e2e/groups/*.sh; do
+            name="$(basename "$script" .sh)"
+            [ "$name" = "lib" ] && continue
+            if ! grep -Eq "^[[:space:]]*- \{ group: ${name}," .github/workflows/e2e.yml; then
+              echo "::error::tests/e2e/groups/${name}.sh has no matrix entry in e2e.yml"
+              missing=1
+            fi
+            # The completion line must be the LAST non-empty line, so no
+            # test can hide after it.
+            [ "$(sed '/^[[:space:]]*$/d' "$script" | tail -n 1)" = "echo \"=== Group '${name}' completed successfully ===\"" ] || {
+              echo "::error::tests/e2e/groups/${name}.sh must end with its completion line"
+              missing=1
+            }
+            # A group that calls a lib.sh helper must source lib.sh, or the
+            # call dies with "command not found" mid-run.
+            helpers="$(grep -oE '^[a-z_]+\(\) \{' tests/e2e/groups/lib.sh | sed 's/() {//' | paste -sd'|')"
+            if grep -Eq "(^|[^a-z_])(${helpers})([^a-z_]|$)" "$script" \
+                && ! grep -q '^\. "\$E2E_DIR/groups/lib.sh"' "$script"; then
+              echo "::error::tests/e2e/groups/${name}.sh calls a lib.sh helper without sourcing lib.sh"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Verify multi-UPS E2E coverage is wired
+        if: matrix.group == 'multi-ups'
+        run: |
+          grep -q "Test 9: Multi-UPS isolation (UPS1 fails, UPS2 normal)" tests/e2e/groups/multi-ups.sh
+          grep -q "Test 14: Multi-UPS concurrent failure (both UPSes fail)" tests/e2e/groups/multi-ups.sh
+          grep -q "Test 15: Non-local failure (UPS2 fails, UPS1 unaffected)" tests/e2e/groups/multi-ups.sh
+          grep -q "Test 16: Local drain (drain_on_local_shutdown=true)" tests/e2e/groups/multi-ups.sh
+          grep -q "Test 19: Multi-phase shutdown ordering (shutdown_order)" tests/e2e/groups/multi-ups.sh
+          # Isolation must stay asserted in both directions.
+          grep -q 'Initiating remote shutdown: E2E SSH Target (UPS1)' tests/e2e/groups/multi-ups.sh
+          grep -q 'Group E2E UPS2 shutdown complete. Exiting (--exit-after-shutdown)' tests/e2e/groups/multi-ups.sh
+
+      - name: Verify redundancy regression E2E coverage is wired
+        if: matrix.group == 'redundancy-regression'
+        run: |
+          grep -q "Regression R1: Runtime transient NUT loss stays inside redundancy grace" tests/e2e/groups/redundancy-regression.sh
+          grep -q "Regression R2: Runtime persistent NUT loss fails safe after grace" tests/e2e/groups/redundancy-regression.sh
+          grep -Eq "^[[:space:]]*stop_redundancy_nut_drivers[[:space:]]*$" tests/e2e/groups/redundancy-regression.sh
 
       - name: Verify v5.3 E2E coverage is wired
         if: matrix.group == 'single-ups-core'
@@ -114,6 +170,22 @@ jobs:
           grep -q "Test 44: Unreachable remote shutdown is bounded" tests/e2e/groups/single-ups-core.sh
           grep -q "Test 45: MQTT status publishes power-quality metrics" tests/e2e/groups/single-ups-core.sh
           grep -q "Test 46: OCI image runs with API enabled by CLI flags" tests/e2e/groups/single-ups-core.sh
+          # 6.2.0 review (F-139/F-145): exact FSD reason, renumbered re-arm test.
+          grep -q 'Triggering immediate shutdown. Reason: UPS signaled FSD (Forced Shutdown) flag.' tests/e2e/groups/single-ups-core.sh
+          grep -q '^battery.charge: 80' tests/e2e/scenarios/fsd.dev
+          grep -q "Test 70: Shutdown re-arm on POWER_RESTORED (bug #4)" tests/e2e/groups/single-ups-core.sh
+          # 6.2 UX contract: outlook/role/freshness API fields + progress sidecar.
+          grep -q "PASS (43a): next-trigger/role/freshness contract on the live API" tests/e2e/groups/single-ups-core.sh
+          grep -q "eneru-e2e-state.shutdown-progress.json" tests/e2e/groups/single-ups-core.sh
+          # 6.2.0 review cycle 3 (F-188): nextTrigger == the trigger the daemon fired.
+          grep -q "PASS (43a): nextTrigger names the trigger the daemon fired" tests/e2e/groups/single-ups-core.sh
+          grep -q 'assert fired\[0\] == "Battery charge 14% below threshold 20%"' tests/e2e/groups/single-ups-core.sh
+          grep -q 'assert role\["kind"\] == "local", role' tests/e2e/groups/single-ups-core.sh
+          # 6.2: a one-entry ups list honours an explicit is_local: false.
+          grep -q "Test 71: One-entry ups list honours explicit is_local: false" tests/e2e/groups/single-ups-core.sh
+          grep -qF 'write_is_local_config /tmp/config-e2e-islocal-false.yaml "is_local: false"' tests/e2e/groups/single-ups-core.sh
+          grep -qF 'if grep -qF "Would execute: shutdown -h now" /tmp/test71a.log; then' tests/e2e/groups/single-ups-core.sh
+          grep -qF 'WARNING: ups[0] has no is_local; as the only UPS it powers off this host on a shutdown trigger.' tests/e2e/groups/single-ups-core.sh
 
       - name: Verify v5.5 loopback E2E coverage is wired
         if: matrix.group == 'loopback'
@@ -132,6 +204,12 @@ jobs:
           grep -q "stop_compose" tests/e2e/groups/loopback.sh
           grep -q "stop_containers_rootless" tests/e2e/groups/loopback.sh
           grep -q "unmount_filesystems" tests/e2e/groups/loopback.sh
+          grep -Eq "^[[:space:]]*config_check_identity_autofill_case[[:space:]]*$" tests/e2e/groups/loopback.sh
+          grep -q 'host-loopback: host identity matches (loopback reaches THIS host)' tests/e2e/groups/loopback.sh
+          grep -qF 'grep -qF "[read-only]" /tmp/test68b.log' tests/e2e/groups/loopback.sh
+          # F-189: the dry-run confirm must be on the captured screen.
+          grep -qx '  assert_dry_run_confirm_shown /tmp/test68a.log on || exit 1' tests/e2e/groups/loopback.sh
+          grep -q '^assert_dry_run_confirm_shown() {' tests/e2e/groups/lib.sh
 
       - name: Verify v6.0 E2E coverage is wired
         if: matrix.group == 'cli' || matrix.group == 'single-ups-auth'
@@ -158,6 +236,9 @@ jobs:
           grep -q "Test 62: self-test observation" tests/e2e/groups/single-ups-auth.sh
           grep -q "^ups.test.result:" tests/e2e/scenarios/self-test-passed.dev
           grep -q "Test 64: authenticated remote shutdown response and exit code" tests/e2e/groups/single-ups-auth.sh
+          # F-189: the selfTestFailure outlook row is observed live (armed, fired).
+          grep -q '\[ "$T5_IDLE" = "true idle - 3" \]' tests/e2e/groups/single-ups-auth.sh
+          grep -q '\[ "$T5_FIRED" = "true fired selfTestFailure 3" \]' tests/e2e/groups/single-ups-auth.sh
 
       - name: Verify v6.2 report and self-test E2E coverage is wired
         if: matrix.group == 'stats' || matrix.group == 'single-ups-auth'
@@ -205,7 +286,17 @@ jobs:
           grep -q 'grep -qF "Pinned Wrong Args: sudo refuses it without a password"' tests/e2e/groups/cli.sh
           grep -q 'docker exec eneru-e2e-ssh test -e /root/eneru-custom-sudo' tests/e2e/groups/cli.sh
           grep -q "Test 67: use_sudo runs custom pre-shutdown commands via sudo" tests/e2e/groups/cli.sh
+          grep -q "Test 69: remote shutdown with split ssh_options (-i/-p)" tests/e2e/groups/cli.sh
+          grep -q 'docker exec eneru-e2e-ssh test -e /tmp/eneru-split-opts' tests/e2e/groups/cli.sh
+          grep -q "Pinned Custom: sudo refuses it without a password: sudo allows 'touch /tmp/eneru-pinned-custom' without a password" tests/e2e/groups/cli.sh
+          grep -q 'expect "== Shutdown order =="' tests/e2e/groups/cli.sh
+          grep -q 'docker exec eneru-e2e-ssh test -e /tmp/shutdown-invoked' tests/e2e/groups/cli.sh
+          grep -q 'touch /tmp/shutdown-invoked' tests/e2e/ssh-target/Dockerfile
+          grep -q '\[1/1\] touch /root/eneru-custom-nosudo failed:' tests/e2e/groups/cli.sh
           test -f tests/e2e/config-tui-driver.py
+          # F-189: the `y` in the key script answers a real dry-run prompt.
+          grep -qx 'assert_dry_run_confirm_shown /tmp/test66a.log on || exit 1' tests/e2e/groups/cli.sh
+          grep -q '^assert_dry_run_confirm_shown() {' tests/e2e/groups/lib.sh
 
       - name: Verify redundancy progress E2E coverage is wired
         if: matrix.group == 'redundancy-quorum'
@@ -217,6 +308,10 @@ jobs:
           grep -q 'nominal_power: 800' tests/e2e/config-e2e-redundancy.yaml
           grep -q 'ups.realpower.nominal: 1000' tests/e2e/scenarios/online-charging.dev
           grep -q 'remoteDetailAvailable' tests/e2e/groups/redundancy-quorum.sh
+          # F-141: Tests 23/24 must really produce UNKNOWN members.
+          grep -Eq "^[[:space:]]*stop_redundancy_nut_driver[[:space:]]+UPS2[[:space:]]*$" tests/e2e/groups/redundancy-quorum.sh
+          grep -q 'UPS1@localhost:3493=critical, UPS2@localhost:3493=unknown' tests/e2e/groups/redundancy-quorum.sh
+          grep -q 'UPS1@localhost:3493=unknown, UPS2@localhost:3493=unknown' tests/e2e/groups/redundancy-quorum.sh
 
       - name: Collect logs on failure
         if: failure()

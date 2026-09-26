@@ -23,7 +23,7 @@ let cfgSnapshot = null;
 let remoteHealthSnapshot = [];
 let lastUpsRows = [];
 let lastGroups = [];
-let eventSortDirection = "asc";
+let eventSortDirection = "desc";   // L2: newest first by default
 
 // Pure refresh helpers kept separate from DOM work so the state transitions can
 // be exercised in the no-browser Node harness.
@@ -312,8 +312,14 @@ function relTime(epoch) {
   return Math.floor(s / 86400) + "d ago";
 }
 
-function showError(msg) {
+// `spoken` is the stable headline screen readers hear (defaults to msg). The
+// live region is written only when that headline changes, so a message whose
+// visible age ticks every poll is not re-announced every 10 seconds.
+function showError(msg, spoken) {
   const box = document.getElementById("error");
+  const live = document.getElementById("error-status");
+  const say = msg ? (spoken || msg) : "";
+  if (live && live.textContent !== say) live.textContent = say;
   if (!msg) { box.hidden = true; return; }
   box.textContent = msg; box.hidden = false;
 }
@@ -338,13 +344,82 @@ function formatFleetMetric(v, unit) {
   return number == null ? "—" : number + unit;
 }
 
-function statusClass(status) {
+// v6.2 shared status vocabulary (M1). One short label and one 3-level
+// severity per state, identical to eneru.utils.status_summary so the dashboard,
+// the TUI and notifications say the same thing. The daemon sends the result as
+// `statusSummary`; localStatusSummary() is the same table in JS, used only when
+// talking to an older daemon that doesn't send it.
+// ELI5: a traffic light with exactly three colors. Amber means "on battery,
+// fine for now"; red means "the host is going down (or about to)". Only the two
+// "going down" states blink, so a blinking badge always means act now.
+const STATUS_STATES = {
+  shutting_down: ["Shutting down", "crit", true],
+  trigger_active: ["Shutdown triggered", "crit", true],
+  connection_lost: ["Connection lost", "warn", false],
+  stale: ["Stale data", "warn", false],
+  output_off: ["UPS output off", "crit", false],
+  low_battery: ["Low battery", "crit", false],
+  on_battery: ["On battery", "warn", false],
+  bypass: ["On bypass", "warn", false],
+  online: ["On mains", "ok", false],
+  waiting: ["Waiting for data", "warn", false],
+  unknown: ["Status unknown", "warn", false],
+};
+const SEVERITY_RANK = { ok: 0, warn: 1, crit: 2 };
+
+function localStatusSummary(status, opts) {
+  opts = opts || {};
   const tokens = nutStatusTokens(status);
-  if (["FSD", "OFF", "OB", "LB", "RB", "OVER", "ALARM"]
-    .some((t) => tokens.has(t))) return "crit";
-  if (["WAIT", "BOOST", "TRIM", "BYPASS", "DISCHRG"]
-    .some((t) => tokens.has(t))) return "warn";
-  return tokens.has("OL") ? "ok" : "warn";
+  const conn = String(opts.connectionState || "OK").toUpperCase();
+  let state;
+  if (opts.shuttingDown || tokens.has("FSD")) state = "shutting_down";
+  else if (opts.triggerActive) state = "trigger_active";
+  else if (conn === "FAILED") state = "connection_lost";
+  else if (opts.stale) state = "stale";
+  else if (tokens.has("OFF")) state = "output_off";
+  else if (tokens.has("LB")) state = "low_battery";
+  else if (tokens.has("OB")) state = "on_battery";
+  else if (tokens.has("BYPASS")) state = "bypass";
+  else if (tokens.has("OL")) state = "online";
+  else if (tokens.size === 0 || tokens.has("WAIT")) state = "waiting";
+  else state = "unknown";
+  const def = STATUS_STATES[state];
+  let severity = def[1];
+  // Losing NUT while on battery is the failsafe path, not a hiccup.
+  if (state === "connection_lost" && tokens.has("OB")) severity = "crit";
+  if (state === "online" && ["ALARM", "OVER", "RB"].some((t) => tokens.has(t))) {
+    severity = "warn";
+  }
+  return { state, label: def[0], severity, blink: def[2],
+    detail: humanNutStatus(status), tokens: Array.from(tokens) };
+}
+
+// The status summary for one /api/v1/ups row: the daemon's own when present,
+// otherwise the local twin of it.
+function statusInfo(u) {
+  const s = u && u.statusSummary;
+  if (s && typeof s.label === "string" && s.label) {
+    const severity = SEVERITY_RANK[s.severity] !== undefined ? s.severity : "warn";
+    return { state: s.state || "unknown", label: s.label, severity,
+      blink: !!s.blink, detail: s.detail || humanNutStatus(u.status),
+      tokens: s.tokens || [] };
+  }
+  const fresh = u && u.freshness;
+  return localStatusSummary(u && u.status, {
+    triggerActive: !!(u && u.triggerActive),
+    connectionState: u && u.connectionState,
+    stale: !!(fresh && fresh.stale && fresh.lastPollAt != null),
+  });
+}
+
+// Legacy helper kept for callers that only have a raw NUT status string.
+function statusClass(status) {
+  return localStatusSummary(status).severity;
+}
+
+function worstSeverity(list) {
+  return (list || []).reduce((worst, s) =>
+    ((SEVERITY_RANK[s] || 0) > (SEVERITY_RANK[worst] || 0) ? s : worst), "ok");
 }
 
 // ----- rendering -----
@@ -393,6 +468,160 @@ function formatRuntimeSeconds(value) {
     return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
   }
   return seconds + "s";
+}
+
+// "just now" / "12s ago" / "4m ago" / "3h ago" / "14d ago" for an age in
+// seconds (same wording as eneru.utils.format_age).
+function formatAge(seconds) {
+  const s = Number(seconds);
+  if (seconds === null || seconds === undefined || !Number.isFinite(s)) return "unknown";
+  if (s < 2) return "just now";
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+// ----- v6.2: role, "what happens next", freshness (H1/H3/H4/M3/M4) ---------
+// All of these read the daemon's additive /api/v1/ups fields (role,
+// triggerOutlook, nextTrigger, freshness, *Text) and degrade to the older
+// fields when talking to a pre-6.2 daemon.
+
+// Human durations everywhere (M3): the daemon's text when sent, else ours.
+function durationText(text, seconds) {
+  if (typeof text === "string" && text) return text;
+  return formatRuntimeSeconds(seconds);
+}
+function timeOnBatteryText(u) {
+  return durationText(u && u.timeOnBatteryText, u && u.timeOnBattery);
+}
+function runtimeText(u) { return durationText(u && u.runtimeText, u && u.runtime); }
+function isOnBattery(u) { return nutStatusTokens(u && u.status).has("OB"); }
+
+// What this UPS does to the world when a trigger fires (M4/H1). `role` from the
+// daemon is built from the real shutdown plan; the fallback only knows isLocal
+// and the configured remote servers.
+function upsRole(u) {
+  if (!u) return null;
+  if (u.role && u.role.kind) return u.role;
+  const cfgUps = ((typeof cfgSnapshot !== "undefined" && cfgSnapshot && cfgSnapshot.ups) || [])
+    .find((c) => c.name === u.name);
+  const remotes = cfgUps ? (cfgUps.remoteServers || []).filter(
+    (s) => s.enabled !== false && !s.isHostLoopback).length : 0;
+  const groups = ((typeof lastGroups !== "undefined" && lastGroups) || [])
+    .filter((g) => (g.upsSources || []).includes(u.name)).map((g) => g.name);
+  if (groups.length) {
+    return { kind: "redundancy-member", hasShutdownActions: false,
+      label: "Redundancy member (" + groups.join(", ") + ")",
+      redundancyGroups: groups, remoteServers: remotes };
+  }
+  if (u.isLocal !== false) {
+    return { kind: "local", label: "Powers this host", hasShutdownActions: true,
+      shutsDownLocalHost: true, remoteServers: remotes, redundancyGroups: [] };
+  }
+  if (remotes) {
+    return { kind: "remote-only", label: "Remote shutdowns only",
+      hasShutdownActions: true, remoteServers: remotes, redundancyGroups: [] };
+  }
+  return { kind: "monitor-only", label: "Monitoring only", hasShutdownActions: false,
+    remoteServers: 0, redundancyGroups: [] };
+}
+
+function roleBadge(u) {
+  const role = upsRole(u);
+  if (!role) return null;
+  const cls = { "monitor-only": "muted", "remote-only": "info",
+    "redundancy-member": "info", local: "role-local" }[role.kind] || "muted";
+  return el("span", { class: "badge role-badge " + cls, text: role.label });
+}
+
+// The one-line consequence of a trigger firing ("Shuts down this host and 1
+// remote server"), from triggerOutlook.action or derived from the role.
+function actionLabel(u) {
+  const o = u && u.triggerOutlook;
+  if (o && o.action && o.action.label) return o.action.label;
+  const role = upsRole(u);
+  if (!role) return "";
+  if (role.kind === "redundancy-member") {
+    return "Marks this UPS critical for redundancy group "
+      + (role.redundancyGroups || []).join(", ") + " (group decides)";
+  }
+  if (!role.hasShutdownActions) return "Notification only — nothing is shut down here";
+  return role.kind === "remote-only" ? "Shuts down remote servers" : "Shuts down this host";
+}
+
+// A status badge from statusInfo(): short label, severity color, and the
+// blink/pulse ONLY for the two "the host is going down" states (M1).
+function statusBadge(info, extraCls) {
+  return el("span", { class: "badge " + info.severity + (info.blink ? " pulse" : "")
+    + (extraCls ? " " + extraCls : ""), text: info.label, title: info.detail });
+}
+
+// Enabled triggers that can still fire, soonest first; a fired one leads.
+function upcomingTriggers(u) {
+  const o = u && u.triggerOutlook;
+  if (!o || !Array.isArray(o.triggers)) return [];
+  const rank = (t) => (t.state === "fired" ? -1
+    : (typeof t.etaSeconds === "number" ? t.etaSeconds : Infinity));
+  return o.triggers
+    .filter((t) => t && t.enabled !== false
+      && ["fired", "held", "arming", "ok"].includes(t.state))
+    .sort((a, b) => rank(a) - rank(b));
+}
+
+function triggerEta(t) {
+  if (!t) return "";
+  if (t.state === "fired") return "now";
+  if (typeof t.etaSeconds === "number") return "in ≈" + formatRuntimeSeconds(t.etaSeconds);
+  return "";
+}
+
+// "Shutdown in ≈3m 20s (runtime < 10m 0s) · or charge < 20% in ≈21m" — the
+// single "what happens next, and when" line for the hero, fleet rows and the
+// banner (H3). Null when nothing is armed (on mains) or nothing runs here.
+function outlookLine(u) {
+  const role = upsRole(u);
+  const list = upcomingTriggers(u);
+  if (!list.length || !role) return null;
+  if (!role.hasShutdownActions && role.kind !== "redundancy-member") return null;
+  const verb = role.kind === "redundancy-member" ? "Counts as failed for its group" : "Shutdown";
+  const first = list[0];
+  let head;
+  if (first.state === "fired") head = verb + " now: " + first.condition;
+  else if (first.state === "held") {
+    head = verb + " after stabilization, " + triggerEta(first) + " (" + first.condition + ")";
+  } else if (first.state === "arming") {
+    // FAILSAFE countdown (failed NUT polls on battery): say how far along it is.
+    head = verb + " " + triggerEta(first) + " unless NUT answers ("
+      + (first.text || first.condition) + ")";
+  } else if (typeof first.etaSeconds === "number") {
+    head = verb + " " + triggerEta(first) + " (" + first.condition + ")";
+  } else head = verb + " when " + first.condition;
+  // Once one has fired, the rest are moot; otherwise name the next two.
+  const rest = (first.state === "fired" ? [] : list.slice(1, 3)).map((t) => "or " + t.condition
+    + (typeof t.etaSeconds === "number" ? " " + triggerEta(t) : ""));
+  return [head].concat(rest).join(" · ");
+}
+
+// Data freshness (H4). ageSeconds is the daemon's age at build time; the time
+// since our last successful fetch is added so the age keeps counting when the
+// daemon stops answering.
+let lastGoodFetchAt = 0;      // client ms of the last successful /api/v1/ups
+let lastGeneratedAt = null;   // server epoch of that payload
+function dataAgeSeconds(u) {
+  const extra = lastGoodFetchAt ? Math.max(0, (Date.now() - lastGoodFetchAt) / 1000) : 0;
+  const f = u && u.freshness;
+  if (f && typeof f.ageSeconds === "number") return f.ageSeconds + extra;
+  if (u && u.lastUpdateTime && lastGeneratedAt) {
+    return Math.max(0, lastGeneratedAt - u.lastUpdateTime) + extra;
+  }
+  return null;
+}
+function dataIsStale(u) {
+  const f = (u && u.freshness) || {};
+  if (f.stale && f.lastPollAt != null) return true;
+  const age = dataAgeSeconds(u);
+  return age != null && age > (f.staleAfterSeconds || 30);
 }
 
 const CHART_UPS_SELECTS = ["power-ups", "battery-ups", "energy-ups"];
@@ -598,14 +827,14 @@ function batteryRing(pct, statusCls, caption) {
 
 function heroCard(u) {
   const charge = parseFloat(u.batteryCharge);
-  const sCls = statusClass(u.status);
+  const info = statusInfo(u);
+  const sCls = info.severity;
   const pq = u.powerQuality || {};
-  const statusTokens = nutStatusTokens(u.status);
-  const onBattery = statusTokens.has("OB");
-  const low = statusTokens.has("LB") || statusTokens.has("FSD");
-  // Ring turns amber the moment we're on battery (red once low/FSD), and the
-  // caption says ON BATTERY — so an outage doesn't read as a calm green ring.
-  const ringCls = low ? "crit" : (onBattery ? "warn" : (batteryClass(charge) || sCls));
+  const onBattery = isOnBattery(u);
+  // Ring turns amber the moment we're on battery (red once low / triggered /
+  // shutting down), and the caption says ON BATTERY — so an outage doesn't read
+  // as a calm green ring.
+  const ringCls = sCls === "ok" ? (batteryClass(charge) || "ok") : sCls;
   const wrap = el("div", { class: "hero card-click s-" + sCls
     + (onBattery ? " hero-alarm" : ""), tabindex: "0",
     role: "button", title: "View details" });
@@ -614,27 +843,38 @@ function heroCard(u) {
     el("div", { class: "v-label", text: label }),
     el("div", { class: "v-value" + (cls ? " " + cls : ""), text: value }),
   ]);
+  // Plain "on battery": one badge carrying the time ("On battery · 7m 0s")
+  // instead of two badges saying the same thing (L7).
+  const merged = onBattery && info.state === "on_battery";
+  const badge = statusBadge(info);
+  if (merged) badge.textContent = info.label + " · " + timeOnBatteryText(u);
   const title = el("div", { class: "hero-title" }, [
-    icon("battery"), el("h3", { text: u.label || u.name }),
-    el("span", { class: "badge " + sCls, text: humanNutStatus(u.status) }),
+    icon("battery"), el("h3", { text: u.label || u.name }), badge,
   ]);
   // Promote time-on-battery to a prominent alarm chip during an outage — it's
   // the number the operator needs first, and it was the last, easily-missed vital.
-  if (onBattery) {
-    title.appendChild(el("span", { class: "badge " + (low ? "crit" : "warn") + " hero-ob",
-      text: "ON BATTERY · " + (u.timeOnBattery != null ? u.timeOnBattery + "s" : "—") }));
+  if (onBattery && !merged) {
+    title.appendChild(el("span", { class: "badge " + sCls + " hero-ob",
+      text: "On battery · " + timeOnBatteryText(u) }));
   }
+  const rb = roleBadge(u);
+  if (rb) title.appendChild(rb);
+  // The full NUT wording (all flags) + how fresh the reading is (H4).
+  const age = dataAgeSeconds(u);
+  const stale = dataIsStale(u);
+  const sub = el("p", { class: "hero-detail" }, [
+    el("span", { text: info.detail }),
+    age != null ? el("span", { class: "fresh" + (stale ? " stale" : ""),
+      text: (stale ? "STALE · " : "") + "updated " + formatAge(age) }) : null,
+  ].filter(Boolean));
   const vitals = [
-    vital("Runtime", formatRuntimeSeconds(u.runtime)),
-    vital("Load", u.load != null ? u.load + "%" : "—"),
-    vital("Input", pq.inputVoltage != null ? pq.inputVoltage + " V" : "—"),
+    vital("Runtime", runtimeText(u)),
+    vital("Load", u.load != null && u.load !== "" ? u.load + "%" : "—"),
+    vital("Input", fmtUnit(pq.inputVoltage, "V") || "—"),
   ];
   // Time-on-battery only when actually on battery — a permanent "0s" is noise,
-  // and during an outage it's already the prominent ON BATTERY chip in the title.
-  if (onBattery) {
-    vitals.push(vital("On battery",
-      u.timeOnBattery != null ? u.timeOnBattery + "s" : "—", low ? "crit" : "warn"));
-  }
+  // and during an outage it's already the prominent chip in the title.
+  if (onBattery) vitals.push(vital("On battery", timeOnBatteryText(u), sCls));
   // Surface line quality on the Overview only when it's NOT good — otherwise it's
   // buried on the Power tab where the operator rarely looks. (operator #14)
   const lq = lineQuality(pq);
@@ -642,14 +882,47 @@ function heroCard(u) {
     vitals.push(vital("Line quality", lq.label, lq.cls));
   }
   wrap.appendChild(el("div", { class: "hero-main" }, [
-    title, el("div", { class: "hero-vitals" }, vitals),
-  ]));
+    title, sub, el("div", { class: "hero-vitals" }, vitals), heroOutlook(u),
+  ].filter(Boolean)));
   const open = () => openDetail(u.name);
   wrap.addEventListener("click", open);
   wrap.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
   });
   return wrap;
+}
+
+// "What happens next" block on the single-UPS hero (H3): the closest trigger,
+// what firing it does, and every other armed trigger with its live value and
+// ETA. Shown only while something is armed (on battery, or a trigger fired).
+function heroOutlook(u) {
+  const list = upcomingTriggers(u);
+  const role = upsRole(u);
+  if (!list.length || !role) return null;
+  const member = role.kind === "redundancy-member";
+  const acts = role.hasShutdownActions || member;
+  const first = list[0];
+  // A member's fired trigger is a vote, not the verdict: amber (F-184).
+  const sev = first.state === "fired" && !member ? "crit" : "warn";
+  const box = el("div", { class: "hero-outlook s-" + (acts ? sev : "muted") });
+  if (!acts) {
+    box.appendChild(el("p", { class: "ho-head", text: "Nothing is shut down here" }));
+    box.appendChild(el("p", { class: "ho-action",
+      text: (u.label || u.name) + " is monitored only; Eneru just records and notifies." }));
+    return box;
+  }
+  box.appendChild(el("p", { class: "ho-head", text: outlookLine(u).split(" · ")[0] }));
+  box.appendChild(el("p", { class: "ho-action", text: "→ " + actionLabel(u) }));
+  const ul = el("ul", { class: "ho-list", "aria-label": "Shutdown triggers" });
+  list.forEach((t) => {
+    ul.appendChild(el("li", { class: "ho-" + t.state }, [
+      el("span", { class: "ho-label", text: t.label }),
+      el("span", { class: "ho-text", text: t.text || t.condition }),
+      el("span", { class: "ho-eta", text: triggerEta(t) || "—" }),
+    ]));
+  });
+  box.appendChild(ul);
+  return box;
 }
 
 function fleetSnapshot(rows) {
@@ -659,23 +932,25 @@ function fleetSnapshot(rows) {
   const healthy = rows.filter((u) => fleetUpsClass(u) === "ok").length;
   const onBattery = rows.filter(
     (u) => nutStatusTokens(u.status).has("OB")).length;
+  const states = rows.map((u) => statusInfo(u).state);
   return {
     total: rows.length,
     healthy,
     attention: rows.length - healthy,
     onBattery,
+    shuttingDown: states.filter((s) => s === "shutting_down").length,
+    triggered: states.filter((s) => s === "trigger_active").length,
   };
 }
 
 function fleetUpsClass(u) {
-  // Preserve the worst known electrical state even when the source is now
-  // disconnected. A stale OB/LB/FSD reading is still more urgent than the
-  // connection warning layered on top of it.
-  const cls = statusClass(u.status);
+  // The shared severity (M1); a connection hiccup (e.g. GRACE_PERIOD) on an
+  // otherwise-fine UPS still reads amber.
+  const cls = statusInfo(u).severity;
   if (cls !== "ok") return cls;
   const state = (u.connectionState || "").toUpperCase();
   if (state && state !== "OK" && state !== "CONNECTED") return "warn";
-  return upsHealthy(u) ? "ok" : "warn";
+  return "ok";
 }
 
 function fleetOverallClass(rows) {
@@ -691,15 +966,20 @@ function fleetOverallClass(rows) {
 function fleetOverview(rows) {
   const state = fleetSnapshot(rows);
   const overall = fleetOverallClass(rows);
-  const headline = state.onBattery
-    ? state.onBattery + " UPS on battery"
-    : state.attention
-      ? state.attention + " UPS " + (state.attention === 1 ? "needs" : "need") + " attention"
-      : "Fleet healthy";
+  // Headline names the most urgent fleet state (M2): shutting down beats a
+  // fired trigger beats on-battery beats "needs attention".
+  const headline = state.shuttingDown ? "Shutting down"
+    : state.triggered ? "Shutdown triggered"
+      : state.onBattery
+        ? state.onBattery + " UPS on battery"
+        : state.attention
+          ? state.attention + " UPS " + (state.attention === 1 ? "needs" : "need") + " attention"
+          : "Fleet healthy";
   const counts = state.healthy + " healthy · " + state.total + " monitored";
 
   const wrap = el("section", { class: "fleet-overview s-" + overall,
     "aria-labelledby": "fleet-overview-title" });
+  // No status badge in the head: the headline + counts already say it (L7).
   wrap.appendChild(el("div", { class: "fleet-overview-head" }, [
     el("div", { class: "fleet-overview-heading" }, [
       el("span", { class: "card-ico s-" + overall }, [icon("battery")]),
@@ -708,10 +988,6 @@ function fleetOverview(rows) {
         el("p", { text: counts }),
       ]),
     ]),
-    state.onBattery
-      ? el("span", { class: "badge crit", text: state.onBattery + " on battery" })
-      : el("span", { class: "badge " + overall,
-        text: state.attention ? state.attention + " attention" : "All online" }),
   ]));
 
   const list = el("div", { class: "fleet-overview-list" });
@@ -722,24 +998,35 @@ function fleetOverview(rows) {
   ]));
   rows.forEach((u) => {
     const cls = fleetUpsClass(u);
+    const info = statusInfo(u);
     const pq = u.powerQuality || {};
     const label = u.label || u.name;
     const values = {
       charge: formatFleetMetric(u.batteryCharge, "%"),
-      runtime: formatRuntimeSeconds(u.runtime),
+      runtime: runtimeText(u),
       load: formatFleetMetric(u.load, "%"),
       input: formatFleetMetric(pq.inputVoltage, " V"),
     };
-    const aria = label + ": " + humanNutStatus(u.status) + ", "
+    // Second line, only when there is something to say: time on battery and
+    // the next trigger (H3), or how old the reading is when stale (H4).
+    const subParts = [];
+    if (isOnBattery(u)) subParts.push("On battery " + timeOnBatteryText(u));
+    const next = outlookLine(u);
+    if (next) subParts.push(next);
+    if (dataIsStale(u)) subParts.push("STALE · updated " + formatAge(dataAgeSeconds(u)));
+    const role = upsRole(u);
+    const aria = label + ": " + info.label + " (" + info.detail + "), "
       + values.charge + " charge, " + values.runtime + " runtime, "
-      + values.load + " load, " + values.input + " input — view details";
+      + values.load + " load, " + values.input + " input"
+      + (role ? ", " + role.label.toLowerCase() : "")
+      + (subParts.length ? ". " + subParts.join(". ") : "") + " — view details";
     const row = el("button", { class: "fleet-overview-row s-" + cls,
       type: "button", "aria-label": aria, title: "View " + label + " details" }, [
       el("span", { class: "fleet-overview-name" }, [
         el("strong", { text: label }),
-        u.isLocal === false ? monitoringBadge(u) : null,
+        roleBadge(u),
       ].filter(Boolean)),
-      el("span", { class: "badge " + cls, text: humanNutStatus(u.status) }),
+      statusBadge(info, "fleet-overview-status"),
       el("span", { class: "fleet-overview-value", "data-label": "Charge",
         text: values.charge }),
       el("span", { class: "fleet-overview-value", "data-label": "Runtime",
@@ -748,7 +1035,9 @@ function fleetOverview(rows) {
         text: values.load }),
       el("span", { class: "fleet-overview-value", "data-label": "Input",
         text: values.input }),
-    ]);
+      subParts.length ? el("span", { class: "fleet-overview-sub s-" + cls,
+        "aria-hidden": "true", text: subParts.join(" · ") }) : null,
+    ].filter(Boolean));
     row.addEventListener("click", () => openDetail(u.name));
     list.appendChild(row);
   });
@@ -851,18 +1140,31 @@ function renderOverviewSummary(rows) {
     const st = worstSt.selfTest;
     const stStatus = { passed: "ok", failed: "crit", running: "warn" }[st.result] || null;
     summary.appendChild(kpiCard({
-      iconName: "check", label: multi ? "Self-test · worst" : "Last self-test",
+      iconName: "check", label: multi ? "Self-test (worst of fleet)" : "Last self-test",
       value: titleCase(st.result),
-      cap: multi ? named(worstSt) + (st.date ? " · " + st.date : "") : (st.date || ""),
+      cap: multi ? named(worstSt) + (selfTestDate(st) ? " · " + selfTestDate(st) : "")
+        : selfTestDate(st),
       valueStatus: stStatus, tab: "battery" }));
   }
 }
 
-// A neutral "monitoring only" tag for a non-local (remote-monitored) UPS, so it
-// reads differently from the UPS that actually protects this host. (operator #4)
+// When a self-test ran: the device date, else the day Eneru saw it start (L7:
+// a passively observed test has startedTs but no date).
+function selfTestDate(st) {
+  if (!st) return "";
+  if (st.date) return st.date;
+  if (!st.startedTs) return "";
+  const d = new Date(st.startedTs * 1000);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0")
+    + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// The role tag ("Powers this host" / "Remote shutdowns only" / "Monitoring
+// only" / "Redundancy member (…)") for titles. v6.2 (M4): driven by the
+// daemon's role (the real shutdown plan), not by isLocal alone, so a non-local
+// UPS that still shuts down remote servers is no longer called "monitoring only".
 function monitoringBadge(u) {
-  return u && u.isLocal === false
-    ? el("span", { class: "badge muted mon-badge", text: "monitoring only" }) : null;
+  return u ? roleBadge(u) : null;
 }
 
 // Persistent fleet-status strip (above the tabs, every tab). A healthy fleet is
@@ -876,10 +1178,11 @@ function renderFleetStrip(rows) {
   strip.hidden = false;
   const state = fleetSnapshot(rows);
   const overall = fleetOverallClass(rows);
-  const summaryText = state.attention
-    ? state.healthy + " healthy · " + state.attention + " "
-      + (state.attention === 1 ? "needs" : "need") + " attention"
-    : state.total + " UPS healthy";
+  const summaryText = state.shuttingDown ? "Shutting down"
+    : state.attention
+      ? state.healthy + " healthy · " + state.attention + " "
+        + (state.attention === 1 ? "needs" : "need") + " attention"
+      : state.total + " UPS healthy";
   const summary = el("button", { class: "fleet-chip fleet-summary-chip s-" + overall,
     type: "button", title: "Open fleet overview",
     "aria-label": summaryText + " — open fleet overview" }, [
@@ -897,19 +1200,26 @@ function renderFleetStrip(rows) {
 
   rows.filter((u) => fleetUpsClass(u) !== "ok").forEach((u) => {
     const cls = fleetUpsClass(u);
+    const info = statusInfo(u);
+    const role = upsRole(u);
     const charge = parseFloat(u.batteryCharge);
-    // Full accessible name — the status/charge/runtime/monitoring live in
-    // separate spans that a screen reader would run together ambiguously.
-    const aria = (u.label || u.name) + ": " + humanNutStatus(u.status) + ", "
+    const ob = isOnBattery(u);
+    const tag = role && role.kind === "monitor-only" ? "monitoring"
+      : role && role.kind === "remote-only" ? "remote only" : null;
+    // Full accessible name — the status/charge/runtime/role live in separate
+    // spans that a screen reader would run together ambiguously.
+    const aria = (u.label || u.name) + ": " + info.label + " (" + info.detail + "), "
       + (isNaN(charge) ? "charge unknown" : charge + "% charge") + ", "
-      + formatRuntimeSeconds(u.runtime) + " runtime"
-      + (u.isLocal === false ? ", monitoring only" : "") + " — view details";
+      + runtimeText(u) + " runtime"
+      + (ob ? ", on battery for " + timeOnBatteryText(u) : "")
+      + (role ? ", " + role.label.toLowerCase() : "") + " — view details";
     const chip = el("button", { class: "fleet-chip s-" + cls, type: "button",
       title: "View " + (u.label || u.name) + " details", "aria-label": aria }, [
       el("span", { class: "fleet-name", text: u.label || u.name }),
-      el("span", { class: "badge " + cls, text: humanNutStatus(u.status) }),
-      el("span", { class: "fleet-metric", text: isNaN(charge) ? "—" : charge + "%" }),
-      u.isLocal === false ? el("span", { class: "fleet-tag", text: "monitoring" }) : null,
+      statusBadge(info),
+      el("span", { class: "fleet-metric", text: (isNaN(charge) ? "—" : charge + "%")
+        + (ob ? " · " + timeOnBatteryText(u) : "") }),
+      tag ? el("span", { class: "fleet-tag", text: tag }) : null,
       el("span", { class: "fleet-go", "aria-hidden": "true", text: "›" }),
     ].filter(Boolean));
     chip.addEventListener("click", () => openDetail(u.name));
@@ -958,15 +1268,43 @@ function renderRedundancy() {
     const sources = g.upsSources || [];
     const healthy = groupHealthyCount(g, rows);
     const min = g.minHealthy;
-    const quorumLost = groupQuorumLost(g, rows);
-    const cls = quorumLost ? "crit" : (healthy === min ? "warn" : "ok");
+    const out = groupOutlook(g, rows);
+    const cls = out.severity;
     const cardRows = [
-      el("h3", { text: g.name }),
-      el("div", { class: "row" }, [el("span", { text: "Healthy" }),
-        el("span", { class: "badge " + cls, text: healthy + " / " + min + " required" })]),
-      el("div", { class: "row" }, [el("span", { text: "Sources" }),
-        el("b", { text: String(sources.length) })]),
+      el("div", { class: "card-head" }, [
+        el("span", { class: "card-ico s-" + cls }, [icon("shield")]),
+        el("h3", { text: g.name }),
+        el("span", { class: "badge " + cls + (out.state === "shutting-down" ? " pulse" : ""),
+          text: healthy + " of " + sources.length + " healthy · need " + min }),
+      ]),
+      // M9: the consequence, in words — "1 more failure → group shutdown".
+      el("p", { class: "group-outlook s-" + cls, text: out.label }),
     ];
+    if (out.action) {
+      cardRows.push(el("p", { class: "group-action", text: "When it fires: " + out.action }));
+    }
+    // Every member with its own state chip, failing ones first.
+    const failing = new Set(groupFailingMembers(g, rows));
+    const members = el("ul", { class: "group-members", "aria-label": "Members of " + g.name });
+    sources.slice().sort((a, b) => (failing.has(b) ? 1 : 0) - (failing.has(a) ? 1 : 0))
+      .forEach((name) => {
+        const u = rows.find((r) => r.name === name);
+        const info = (g.members && g.members[name]) || {};
+        const bad = failing.has(name);
+        const reason = info.healthReason
+          || (u ? statusInfo(u).label : "no data");
+        const next = info.nextTrigger;
+        members.appendChild(el("li", { class: bad ? "failing" : "healthy" }, [
+          el("span", { class: "gm-name", text: (u && (u.label || u.name)) || name }),
+          el("span", { class: "badge " + (bad ? cls === "ok" ? "warn" : cls : "ok"),
+            text: bad ? reason : "healthy" }),
+          next && next.state !== "idle" && next.state !== "disabled"
+            ? el("span", { class: "gm-next",
+              text: next.label + ": " + (next.text || next.condition)
+                + (triggerEta(next) ? " · " + triggerEta(next) : "") }) : null,
+        ].filter(Boolean)));
+      });
+    cardRows.push(members);
     const telemetry = g.telemetry || {};
     const load = telemetry.redundancyLoad || {};
     if (load.percent != null) {
@@ -976,7 +1314,38 @@ function renderRedundancy() {
     } else if (load.unavailableReason) {
       cardRows.push(hintedRow("Failover load", "—", load.unavailableReason));
     }
-    gwrap.appendChild(el("div", { class: "card" }, cardRows));
+    gwrap.appendChild(el("div", { class: "card group-card s-" + cls }, cardRows));
+  });
+}
+
+// The group's "what happens next" (M9): the daemon's outlook when sent, else
+// the same rule computed from healthy vs required.
+function groupOutlook(g, rows) {
+  if (g.outlook && g.outlook.label) {
+    return { state: g.outlook.state, label: g.outlook.label,
+      severity: SEVERITY_RANK[g.outlook.severity] !== undefined ? g.outlook.severity : "warn",
+      action: g.outlook.action || "" };
+  }
+  const healthy = groupHealthyCount(g, rows);
+  const tolerated = healthy - (g.minHealthy || 0);
+  const failing = groupFailingMembers(g, rows).length;
+  if (groupQuorumLost(g, rows)) {
+    return { state: "quorum-lost", severity: "crit",
+      label: "Quorum lost → group shutdown runs", action: "" };
+  }
+  if (tolerated === 0) {
+    return { state: "at-risk", severity: "warn",
+      label: "1 more failure → group shutdown", action: "" };
+  }
+  return { state: "healthy", severity: failing ? "warn" : "ok", action: "",
+    label: "Can lose " + tolerated + " more member" + (tolerated === 1 ? "" : "s") };
+}
+
+function groupFailingMembers(g, rows) {
+  if (Array.isArray(g.failingMembers)) return g.failingMembers;
+  return (g.upsSources || []).filter((name) => {
+    const u = rows.find((r) => r.name === name);
+    return !u || !upsHealthy(u);
   });
 }
 
@@ -1006,6 +1375,24 @@ function remoteHealthReachable(row) {
     row.healthy === true || row.reachable === true ||
     status === "HEALTHY" || status === "OK"
   );
+}
+
+// L4: a "reachable" verdict is only as good as its age. Past the configured
+// remote_health.interval (plus a minute of slack) it's overdue; during an
+// outage, anything older than 5 minutes no longer describes "now".
+const SLOW_SSH_MS = 2000;   // remote_health.py SLOW_REMOTE_SSH_LOG_THRESHOLD_MS
+function remoteCheckAge(row) {
+  if (!row || !row.last_checked_at) return null;
+  return Math.max(0, Date.now() / 1000 - row.last_checked_at);
+}
+function remoteCheckIsOld(row) {
+  const age = remoteCheckAge(row);
+  if (age == null) return false;
+  const rh = (typeof cfgSnapshot !== "undefined" && cfgSnapshot && cfgSnapshot.remoteHealth) || {};
+  const interval = Number(rh.interval) || 3600;
+  if (age > interval + 60) return true;
+  const outage = ((typeof lastUpsRows !== "undefined" && lastUpsRows) || []).some(isOnBattery);
+  return outage && age > 300;
 }
 
 function remoteStatusClass(row) {
@@ -1041,24 +1428,35 @@ function renderRemoteHealth() {
     const cls = remoteStatusClass(r);
     const reachable = remoteHealthReachable(r);
     const name = r.server || r.host || "server";
+    // An old "reachable" is neutral, not green: it says what WAS true. The
+    // strip, the icon and the badge all use the same neutral class.
+    const old = cls === "ok" && remoteCheckIsOld(r);
     // Health is carried by the colored status strip + icon + the Status row; the
     // badge stays out of the head so a long server name isn't clipped.
     const rows = [el("div", { class: "card-head" }, [
-      el("span", { class: "card-ico s-" + cls }, [icon("shield")]),
+      el("span", { class: "card-ico s-" + (old ? "muted" : cls) }, [icon("shield")]),
       el("h3", { text: name }),
     ])];
     // Label matches the color: ok→reachable, warn→degraded, crit→unreachable
     // (a DEGRADED server is amber, not a contradictory "unreachable").
-    const statusText = cls === "ok" ? "reachable"
+    const statusText = cls === "ok" ? (old ? "reachable " + relTime(r.last_checked_at) : "reachable")
       : cls === "warn" ? "degraded" : "unreachable";
     rows.push(el("div", { class: "row" }, [el("span", { text: "Status" }),
-      el("span", { class: "badge " + cls, text: statusText })]));
+      el("span", { class: "badge " + (old ? "muted" : cls), text: statusText })]));
     if (r.host && r.host !== name) rows.push(configKv("Host", r.host));
     if (r.latency_ms != null && reachable) {
-      rows.push(configKv("Latency", Math.round(r.latency_ms) + " ms"));
+      const slow = r.latency_ms >= SLOW_SSH_MS;
+      rows.push(slow
+        ? el("div", { class: "row" }, [
+          el("span", { class: "label-tip" }, [el("span", { text: "Latency" }),
+            helpHint("Slower than the " + (SLOW_SSH_MS / 1000) + " s slow-SSH threshold; "
+              + "a shutdown to this server may take longer than planned.")]),
+          el("b", { class: "warn", text: Math.round(r.latency_ms) + " ms" })])
+        : configKv("Latency", Math.round(r.latency_ms) + " ms"));
     }
     rows.push(hintedRow("Last checked", relTime(r.last_checked_at),
-      r.last_checked_at ? new Date(r.last_checked_at * 1000).toLocaleString() : null));
+      r.last_checked_at ? new Date(r.last_checked_at * 1000).toLocaleString()
+        + (old ? " — an old result, not a live check" : "") : null));
     if (r.consecutive_failures) {
       rows.push(el("div", { class: "row" }, [el("span", { text: "Failures" }),
         el("b", { class: "crit", text: String(r.consecutive_failures) })]));
@@ -1067,7 +1465,7 @@ function renderRemoteHealth() {
       rows.push(el("div", { class: "row" },
         [el("span", { class: "energy-note", text: r.last_error })]));
     }
-    return el("div", { class: "card s-" + cls }, rows);
+    return el("div", { class: "card s-" + (old ? "muted" : cls) }, rows);
   }));
 }
 
@@ -1128,6 +1526,44 @@ const BH_TERM_HELP = {
     + "UPS's own battery_install_date + expected_life_years (they're per-UPS).",
 };
 
+// "Replace in" as a sane, bounded estimate (H6). The daemon's
+// batteryHealth.replacement (6.2) is used as-is; otherwise the old raw
+// replacementDaysRemaining is capped at the age-based remaining life and
+// formatted like eneru.health.prediction.format_replacement_eta — never
+// "~204288 days".
+const MAX_REPLACEMENT_DAYS = 3652.5;
+function formatReplacementEta(days) {
+  const d = Number(days);
+  if (days === null || days === undefined || !Number.isFinite(d)) return "unknown";
+  if (d <= 0) return "now";
+  if (d < 1) return "<1 day";
+  if (d < 60) return "~" + Math.round(d) + " days";
+  if (d < 730) return "~" + Math.round(d / 30.4375) + " mo";
+  if (d >= MAX_REPLACEMENT_DAYS) return "> 10 yr";
+  return "~" + Math.round(d / 365.25) + " yr";
+}
+function replacementEstimate(bh) {
+  if (!bh) return null;
+  const r = bh.replacement;
+  if (r && typeof r.text === "string") {
+    if (r.days == null && r.text === "unknown") return null;
+    return { days: r.days, text: r.text, source: r.source, capped: !!r.capped };
+  }
+  let days = numOrNull(bh.replacementDaysRemaining);
+  let source = days == null ? null : "trend";
+  let capped = false;
+  if (bh.ageYears != null && bh.expectedLifeYears) {
+    const ageDays = Math.max(0, bh.expectedLifeYears - bh.ageYears) * 365.25;
+    if (days == null || days > ageDays) {
+      capped = days != null;
+      days = ageDays; source = "age";
+    }
+  }
+  if (days == null) return null;
+  days = Math.min(days, MAX_REPLACEMENT_DAYS);
+  return { days, text: formatReplacementEta(days), source, capped };
+}
+
 // Build the v6.1 battery-health rows shared by the detail modal and the Battery
 // tab. "unknown" is shown honestly rather than a fake high score, and the
 // per-term breakdown explains WHY the score is what it is. ``includeScore`` is
@@ -1146,8 +1582,17 @@ function batteryHealthRows(bh, opts) {
       "How much of the scoring weight had data behind it. Lower means the score "
       + "rests on fewer terms."));
   }
-  if (bh.replacementDaysRemaining != null) {
-    rows.push(detailRow("Replace in", "~" + Math.round(bh.replacementDaysRemaining) + " days"));
+  const repl = replacementEstimate(bh);
+  if (repl) {
+    const tip = repl.source === "age"
+      ? "Estimated from the battery's age and its expected service life"
+        + (repl.capped ? " (the score trend alone pointed further out)." : ".")
+      : "Projected from the health-score trend toward the replacement threshold.";
+    rows.push(el("div", { class: "row" }, [
+      el("span", { class: "label-tip" }, [el("span", { text: "Replace in" }), helpHint(tip)]),
+      el("b", { class: repl.days != null && repl.days <= 90 ? "crit"
+        : repl.days != null && repl.days <= 365 ? "warn" : "", text: repl.text }),
+    ]));
   }
   // Per-term breakdown: each sub-score (0-100) or n/a when that term has no data.
   // NOTE: self_test is deliberately NOT a meter here — it's shown once as its
@@ -1263,15 +1708,42 @@ function renderDetail(name) {
   const pq = u.powerQuality || {};
   const sections = [];
 
-  sections.push(detailSection("Live status", [
-    el("div", { class: "row" }, [el("span", { text: "Status" }),
-      el("span", { class: "badge " + statusClass(u.status), text: humanNutStatus(u.status) })]),
-    detailRow("Battery", u.batteryCharge != null ? u.batteryCharge + "%" : null),
-    detailRow("Runtime", formatRuntimeSeconds(u.runtime)),
-    detailRow("Load", u.load != null ? u.load + "%" : null),
+  const info = statusInfo(u);
+  const live = [
+    el("div", { class: "row" }, [el("span", { text: "Status" }), statusBadge(info)]),
+    detailRow("NUT flags", info.detail),
+    detailRow("Battery", u.batteryCharge != null && u.batteryCharge !== ""
+      ? u.batteryCharge + "%" : null),
+    detailRow("Runtime", runtimeText(u)),
+    detailRow("Load", u.load != null && u.load !== "" ? u.load + "%" : null),
     detailRow("Connection", u.connectionState),
-    detailRow("Time on battery", u.timeOnBattery != null ? u.timeOnBattery + "s" : null),
-  ]));
+  ];
+  // M3: only while on battery, and in words ("7m 0s"), never "0s"/"1205s".
+  if (isOnBattery(u)) live.push(detailRow("Time on battery", timeOnBatteryText(u)));
+  const age = dataAgeSeconds(u);
+  if (age != null) {
+    live.push(detailRow("Last reading", (dataIsStale(u) ? "STALE · " : "") + formatAge(age)));
+  }
+  sections.push(detailSection("Live status", live));
+
+  // H3: what happens next — every enabled trigger with its live value, how
+  // close it is, and what firing does for this UPS.
+  const outlook = u.triggerOutlook;
+  if (outlook && Array.isArray(outlook.triggers)) {
+    const tRows = [detailRow("When it fires", actionLabel(u))];
+    if (outlook.summary) tRows.push(detailRow("Now", outlook.summary));
+    outlook.triggers.filter((t) => t && t.enabled !== false).forEach((t) => {
+      const eta = triggerEta(t);
+      const cls = t.state === "fired" ? "crit"
+        : (t.state === "held" || t.state === "arming") ? "warn" : "";
+      tRows.push(el("div", { class: "row" }, [
+        el("span", { text: t.label }),
+        el("b", { class: cls, text: (t.state === "idle" ? t.condition : (t.text || t.condition))
+          + (eta ? " · " + eta : "") }),
+      ]));
+    });
+    sections.push(detailSection("Shutdown triggers", tRows));
+  }
 
   sections.push(detailSection("Power quality", [
     hintedRow("Input voltage", fmtUnit(pq.inputVoltage, "V"),
@@ -1312,15 +1784,16 @@ function renderDetail(name) {
   if (st) {
     sections.push(detailSection("Self-test", [
       detailRow("Result", st.result ? titleCase(st.result) : "unknown"),
-      detailRow("When", st.date || null),
+      detailRow("When", selfTestDate(st) || null),
     ]));
   }
 
   // Configuration (from the shared /api/v1/config snapshot).
   const cfgUps = ((cfgSnapshot && cfgSnapshot.ups) || []).find((c) => c.name === name);
   if (cfgUps) {
+    const role = upsRole(u);
     const rows = [
-      detailRow("Triggers local shutdown", cfgUps.isLocal ? "yes" : "no — monitoring only"),
+      detailRow("Role", role ? role.label : null),
       detailRow("Remote servers", (cfgUps.remoteServers || []).length),
     ];
     (cfgUps.remoteServers || []).forEach((s, i) =>
@@ -1336,7 +1809,8 @@ function renderDetail(name) {
   if (member.length) {
     sections.push(detailSection("Redundancy groups",
       member.map((g) => detailRow(g.name,
-        (g.upsSources || []).length + " sources, " + g.minHealthy + " required"))));
+        groupHealthyCount(g, lastUpsRows) + " of " + (g.upsSources || []).length
+          + " healthy, need " + g.minHealthy + " · " + groupOutlook(g, lastUpsRows).label))));
   }
 
   // Remote health rows for this source.
@@ -1346,10 +1820,12 @@ function renderDetail(name) {
     sections.push(detailSection("Remote health", rh.map((r) => {
       const host = r.server || r.host || "host";
       const healthy = remoteHealthReachable(r);
+      const old = healthy && remoteCheckIsOld(r);
       return el("div", { class: "row" }, [
         el("span", { text: host }),
-        el("span", { class: "badge " + (healthy ? "ok" : "crit"),
-          text: healthy ? "reachable" : "unreachable" }),
+        el("span", { class: "badge " + (old ? "muted" : healthy ? "ok" : "crit"),
+          text: healthy ? (old ? "reachable " + relTime(r.last_checked_at) : "reachable")
+            : "unreachable" }),
       ]);
     })));
   }
@@ -1357,38 +1833,154 @@ function renderDetail(name) {
   body.replaceChildren(...sections);
 }
 
-// Banner driven by LIVE status (not stale events): low-battery / shutdown-pending
-// is critical; on-battery is a warning; otherwise hidden.
+// Banner driven by LIVE status (not stale events). v6.2 (H1/M2/M10): the
+// wording comes from what is actually happening AND what this UPS's role means.
+// ELI5: a smoke alarm that knows which room it is in. Smoke in the shed you
+// only watch (a monitoring-only UPS) gets a calm note; smoke in the kitchen
+// that powers this host gets the siren.
+// Pure: returns {severity, text, short, progress, more} or null.
+function bannerModel(rows, groups) {
+  const cands = [];
+  const add = (prio, severity, text, short, progress) =>
+    cands.push({ prio, severity, text, short, progress: !!progress });
+  (groups || []).forEach((g) => {
+    const out = groupOutlook(g, rows || []);
+    const name = "redundancy group " + g.name;
+    const act = out.action ? " (" + out.action + ")" : "";
+    if (out.state === "shutting-down") {
+      add(100, "crit", "Shutdown in progress — " + name + act, "Shutting down · " + g.name, true);
+    } else if (out.state === "quorum-lost") {
+      add(90, "crit", "Quorum lost — " + name + ": group shutdown runs" + act,
+        "Quorum lost · " + g.name);
+    } else if (out.state === "at-risk" && groupFailingMembers(g, rows || []).length) {
+      add(40, "warn", "Redundancy at risk — " + name + ": " + out.label,
+        "At risk · " + g.name);
+    }
+  });
+  (rows || []).forEach((u) => {
+    const info = statusInfo(u);
+    const role = upsRole(u) || {};
+    const name = u.label || u.name;
+    // The group decides (F-184): a redundancy member never gets the "this
+    // UPS shuts things down" wording, even when its own entry has local
+    // resources (hasShutdownActions) — like a single vote, not the verdict.
+    const member = role.kind === "redundancy-member";
+    const acts = !!role.hasShutdownActions && !member;
+    const watched = !acts && !member;
+    const tag = watched ? name + " (monitoring only)" : name;
+    const charge = numOrNull(u.batteryCharge);
+    const pct = charge == null ? "" : " " + Math.round(charge) + "%";
+    const next = outlookLine(u);
+    const fired = upcomingTriggers(u).find((t) => t.state === "fired");
+    const why = fired ? fired.label.toLowerCase() + " (" + (fired.text || fired.condition) + ")"
+      : (u.triggerReason || "");
+    const noAction = " — no action will be taken here.";
+    switch (info.state) {
+      case "shutting_down":
+        if (acts) add(100, "crit", "Shutdown in progress — " + name, "Shutting down · " + name, true);
+        else if (member) {
+          add(45, "warn", name + " signals a forced shutdown (FSD) — redundancy group "
+            + (role.redundancyGroups || []).join(", ") + " decides", "FSD · " + name);
+        } else add(30, "warn", tag + " signals a forced shutdown (FSD)" + noAction, "FSD · " + name);
+        break;
+      case "trigger_active":
+        if (acts) {
+          add(80, "crit", "Shutdown triggered — " + name + (why ? ": " + why : "")
+            + " → " + actionLabel(u), "Shutdown triggered · " + name, true);
+        } else if (member) {
+          add(45, "warn", name + " is critical for redundancy group "
+            + (role.redundancyGroups || []).join(", ") + (why ? ": " + why : "")
+            + " — the group decides", "Critical · " + name);
+        } else add(30, "warn", tag + " reached a shutdown condition" + noAction, "Critical · " + name);
+        break;
+      case "low_battery":
+      case "output_off":
+        if (acts || member) {
+          add(70, acts ? "crit" : "warn", info.label + " — " + name
+            + (next ? ". " + next.split(" · ")[0] : ""),
+            info.label + " · " + name + pct);
+        } else add(30, "warn", tag + (info.state === "low_battery" ? " is on low battery"
+          : " has its output off") + noAction,
+          info.label + " · " + name + pct);
+        break;
+      case "connection_lost":
+        add(info.severity === "crit" ? 75 : 15, info.severity,
+          "Connection lost — " + tag + (info.severity === "crit"
+            ? " was on battery" + (acts ? ": failsafe shutdown applies" : "") : ": no fresh readings"),
+          "Connection lost · " + name);
+        break;
+      case "on_battery":
+        if (watched) {
+          add(20, "warn", "On battery — " + tag + " for " + timeOnBatteryText(u)
+            + "; nothing is shut down here.", "On battery · " + name + pct);
+        } else {
+          // The banner names only the closest trigger; the hero/fleet row list the rest.
+          // An arming FAILSAFE (NUT polls failing on battery) outranks a plain
+          // on-battery notice: the countdown is seconds, not minutes.
+          const arming = (upcomingTriggers(u)[0] || {}).state === "arming";
+          add(member ? 35 : arming ? 60 : 50, "warn", "On battery — " + name + " for " + timeOnBatteryText(u)
+            + (next ? ". " + next.split(" · ")[0] : ""), "On battery · " + name + pct);
+        }
+        break;
+      case "stale":
+        add(10, "warn", "Stale data — " + name + ": last reading "
+          + formatAge(dataAgeSeconds(u)), "Stale · " + name);
+        break;
+      default:
+        break;
+    }
+  });
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.prio - a.prio);
+  return Object.assign({}, cands[0], { more: cands.length - 1 });
+}
+
+// Browser tab title (M10): a background tab still shows an outage.
+function pageTitle(model, clientStale) {
+  let t = "Eneru";
+  if (model) t = (model.severity === "crit" ? "⛔ " : "⚠ ") + model.short + " — Eneru";
+  return (clientStale ? "(stale) " : "") + t;
+}
+
+let _bannerAnnounced = "";
 function renderBanner() {
   const banner = document.getElementById("banner");
-  const rows = lastUpsRows;
-  let crit = null, warn = null;
-  for (const u of rows) {
-    const tokens = nutStatusTokens(u.status);
-    if (tokens.has("LB") || tokens.has("FSD") || u.triggerActive) {
-      const groups = lastGroups.filter((g) => (g.upsSources || []).includes(u.name));
-      const causesShutdown = groups.length === 0
-        || groups.some((g) => groupQuorumLost(g, rows));
-      if (causesShutdown) { crit = u; break; }
-      if (!warn) warn = u;
-    }
-    if (tokens.has("OB") && !warn) warn = u;
-  }
-  const setBanner = (cls, iconName, text) => {
-    banner.className = "banner " + cls;
-    banner.replaceChildren(icon(iconName), el("span", { text: text }));
-    banner.hidden = false;
-  };
-  if (crit) {
-    const why = crit.triggerReason ? (": " + crit.triggerReason) : "";
-    setBanner("crit", "alert", "Shutdown imminent — " +
-      (crit.label || crit.name) + " is on low battery" + why);
-  } else if (warn) {
-    setBanner("warn", "battery", "On battery — " + (warn.label || warn.name) +
-      " is running on battery power");
-  } else {
+  const model = bannerModel(lastUpsRows, lastGroups);
+  document.title = pageTitle(model, clientDataStale());
+  if (!model) {
     banner.hidden = true;
+    announceBanner(null);
+    return;
   }
+  banner.className = "banner " + model.severity;
+  const kids = [icon(model.severity === "crit" ? "alert" : "battery"),
+    el("span", { class: "banner-text", text: model.text
+      + (model.more ? " (+" + model.more + " more)" : "") })];
+  // M2: a shutdown in progress links straight to its live progress.
+  if (model.progress && activeTab !== "shutdown") {
+    const go = el("button", { type: "button", class: "banner-link",
+      text: "View shutdown progress →" });
+    go.addEventListener("click", () => selectTab("shutdown", { updateHash: true }));
+    kids.push(go);
+  }
+  banner.replaceChildren(...kids);
+  banner.hidden = false;
+  announceBanner(model);
+}
+
+// Screen-reader announcement, separate from the visual banner so the ETA
+// ticking down every poll isn't re-read: only the stable headline is spoken,
+// assertively (role=alert) for red, politely (role=status) otherwise.
+function announceBanner(model) {
+  const alertEl = document.getElementById("banner-alert");
+  const statusEl = document.getElementById("banner-status");
+  if (!alertEl || !statusEl) return;
+  const key = model ? model.severity + "|" + model.short : "";
+  if (key === _bannerAnnounced) return;
+  _bannerAnnounced = key;
+  alertEl.textContent = model && model.severity === "crit" ? model.short : "";
+  statusEl.textContent = model && model.severity !== "crit" ? model.short
+    : (model ? "" : "All clear");
 }
 
 // Source-qualified identity: the per-DB `id` is only unique within one UPS, so
@@ -1750,6 +2342,9 @@ async function deleteSelected() {
 // (NOT the blue of the plot line, so a marker never blends into the curve).
 function eventMarkerClass(type) {
   const t = (type || "").toUpperCase();
+  // L3: a self-test on battery is an expected, operator-started test, not an
+  // outage — neutral info (its outcome still turns the badge red on failure).
+  if (t === "SELF_TEST_ON_BATTERY") return "ev-info";
   if (t.includes("RESTORED") || t.includes("NORMALIZED")
       || t.includes("RESOLVED") || t.includes("RECOVER")
       || t.includes("INACTIVE")) return "ev-ok";  // bypass/AVR left = good news
@@ -2172,10 +2767,16 @@ function drawTimeTicks(svg, t0, t1, x, W, H, bottomPad, leftPad) {
   for (let ts = Math.ceil(t0 / step) * step; ts <= t1; ts += step) {
     const tx = x(ts);
     if (tx < leftPad - 1 || tx > W - 4) continue;
+    const label = fmt(ts);
+    // L5: a centred label near the right edge was clipped ("11:00 I"). Estimate
+    // its half-width (11px text ≈ 6.2px/char) and right-align it instead.
+    const half = label.length * 3.1;
     const t = document.createElementNS(SVG_NS, "text");
-    t.setAttribute("x", tx.toFixed(1)); t.setAttribute("y", yy);
-    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "lbl xtick");
-    t.textContent = fmt(ts); svg.appendChild(t);
+    const anchor = tx + half > W - 2 ? "end" : "middle";
+    t.setAttribute("x", (anchor === "end" ? Math.min(tx + half, W - 2) : tx).toFixed(1));
+    t.setAttribute("y", yy);
+    t.setAttribute("text-anchor", anchor); t.setAttribute("class", "lbl xtick");
+    t.textContent = label; svg.appendChild(t);
   }
 }
 
@@ -2773,6 +3374,8 @@ function drawEnergyChart(hostId, rows, options) {
   if (!W) return;
   host.replaceChildren();
   const H = 220, pad = 38;
+  // Right padding grows to hold a second (Load %) axis when both lines draw.
+  let padR = 5;
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   const mkline = (x1, y1, x2, y2, cls) => {
@@ -2783,9 +3386,6 @@ function drawEnergyChart(hostId, rows, options) {
     l.setAttribute("vector-effect", "non-scaling-stroke");
     svg.appendChild(l);
   };
-  mkline(pad, H - pad, W - 5, H - pad, "axis");
-  mkline(pad, 5, pad, H - pad, "axis");
-
   // Title names the UPS the single-series chart shows, matching the explicit
   // chart source selector exposed in fleet mode.
   if (options.upsLabel) {
@@ -2810,7 +3410,7 @@ function drawEnergyChart(hostId, rows, options) {
   const t0 = (options.from != null) ? options.from : pts[0].ts;
   const t1 = (options.to != null) ? options.to : pts[pts.length - 1].ts;
   const tspan = (t1 - t0) || 1;
-  const x = (t) => pad + ((t - t0) / tspan) * (W - pad - 5);
+  const x = (t) => pad + ((t - t0) / tspan) * (W - pad - padR);
 
   function scale(vals, floorZero) {
     if (vals.length < 2) return null;
@@ -2827,6 +3427,13 @@ function drawEnergyChart(hostId, rows, options) {
   // watts is a real measurement (then they genuinely differ).
   const realWatts = pts.some((p) => typeof p.watts === "number" && p.estimated === false);
   const showLoad = !wattS || realWatts;
+  // L5: Load % drawn next to Power (W) gets its own right-hand % axis instead
+  // of silently borrowing the W scale.
+  const dualAxis = !!(wattS && showLoad && loadS);
+  if (dualAxis) padR = 40;
+  mkline(pad, H - pad, W - padR, H - pad, "axis");
+  mkline(pad, 5, pad, H - pad, "axis");
+  if (dualAxis) mkline(W - padR, 5, W - padR, H - pad, "axis");
   // Explain the single line when watts are estimated (the Load% line is hidden
   // because it's an identical shape), so it doesn't look like a series vanished.
   const enote = document.getElementById("energy-note");
@@ -2880,7 +3487,7 @@ function drawEnergyChart(hostId, rows, options) {
     const drawn = pts.filter((p) => typeof p[key] === "number" && !isNaN(p[key]));
     // Same HA-style stats rendering as the metric charts: a dense series draws a
     // min–max band + mean line (was an unreadable dense spike mass); sparse → line.
-    const stats = statsBandPaths(drawn, (p) => p[key], x, sc.y, W - pad - 5);
+    const stats = statsBandPaths(drawn, (p) => p[key], x, sc.y, W - pad - padR);
     if (stats.bandD) {
       const band = document.createElementNS(SVG_NS, "path");
       band.setAttribute("d", stats.bandD); band.setAttribute("class", bandCls);
@@ -2922,6 +3529,15 @@ function drawEnergyChart(hostId, rows, options) {
       t.setAttribute("class", "lbl"); t.textContent = txt; svg.appendChild(t);
     };
     lab(prim.mx.toFixed(0) + unit, 12); lab(prim.mn.toFixed(0) + unit, H - pad);
+  }
+  if (dualAxis) {
+    const rlab = (txt, yy) => {
+      const t = document.createElementNS(SVG_NS, "text");
+      t.setAttribute("x", (W - 2).toFixed(0)); t.setAttribute("y", yy);
+      t.setAttribute("text-anchor", "end");
+      t.setAttribute("class", "lbl lbl-load"); t.textContent = txt; svg.appendChild(t);
+    };
+    rlab(loadS.mx.toFixed(0) + " %", 24); rlab(loadS.mn.toFixed(0) + " %", H - pad);
   }
   svg.appendChild(crosshair);   // drawn last so the highlight dot sits on top
   host.appendChild(svg);
@@ -3010,6 +3626,11 @@ function drawSimpleSeries(host, pts, opts) {
     ln.setAttribute("y1", yy); ln.setAttribute("y2", yy);
     ln.setAttribute("class", h.cls || "grid"); svg.appendChild(ln);
   });
+  // An event past the axis (e.g. a replacement years out): a right-edge label
+  // with an arrow, no projection line (H6).
+  if (opts.offChart) {
+    txt(opts.offChart.label, W - padR, padT + 4, opts.offChart.cls, "end");
+  }
   // Vertical markers (e.g. the projected replacement date), with a label kept
   // inside the plot.
   (opts.vmarkers || []).forEach((m) => {
@@ -3168,7 +3789,7 @@ function renderBatteryHealthTab() {
         cardRows.push(el("div", { class: "row" }, [
           el("span", { text: "Last self-test" }),
           el("b", { class: { passed: "ok", failed: "crit", running: "warn" }[st.result] || "",
-            text: titleCase(st.result) + (st.date ? (" · " + st.date) : "") }),
+            text: titleCase(st.result) + (selfTestDate(st) ? (" · " + selfTestDate(st)) : "") }),
         ]));
       }
       wrap.appendChild(widgetCard(u.label || u.name, cardRows,
@@ -3233,23 +3854,46 @@ async function renderBatteryHealthGraph() {
   if (repl.thresholdScore != null) {
     opts.hlines = [{ value: repl.thresholdScore, cls: "bh-thresh" }];
   }
-  if (repl.etaTs) {
-    opts.tEnd = repl.etaTs;
-    // Dotted projection from the latest reading to the replacement point (the
-    // threshold score at the projected date), so even sparse / pre-release
-    // history reads as a trend heading toward replacement.
-    if (repl.thresholdScore != null) {
-      opts.projection = {
-        ts: repl.etaTs, value: repl.thresholdScore, cls: "bh-proj",
-      };
+  // A pre-6.2 daemon sends an uncapped trend date; bound it the same way the
+  // "Replace in" row does so the two never disagree.
+  if (repl.etaTs && typeof repl.days !== "number" && bhU) {
+    const est = replacementEstimate(bhU.batteryHealth);
+    if (est && typeof est.days === "number") {
+      const capTs = Date.now() / 1000 + est.days * 86400;
+      if (capTs < repl.etaTs) {
+        repl.etaTs = capTs; repl.etaSource = est.source;
+      }
+      repl.days = est.days;
     }
+  }
+  if (repl.etaTs) {
+    // H6: the marker, the label and the "Replace in" row must agree. The
+    // x-axis only extends to 2x the data span, so a far-off date is NOT pinned
+    // to the edge with a projection drawn to it (that slope read as "months");
+    // it becomes an off-chart arrow with the year instead.
+    const nowTs = pts[pts.length - 1].ts;
+    const days = typeof repl.days === "number" ? repl.days
+      : Math.max(0, (repl.etaTs - Date.now() / 1000) / 86400);
+    const tone = days > 365 ? "neutral" : days > 90 ? "warn" : "crit";
+    const src = repl.etaSource === "age" ? "est" : "proj";
     const d = new Date(repl.etaTs * 1000);
     const ym = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
-    const src = repl.etaSource === "age" ? "est" : "proj";
-    opts.vmarkers = [{
-      ts: repl.etaTs, cls: "bh-eta", lblCls: "bh-eta-lbl",
-      label: "Replace ~" + ym + " (" + src + ")",
-    }];
+    const dataSpan = Math.max(1, nowTs - pts[0].ts);
+    const offChart = !!repl.beyond || repl.etaTs > nowTs + 2 * dataSpan;
+    if (offChart) {
+      opts.offChart = { cls: "bh-eta-lbl " + tone,
+        label: "Replace → " + (repl.beyond ? "> " : "~") + d.getFullYear() + " (" + src + ")" };
+    } else {
+      opts.tEnd = repl.etaTs;
+      // Dotted projection from the latest reading to the replacement point.
+      if (repl.thresholdScore != null) {
+        opts.projection = { ts: repl.etaTs, value: repl.thresholdScore, cls: "bh-proj" };
+      }
+      opts.vmarkers = [{
+        ts: repl.etaTs, cls: "bh-eta " + tone, lblCls: "bh-eta-lbl " + tone,
+        label: "Replace ~" + ym + " (" + src + ")",
+      }];
+    }
   }
   drawSimpleSeries(host, pts, opts);
 }
@@ -3801,8 +4445,24 @@ function selectTab(name, opts) {
   // An explicit (user) switch lands at the top of the freshly-shown panel
   // instead of inheriting the previous tab's scroll position.
   if (opts.updateHash) window.scrollTo(0, 0);
+  // On a phone the tab bar scrolls sideways; keep the chosen tab in view.
+  if (btn && typeof btn.scrollIntoView === "function") {
+    try { btn.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_e) { /* old UA */ }
+  }
   onTabActivated(name);
   applyScopeChrome();
+  // The banner's "View shutdown progress" link hides on the Shutdown tab.
+  if (typeof renderBanner === "function" && lastUpsRows.length) renderBanner();
+}
+
+// L6: a horizontally scrolling tab bar gets a fade on the side that has more
+// tabs, so Events/Config off-screen on a phone are discoverable.
+function updateTabOverflow() {
+  const list = document.getElementById("tabs");
+  if (!list) return;
+  const max = list.scrollWidth - list.clientWidth;
+  list.classList.toggle("more-right", max > 2 && list.scrollLeft < max - 2);
+  list.classList.toggle("more-left", max > 2 && list.scrollLeft > 2);
 }
 
 // Draw/refresh whatever the freshly-activated tab needs from the latest data.
@@ -3838,6 +4498,33 @@ function shutdownTriggerNodes(target, plan) {
     ? lastGroups.filter((g) => g.name === target.name)
     : lastGroups.filter((g) => (g.upsSources || []).includes(target.name));
   const coord = plan && plan.coordinatorMode ? " — coordinator-run" : "";
+  // v6.2 (H3c): the daemon lists every configured trigger with its real
+  // threshold (charge, runtime, drain rate, time on battery, FSD, failsafe),
+  // so the tab no longer claims "low battery or FSD" only.
+  const trig = plan && plan.triggers;
+  if (trig && Array.isArray(trig.conditions) && trig.conditions.length) {
+    const nodes = [];
+    const action = trig.action && trig.action.label ? " → " + trig.action.label : "";
+    const line = el("div", { class: "sd-trigger" }, [icon("info"),
+      el("div", { class: "sd-trigger-body" }, [
+        el("span", { text: "Shutdown starts when any of these is true" + coord + ":" }),
+        el("ul", { class: "sd-conditions" },
+          trig.conditions.map((c) => el("li", { text: c }))),
+        Array.isArray(trig.memberConditions) && trig.memberConditions.length
+          ? el("span", { class: "sd-trigger-note", text: "A member counts as unhealthy when: "
+            + trig.memberConditions.join(" · ") }) : null,
+        action ? el("span", { class: "sd-trigger-action", text: action.slice(3) }) : null,
+        trig.stabilizationDelay ? el("span", { class: "sd-trigger-note",
+          text: "Battery triggers wait " + formatRuntimeSeconds(trig.stabilizationDelay)
+            + " after the switch to battery before acting (stabilization)." }) : null,
+      ].filter(Boolean)),
+      target.kind === "redundancy"
+        ? el("span", { class: "badge sd-trigger-live", "data-group": target.name })
+        : el("span", { class: "badge sd-trigger-live", "data-ups": target.name }),
+    ]);
+    nodes.push(line);
+    return nodes;
+  }
   if (groups.length) {
     return groups.map((g) => el("div", { class: "sd-trigger" }, [
       icon("info"),
@@ -3879,6 +4566,25 @@ function progressStateLabel(state) {
 // group status, so the operator sees how close the trigger is right now.
 function updateTriggerLive(section) {
   section.querySelectorAll(".sd-trigger-live").forEach((badge) => {
+    const upsName = badge.getAttribute("data-ups");
+    if (upsName) {
+      // Live "how close is it" for one UPS: the closest trigger + its ETA.
+      const u = lastUpsRows.find((row) => row.name === upsName);
+      const list = u ? upcomingTriggers(u) : [];
+      if (!u || !list.length) {
+        badge.className = "badge sd-trigger-live ok";
+        badge.textContent = u && isOnBattery(u) ? "on battery · no trigger close"
+          : "now on mains · armed";
+        badge.hidden = !u;
+        return;
+      }
+      const first = list[0];
+      badge.className = "badge sd-trigger-live " + (first.state === "fired" ? "crit" : "warn");
+      badge.textContent = first.state === "fired" ? "met now: " + first.condition
+        : "next: " + first.condition + (triggerEta(first) ? " " + triggerEta(first) : "");
+      badge.hidden = false;
+      return;
+    }
     const g = lastGroups.find((item) => item.name === badge.getAttribute("data-group"));
     if (!g) { badge.hidden = true; return; }
     const total = (g.upsSources || []).length;
@@ -4159,9 +4865,11 @@ function appendShutdownPlanBody(host, target, plan) {
           const health = remoteHealth.find((row) =>
             row.host === s.host || row.server === s.label);
           if (health) {
-            const healthClass = remoteStatusClass(health);
-            const healthLabel = healthClass === "ok" ? "reachable"
-              : healthClass === "warn" ? "degraded" : "unreachable";
+            const old = remoteStatusClass(health) === "ok" && remoteCheckIsOld(health);
+            const healthClass = old ? "muted" : remoteStatusClass(health);
+            const healthLabel = old ? "reachable " + relTime(health.last_checked_at)
+              : healthClass === "ok" ? "reachable"
+                : healthClass === "warn" ? "degraded" : "unreachable";
             const badge = el("span", { class: "badge sd-health-badge " + healthClass,
               text: healthLabel });
             if (health.last_checked_at) {
@@ -4309,6 +5017,9 @@ function initTabs() {
   };
   window.addEventListener("hashchange", fromHash);
   fromHash();
+  list.addEventListener("scroll", updateTabOverflow, { passive: true });
+  window.addEventListener("resize", updateTabOverflow);
+  updateTabOverflow();
 }
 
 // ----- polling -----
@@ -4319,13 +5030,49 @@ function initTabs() {
 let daemonVersion = null;
 let daemonRuntime = null;
 
-function setStatus(msg) {
+// H4: the footer only says "Updated" after a successful fetch, and then shows
+// the DAEMON's build time (generatedAt), not the browser clock. A failed fetch
+// says how old the data on screen is; past 3 polls the page is marked stale.
+// ELI5: a newspaper prints its date on the front page. If the paperboy stops
+// coming, yesterday's paper must not look like today's.
+const POLL_SECONDS = 10;
+const CLIENT_STALE_SECONDS = 3 * POLL_SECONDS;
+function clientDataAge() {
+  return lastGoodFetchAt ? Math.max(0, (Date.now() - lastGoodFetchAt) / 1000) : null;
+}
+function clientDataStale() {
+  const age = clientDataAge();
+  return age != null && age > CLIENT_STALE_SECONDS;
+}
+
+// `ok` is the poll result (boolean), or a confirmation message from a control
+// action ("Set battery.charge.low on ups"), shown with the time it happened.
+function setStatus(ok) {
   const bits = [];
   if (daemonVersion) bits.push("Eneru v" + daemonVersion);
   if (daemonRuntime) bits.push(daemonRuntime);
-  bits.push(msg);
-  bits.push(new Date().toLocaleTimeString());
-  document.getElementById("status-line").textContent = bits.join(" · ");
+  const line = document.getElementById("status-line");
+  const stale = clientDataStale();
+  if (typeof ok === "string" && ok) {
+    bits.push(ok);
+    bits.push(new Date().toLocaleTimeString());
+  } else if (ok) {
+    const at = lastGeneratedAt ? new Date(lastGeneratedAt * 1000) : new Date();
+    bits.push("Updated " + at.toLocaleTimeString());
+  } else if (lastGoodFetchAt) {
+    bits.push("No answer from the daemon · last good data "
+      + formatAge(clientDataAge()) + " · retrying");
+  } else {
+    bits.push("Waiting for the daemon…");
+  }
+  line.textContent = bits.join(" · ");
+  line.classList.toggle("stale", !ok);
+  document.body.classList.toggle("data-stale", !ok && stale);
+  const mark = document.getElementById("stale-mark");
+  if (mark) {
+    mark.hidden = ok || !stale;
+    mark.textContent = "STALE · data from " + formatAge(clientDataAge());
+  }
 }
 
 // F-043: refresh() is async and driven by a 10s setInterval. If one cycle runs
@@ -4380,7 +5127,10 @@ async function refreshOnce() {
       || (ups.data.runtime && ups.data.runtime.context);
     if (rc) daemonRuntime = rc;
   }
-  if (ups.ok) {
+  const upsOk = !!(ups.ok && ups.data);
+  if (upsOk) {
+    lastGoodFetchAt = Date.now();
+    lastGeneratedAt = typeof ups.data.generatedAt === "number" ? ups.data.generatedAt : null;
     // Poll-driven redraws must not yank the operator back to the top of a tab
     // they have scrolled (battery health, energy cards, overview, …). Explicit
     // tab switches still reset to the top via selectTab(); this only wraps the
@@ -4389,10 +5139,20 @@ async function refreshOnce() {
       renderUps(ups.data); renderControl(ups.data); renderBanner();
     });
     showError("");
-  } else if (ups.status === 0) {
-    showError("⚠️  Connection lost — retrying…");  // L14: network/daemon down
-  } else if (ups.status !== 401) {
-    showError("Could not load UPS status (HTTP " + ups.status + ")");
+  } else {
+    // H4: keep the last data visible but say how old it is, and redraw so the
+    // per-UPS "updated … ago" ages keep counting.
+    const since = lastGoodFetchAt ? " — showing data from " + formatAge(clientDataAge()) : "";
+    if (ups.status === 0) {
+      showError("⚠️  Connection lost" + since + ". Retrying…",  // L14: network/daemon down
+        "Connection lost. Retrying…");
+    } else if (ups.status !== 401) {
+      showError("Could not load UPS status (HTTP " + ups.status + ")" + since,
+        "Could not load UPS status (HTTP " + ups.status + ")");
+    }
+    if (lastUpsRows.length) {
+      preserveWindowScroll(() => { renderOverviewSummary(lastUpsRows); renderBanner(); });
+    }
   }
   await loadEvents();        // merges fresh recent events into the accumulated list
   // Redraw only the active tab's chart/widgets (the others redraw on activate).
@@ -4406,7 +5166,7 @@ async function refreshOnce() {
   if (!document.getElementById("detail-modal").hidden && openDetailName) {
     renderDetail(openDetailName);
   }
-  setStatus("Updated");
+  setStatus(upsOk);
 }
 
 async function init() {

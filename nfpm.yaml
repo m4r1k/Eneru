@@ -301,6 +301,13 @@ contents:
       owner: root
       group: root
 
+  - src: src/eneru/outlook.py
+    dst: /opt/ups-monitor/eneru/outlook.py
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
   - src: src/eneru/graph.py
     dst: /opt/ups-monitor/eneru/graph.py
     file_info:

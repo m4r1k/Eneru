@@ -79,7 +79,8 @@ apply_scenario low-battery
 # exit 0 once the dry-run shutdown sequence completes; anything else
 # is a real failure that the previous `|| true` was masking.
 set +e
-eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log
+# timeout bounds a trigger regression (fail in minutes, not at the 25-min job limit).
+timeout 180s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test3.log
 RC=${PIPESTATUS[0]}
 set -e
 if [ "$RC" -ne 0 ]; then
@@ -124,7 +125,7 @@ rm -f /tmp/eneru-e2e-shutdown-flag
 apply_scenario low-battery
 
 # Run Eneru briefly - will trigger shutdown and send SSH command
-eneru run --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
+timeout 180s eneru run --config config-e2e.yaml --exit-after-shutdown 2>&1 | tee /tmp/test4.log || true
 
 echo ""
 echo "=== Verifying SSH shutdown ==="
@@ -158,15 +159,31 @@ echo "=== Test 5: FSD Trigger ==="
 # Clean up
 rm -f /tmp/eneru-e2e-shutdown-flag
 
-# Switch to FSD scenario
+# Switch to FSD scenario. fsd.dev keeps battery.charge/runtime ABOVE the
+# dry-run config's low-battery (20%) and runtime (600s) thresholds, so the
+# only thing that can fire is the FSD flag itself. (It used to sit below
+# both, so low-battery fired too and "FSD" matched the logged status line
+# even with FSD handling removed.)
 apply_scenario fsd
 
-# Run Eneru in dry-run mode
-eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log || true
+# Run Eneru in dry-run mode; a clean dry-run sequence exits 0.
+set +e
+timeout 180s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml --exit-after-shutdown 2>&1 | tee /tmp/test5.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 0)"
+  exit 1
+fi
 
-# Verify FSD triggered shutdown
-if ! grep -q "FSD" /tmp/test5.log; then
-  echo "FAIL: FSD was not detected!"
+# The exact trigger reason (monitor.py FSD branch), not just the token.
+if ! grep -qF "Triggering immediate shutdown. Reason: UPS signaled FSD (Forced Shutdown) flag." /tmp/test5.log; then
+  echo "FAIL: FSD flag did not trigger the immediate shutdown!"
+  cat /tmp/test5.log
+  exit 1
+fi
+if ! grep -q "SHUTDOWN SEQUENCE" /tmp/test5.log; then
+  echo "FAIL: FSD trigger did not run the shutdown sequence"
   cat /tmp/test5.log
   exit 1
 fi
@@ -186,13 +203,10 @@ echo "=== Test 6: Voltage Events ==="
 # Clean up
 rm -f /tmp/eneru-e2e-shutdown-flag
 
-# Start with normal state
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-sleep 2
-
-# Switch to brownout scenario
-cp $E2E_DIR/scenarios/brownout.dev $E2E_DIR/scenarios/apply.dev
-sleep 2
+# Start with normal state, then switch to brownout (each apply blocks
+# until upsd serves the new state).
+apply_scenario online-charging
+apply_scenario brownout
 
 # Run briefly to detect brownout
 timeout 8 eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test6.log || true
@@ -392,11 +406,12 @@ else
 fi
 
 # Restore baseline scenario for any downstream tests added later.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 )
 
 # ======================================================================
-# Test 34: Shutdown re-arm on POWER_RESTORED (5.2.2 / bug #4)
+# Test 70: Shutdown re-arm on POWER_RESTORED (5.2.2 / bug #4)
+# (Numbered 34 until 6.2.0, which collided with stats.sh Test 34.)
 #
 # The shutdown sequence creates a flag file as a re-entry guard. In the
 # local_shutdown.enabled=true real-mode path the daemon doesn't clear
@@ -413,8 +428,8 @@ cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
 # ======================================================================
 (
 echo ""
-echo ">>> Running: Test 34: Shutdown re-arm on POWER_RESTORED (bug #4)"
-echo "=== Test 34: re-arm after POWER_RESTORED ==="
+echo ">>> Running: Test 70: Shutdown re-arm on POWER_RESTORED (bug #4)"
+echo "=== Test 70: re-arm after POWER_RESTORED ==="
 
 REARM_DIR=/tmp/eneru-e2e-rearm
 rm -rf $REARM_DIR
@@ -499,7 +514,7 @@ sleep 3
 # (1) First outage: low battery -> trigger fires, flag created, no-op
 #     "shutdown" command runs, daemon keeps polling.
 echo "  step 1: low-battery -> first trigger"
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario low-battery
 
 # Wait for the first EMERGENCY_SHUTDOWN_INITIATED to land in SQLite.
 DB=$REARM_DIR/default.db
@@ -521,7 +536,7 @@ fi
 
 # (2) Power restored: daemon must see OL again and clear the flag.
 echo "  step 2: online-charging -> POWER_RESTORED clears flag"
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 
 # Wait until POWER_RESTORED lands AND the flag file is gone.
 for i in {1..20}; do
@@ -546,7 +561,7 @@ fi
 # (3) Second outage: trigger MUST fire again. Pre-5.2.2 the flag
 #     persisted and this no-op'd silently.
 echo "  step 3: low-battery again -> second trigger (re-arm proof)"
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario low-battery
 
 for i in {1..20}; do
   COUNT2=$(sqlite3 "$DB" "SELECT COUNT(*) FROM events WHERE event_type='EMERGENCY_SHUTDOWN_INITIATED'" 2>/dev/null || echo 1)
@@ -570,7 +585,7 @@ wait "$DAEMON_PID" 2>/dev/null || true
 trap - EXIT
 
 # Restore baseline so any downstream tests start fresh.
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 echo "PASS: bug #4 re-arm; OB->OL->OB produced 2 EMERGENCY_SHUTDOWN_INITIATED rows"
 )
 
@@ -604,7 +619,7 @@ if ! grep -q "stabilization" /tmp/test39.log; then
   echo "FAIL: expected stabilization log line"
   exit 1
 fi
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 echo "PASS: on-battery stabilization suppressed transient critical readings"
 )
 
@@ -618,7 +633,7 @@ echo ">>> Running: Test 40: Remote SSH healthcheck is harmless"
 cd $E2E_DIR
 docker compose exec -T ssh-target sh -c "rm -f /var/run/shutdown-triggered && touch /var/run/server-alive"
 rm -f /tmp/eneru-e2e-state.remote-health.json /tmp/eneru-e2e-shutdown-flag
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 
 set +e
 timeout 8s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml 2>&1 | tee /tmp/test40.log
@@ -692,15 +707,16 @@ echo "PASS: manual confirmed remote shutdown reached selected target"
 echo ""
 echo ">>> Running: Test 43: Embedded API health/readiness/metrics/index"
 
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
-timeout 60s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
+apply_scenario online-charging
+timeout 120s eneru run --config $E2E_DIR/config-e2e-dry-run.yaml \
   > /tmp/test43-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
 # Each startup endpoint gets a 10 s poll budget (0.5 s x 20 attempts), so
-# their serial retries can take 30 s. The later progress poll adds 15 s;
-# the 60 s outer timeout covers that 45 s retry budget plus test work.
+# their serial retries can take 30 s. The later apply_scenario (up to 20 s),
+# the 15 s progress poll and the F-188 check follow; the 120 s outer timeout
+# covers that budget with room. The daemon is killed as soon as the test ends.
 poll_endpoint() {
   local url="$1" out="$2" tries="${3:-20}"
   for _ in $(seq 1 "$tries"); do
@@ -771,6 +787,59 @@ if ! curl -fsS "$UPS_PLAN_URL" > /tmp/test43-plan.json; then
   echo "FAIL: per-UPS shutdown plan endpoint did not respond"
   exit 1
 fi
+
+# 6.2 UX contract: next-trigger outlook, role, freshness and status
+# vocabulary on the live API, plus the state-file EPOCH the TUI reads.
+if ! curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test43-ups.json || \
+   ! curl -fsS 'http://127.0.0.1:9100/api/v1/ups/TestUPS%40localhost%3A3493' \
+     > /tmp/test43-ups-one.json; then
+  echo "FAIL: /api/v1/ups did not respond"
+  exit 1
+fi
+if ! python3 - /tmp/test43-ups.json /tmp/test43-ups-one.json \
+     /tmp/test43-plan.json /tmp/eneru-e2e-state <<'PY'
+import json
+import sys
+import time
+
+fleet = json.load(open(sys.argv[1], encoding="utf-8"))
+one = json.load(open(sys.argv[2], encoding="utf-8"))
+plan = json.load(open(sys.argv[3], encoding="utf-8"))
+state = dict(line.split("=", 1)
+             for line in open(sys.argv[4], encoding="utf-8").read().splitlines())
+assert isinstance(fleet["generatedAt"], float)
+assert isinstance(one["generatedAt"], float)
+row = fleet["ups"][0]
+assert "nextTrigger" in row and row["nextTrigger"] is None, row["nextTrigger"]
+ids = [t["id"] for t in row["triggerOutlook"]["triggers"]]
+assert ids == ["fsd", "failsafe", "lowBattery", "criticalRuntime",
+               "depletionRate", "extendedTime", "selfTestFailure"], ids
+assert row["triggerOutlook"]["onBattery"] is False
+# Containers + unmounts + one remote, local_shutdown off: drains this host
+# and shuts the remote down, but the host itself stays up.
+role = row["role"]
+assert role["kind"] == "local", role
+assert role["shutsDownLocalHost"] is False and role["localDrain"] is True, role
+assert role["remoteServers"] == 1 and role["redundancyGroups"] == [], role
+action = row["triggerOutlook"]["action"]
+assert action["kind"] == "local-shutdown", action
+assert action["label"] == ("Stops local workloads (this host stays up) and shuts "
+                           "down 1 remote server (dry-run)"), action
+assert row["freshness"]["stale"] is False
+assert abs(row["freshness"]["lastPollAt"] - time.time()) < 60
+assert row["statusSummary"]["state"] == "online", row["statusSummary"]
+assert row["statusSummary"]["severity"] == "ok"
+assert plan["triggers"]["conditions"][0].startswith("charge below ")
+assert plan["role"]["kind"] == row["role"]["kind"]
+assert abs(float(state["EPOCH"]) - time.time()) < 60
+assert state["TIMESTAMP_ISO"][-6] in "+-"
+print("PASS (43a): next-trigger/role/freshness contract on the live API")
+PY
+then
+  echo "FAIL: /api/v1/ups is missing the 6.2 outlook contract"
+  cat /tmp/test43-ups.json /tmp/eneru-e2e-state 2>/dev/null || true
+  exit 1
+fi
 # apply_scenario blocks until upsd serves the new state (no reload race).
 apply_scenario low-battery
 UPS_PROGRESS_SEEN=false
@@ -797,6 +866,11 @@ assert phases["vms"]["detail"] == "disabled"
 assert phases["remote"]["state"] == "succeeded"
 assert progress["remotes"]
 assert all(remote["state"] == "succeeded" for remote in progress["remotes"])
+# The TUI reads the same progress from the sidecar next to the state file.
+with open("/tmp/eneru-e2e-state.shutdown-progress.json", encoding="utf-8") as handle:
+    sidecar = json.load(handle)
+assert sidecar["runId"] == progress["runId"]
+assert sidecar["state"] == "succeeded" and sidecar["writtenAt"] > 0
 PY
   then
     UPS_PROGRESS_SEEN=true
@@ -808,6 +882,42 @@ if [ "$UPS_PROGRESS_SEEN" != true ]; then
   echo "FAIL: per-UPS terminal shutdown progress was not published"
   cat /tmp/test43-progress.json /tmp/test43-daemon.log 2>/dev/null || true
   # Don't leak the low-battery state into the next test in this group.
+  kill "$DAEMON_PID" 2>/dev/null || true
+  trap - EXIT
+  apply_scenario online-charging
+  exit 1
+fi
+# F-188: the trigger the dashboard names as "next" must be the one the daemon
+# actually fired. The shutdown has run (progress succeeded) and the dry-run
+# daemon keeps polling, so the row still shows the low-battery reading.
+if ! curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test43-ups-lb.json || \
+   ! python3 - /tmp/test43-ups-lb.json /tmp/test43-daemon.log <<'PY'
+import json
+import re
+import sys
+
+row = json.load(open(sys.argv[1], encoding="utf-8"))["ups"][0]
+log = open(sys.argv[2], encoding="utf-8", errors="replace").read()
+# monitor.py _trigger_immediate_shutdown / _handle_on_battery (T1).
+fired = re.findall(r"Triggering immediate shutdown\. Reason: (.+)", log)
+assert fired, "daemon never logged a trigger"
+assert fired[0] == "Battery charge 14% below threshold 20%", fired
+prefix = {"lowBattery": "Battery charge ", "criticalRuntime": "Runtime ",
+          "depletionRate": "Depletion rate ", "extendedTime": "Time on battery "}
+nxt = row["nextTrigger"]
+assert nxt is not None, row["triggerOutlook"]
+assert nxt["id"] == "lowBattery" and nxt["state"] == "fired", nxt
+assert fired[0].startswith(prefix[nxt["id"]]), (nxt, fired)
+outlook = row["triggerOutlook"]
+assert outlook["onBattery"] is True, outlook
+assert outlook["firing"][:1] == ["lowBattery"], outlook["firing"]
+assert outlook["summary"].startswith("Shutdown condition met: low battery"), outlook
+assert row["role"]["kind"] == "local", row["role"]
+print("PASS (43a): nextTrigger names the trigger the daemon fired: " + fired[0])
+PY
+then
+  echo "FAIL: nextTrigger does not match the trigger the daemon fired"
+  cat /tmp/test43-ups-lb.json /tmp/test43-daemon.log 2>/dev/null || true
   kill "$DAEMON_PID" 2>/dev/null || true
   trap - EXIT
   apply_scenario online-charging
@@ -956,7 +1066,7 @@ logging:
   shutdown_flag_file: /tmp/eneru-e2e-shutdown-flag
 YAML
 
-cp $E2E_DIR/scenarios/low-battery.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario low-battery
 # Nanosecond-precision wallclock so the upper-bound assertion below
 # isn't hostage to whole-second rounding (a 10.999 s real run would
 # round down to 10 with `date +%s` and silently pass).
@@ -968,10 +1078,22 @@ RC=${PIPESTATUS[0]}
 set -e
 ELAPSED_NS=$(( $(date +%s%N) - START_NS ))
 ELAPSED_MS=$(( ELAPSED_NS / 1000000 ))
-cp $E2E_DIR/scenarios/online-charging.dev $E2E_DIR/scenarios/apply.dev
+apply_scenario online-charging
 
 if [ "$RC" -eq 124 ]; then
   echo "FAIL: unreachable remote stalled shutdown past outer timeout"
+  cat /tmp/test44.log
+  exit 1
+fi
+# A crash (traceback, bad config) must not pass as "bounded": the completed
+# sequence exits 0 via --exit-after-shutdown even though the remote failed.
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 0 after the bounded sequence)"
+  cat /tmp/test44.log
+  exit 1
+fi
+if ! grep -q "SHUTDOWN SEQUENCE" /tmp/test44.log; then
+  echo "FAIL: low battery did not start the shutdown sequence"
   cat /tmp/test44.log
   exit 1
 fi
@@ -982,7 +1104,8 @@ if [ "$ELAPSED_MS" -ge 11000 ]; then
   echo "FAIL: unreachable remote took too long (${ELAPSED_MS} ms)"
   exit 1
 fi
-if ! grep -Eq "0/1 succeeded|timed out|failed" /tmp/test44.log; then
+# Exact summary format from RemoteShutdownMixin (shutdown/remote.py).
+if ! grep -q "Remote shutdown complete (0/1 succeeded" /tmp/test44.log; then
   echo "FAIL: remote shutdown summary did not report bounded failure"
   cat /tmp/test44.log
   exit 1
@@ -1152,7 +1275,7 @@ local_shutdown:
 YAML
 
 apply_scenario low-battery
-eneru run --config "$config" --exit-after-shutdown \
+timeout 180s eneru run --config "$config" --exit-after-shutdown \
   2>&1 | tee /tmp/test59.log
 
 if ! docker compose -f "$E2E_DIR/docker-compose.yml" exec -T ssh-target \
@@ -1215,7 +1338,7 @@ local_shutdown:
 YAML
 
 apply_scenario low-battery
-eneru run --config "$config" --exit-after-shutdown \
+timeout 180s eneru run --config "$config" --exit-after-shutdown \
   2>&1 | tee /tmp/test60.log
 
 if docker inspect eneru-e2e-compose-timeout >/dev/null 2>&1; then
@@ -1223,8 +1346,138 @@ if docker inspect eneru-e2e-compose-timeout >/dev/null 2>&1; then
   cat /tmp/test60.log
   exit 1
 fi
+# The per-file stop_timeout (2) must win over the containers default (3);
+# containers.py logs the effective value it passes to `down -t`.
+if ! grep -qF "Stopping: $compose_file (timeout: 2s)" /tmp/test60.log; then
+  echo "FAIL: compose down did not use the per-file stop_timeout (2s)"
+  cat /tmp/test60.log
+  exit 1
+fi
 trap - EXIT
 echo "PASS: Eneru removed the Compose stack with the configured timeout"
+)
+
+# ======================================================================
+# Test 71: One-entry ups: list honours an explicit is_local: false (6.2)
+# ======================================================================
+# Since 5.0 a lone list-form UPS powered this host off on every trigger,
+# even with `is_local: false`. 6.2: an explicit false keeps the host up
+# (its remote servers still shut down); an omitted is_local keeps the old
+# poweroff and logs a warning at startup.
+(
+echo ""
+echo ">>> Running: Test 71: One-entry ups list honours explicit is_local: false"
+
+write_is_local_config() {
+  # $1 = output path, $2 = "is_local: false" line or "" (omitted)
+  local out="$1" is_local_line="$2"
+  cat >"$out" <<YAML
+ups:
+  - name: "TestUPS@localhost:3493"
+    check_interval: 1
+    ${is_local_line}
+    remote_servers:
+      - name: "E2E SSH Target"
+        enabled: true
+        host: "localhost"
+        user: "testuser"
+        connect_timeout: 5
+        command_timeout: 10
+        shutdown_command: "sudo shutdown -h now"
+        ssh_options:
+          - "-o Port=2222"
+          - "-o StrictHostKeyChecking=no"
+          - "-o UserKnownHostsFile=/dev/null"
+          - "-o IdentityFile=/tmp/e2e-ssh-key"
+triggers:
+  on_battery_stabilization_delay: 0
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+behavior:
+  dry_run: true
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-islocal-state"
+  battery_history_file: "/tmp/eneru-e2e-islocal-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-islocal-flag"
+statistics:
+  db_directory: "/tmp/eneru-e2e-islocal-stats"
+notifications:
+  enabled: false
+local_shutdown:
+  enabled: true
+  command: "shutdown -h now"
+YAML
+}
+
+apply_scenario low-battery
+
+# --- 71a: explicit is_local: false -> remote shutdown only, host stays up.
+write_is_local_config /tmp/config-e2e-islocal-false.yaml "is_local: false"
+rm -f /tmp/eneru-e2e-islocal-flag
+set +e
+timeout 180s eneru run --config /tmp/config-e2e-islocal-false.yaml \
+  --exit-after-shutdown 2>&1 | tee /tmp/test71a.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL (71a): eneru exited with code $RC (expected 0)"
+  cat /tmp/test71a.log
+  exit 1
+fi
+if ! grep -qF "Would send command 'sudo shutdown -h now' to testuser@localhost" /tmp/test71a.log; then
+  echo "FAIL (71a): the remote server shutdown did not run"
+  cat /tmp/test71a.log
+  exit 1
+fi
+if grep -qF "Would execute: shutdown -h now" /tmp/test71a.log; then
+  echo "FAIL (71a): explicit is_local: false still powered this host off"
+  cat /tmp/test71a.log
+  exit 1
+fi
+if ! grep -qF "SHUTDOWN SEQUENCE COMPLETE (is_local: false -- this host stays up)" /tmp/test71a.log; then
+  echo "FAIL (71a): missing the host-stays-up completion line"
+  cat /tmp/test71a.log
+  exit 1
+fi
+echo "PASS (71a): explicit is_local: false shut down the remote only"
+
+# --- 71b: is_local omitted -> unchanged host poweroff, plus a warning.
+write_is_local_config /tmp/config-e2e-islocal-omitted.yaml ""
+rm -f /tmp/eneru-e2e-islocal-flag
+set +e
+timeout 180s eneru run --config /tmp/config-e2e-islocal-omitted.yaml \
+  --exit-after-shutdown 2>&1 | tee /tmp/test71b.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL (71b): eneru exited with code $RC (expected 0)"
+  cat /tmp/test71b.log
+  exit 1
+fi
+if ! grep -qF "WARNING: ups[0] has no is_local; as the only UPS it powers off this host on a shutdown trigger." /tmp/test71b.log; then
+  echo "FAIL (71b): the omitted-is_local startup warning is missing"
+  cat /tmp/test71b.log
+  exit 1
+fi
+if ! grep -qF "Would execute: shutdown -h now" /tmp/test71b.log; then
+  echo "FAIL (71b): omitted is_local no longer powers this host off"
+  cat /tmp/test71b.log
+  exit 1
+fi
+if ! grep -qF "Would send command 'sudo shutdown -h now' to testuser@localhost" /tmp/test71b.log; then
+  echo "FAIL (71b): the remote server shutdown did not run"
+  cat /tmp/test71b.log
+  exit 1
+fi
+# `eneru validate` prints the same warning.
+eneru validate --config /tmp/config-e2e-islocal-omitted.yaml >/tmp/test71b-validate.log 2>&1 || true
+if ! grep -qF "ups[0] has no is_local" /tmp/test71b-validate.log; then
+  echo "FAIL (71b): eneru validate did not warn about the omitted is_local"
+  cat /tmp/test71b-validate.log
+  exit 1
+fi
+echo "PASS (71b): omitted is_local still powers this host off and warns"
 )
 
 echo ""

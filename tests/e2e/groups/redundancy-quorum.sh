@@ -108,62 +108,110 @@ echo "PASS: Redundancy shutdown fired on exhausted quorum"
 # ======================================================================
 # Test 23: unknown_counts_as=critical surfaces UNKNOWN as failure
 # ======================================================================
+# F-141 (6.2.0 release review): this test used to keep both UPSes online
+# and never produced an UNKNOWN member. Now it makes one for real: UPS1 is
+# critical (low battery) and UPS2's dummy driver is killed, so upsd serves
+# stale data for it; once UPS2's connection grace expires its snapshot is
+# UNKNOWN. Think of two smoke detectors: one is beeping, the other has gone
+# silent. With unknown_counts_as=critical the silent one counts as "not
+# safe", so zero healthy members remain and the group must fire. (With
+# `healthy` it would hold, which is exactly the policy this pins.)
 (
 echo ""
 echo ">>> Running: Test 23: unknown_counts_as=critical surfaces UNKNOWN as failure"
 
 echo "=== Test 23: UNKNOWN handling ==="
-# UPS1 healthy; UPS2 health UNKNOWN (we'll just keep it online --
-# the goal is to confirm UNKNOWN is *handled*, not to force it).
-# We assert the handling indirectly via Test 22's matching log lines
-# already covering UNKNOWN→CRITICAL via unknown_counts_as.
-apply_scenario online-charging UPS1
-apply_scenario online-charging UPS2
+dbg "T23: restart_redundancy_nut_server (both drivers alive, both online)"
+restart_redundancy_nut_server
+apply_scenario low-battery UPS1
 
-# Long enough to clear the startup grace and confirm steady state.
-timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test23.log || true
+# Short-grace config (30s connection grace) keeps the wait bounded; it has
+# unknown_counts_as=critical and degraded_counts_as=healthy.
+timeout 150s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+  > /tmp/test23.log 2>&1 &
+ENERU_PID=$!
+trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
 
-# Evaluator must reference its policies in the startup line.
-if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test23.log; then
-  echo "FAIL: evaluator did not start"
-  tail -20 /tmp/test23.log
+# Let both members publish good snapshots and clear the evaluator startup grace.
+sleep 13
+stop_redundancy_nut_driver UPS2
+
+# UPS2 stays DEGRADED (counts healthy) inside its 30s grace, then turns
+# UNKNOWN and quorum is lost. Poll (<=75s) instead of a fixed sleep.
+for _i in $(seq 1 375); do
+  grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test23.log && break
+  sleep 0.2
+done
+kill "$ENERU_PID" 2>/dev/null || true
+wait "$ENERU_PID" 2>/dev/null || true
+trap - EXIT
+restart_redundancy_nut_server
+
+t23_fail() {
+  echo "$1"
+  echo "----- /tmp/test23.log -----"
+  cat /tmp/test23.log
+  dump_redundancy_nut_state "T23 failure"
   exit 1
-fi
-# Healthy state -- no shutdown.
-if grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test23.log; then
-  echo "FAIL: shutdown should not fire when both are healthy"
-  tail -20 /tmp/test23.log
-  exit 1
-fi
-echo "PASS: UNKNOWN handling default verified"
+}
+grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test23.log \
+  || t23_fail "FAIL: evaluator did not start"
+# The tally prints each member's RAW health (redundancy.py evaluate_once):
+# UPS2 must be reported unknown and still be counted as not healthy.
+grep -qF "quorum LOST (healthy=0, min_healthy=1; UPS1@localhost:3493=critical, UPS2@localhost:3493=unknown)" /tmp/test23.log \
+  || t23_fail "FAIL: UNKNOWN UPS2 was not counted as critical in the quorum tally"
+grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test23.log \
+  || t23_fail "FAIL: quorum loss with an UNKNOWN member did not fire the redundancy shutdown"
+echo "PASS: UNKNOWN member counted as critical (unknown_counts_as=critical)"
 )
 
 # ======================================================================
 # Test 24: Both UPSes UNKNOWN -> fail-safe shutdown
 # ======================================================================
+# F-141: previously a copy of Test 22 (both low battery). Now both drivers
+# are killed while the UPSes are ONLINE, so the only way the group can fire
+# is the fail-safe path: every member UNKNOWN after its connection grace.
 (
 echo ""
 echo ">>> Running: Test 24: Both UPSes UNKNOWN -> fail-safe shutdown"
 
 echo "=== Test 24: Both UNKNOWN ==="
-# Both UPSes go on-battery + low; on top, the failsafe-relevant
-# combination "OB + dropped data" is hard to provoke with the
-# dummy. We rely on the same low-battery scenario as Test 22,
-# which the evaluator treats as CRITICAL via trigger_active.
-apply_scenario low-battery UPS1
-apply_scenario low-battery UPS2
+dbg "T24: restart_redundancy_nut_server (both drivers alive, both online)"
+restart_redundancy_nut_server
 
-timeout 30s eneru run --config $E2E_DIR/config-e2e-redundancy.yaml --exit-after-shutdown 2>&1 | tee /tmp/test24.log || true
+timeout 150s eneru run --config "$E2E_DIR/config-e2e-redundancy-short-grace.yaml" --exit-after-shutdown \
+  > /tmp/test24.log 2>&1 &
+ENERU_PID=$!
+trap 'kill "$ENERU_PID" 2>/dev/null || true; restart_redundancy_nut_server >/dev/null 2>&1 || true' EXIT
 
-if ! grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log; then
-  echo "FAIL: expected fail-safe shutdown"
-  tail -40 /tmp/test24.log
+sleep 13
+stop_redundancy_nut_drivers
+
+for _i in $(seq 1 375); do
+  grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log && break
+  sleep 0.2
+done
+kill "$ENERU_PID" 2>/dev/null || true
+wait "$ENERU_PID" 2>/dev/null || true
+trap - EXIT
+restart_redundancy_nut_server
+
+t24_fail() {
+  echo "$1"
+  echo "----- /tmp/test24.log -----"
+  cat /tmp/test24.log
+  dump_redundancy_nut_state "T24 failure"
   exit 1
-fi
-# Restore
-apply_scenario online-charging UPS1
-apply_scenario online-charging UPS2
-echo "PASS: Fail-safe shutdown fired"
+}
+grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test24.log \
+  || t24_fail "FAIL: evaluator did not start"
+# degraded_counts_as=healthy: quorum holds until the SECOND member turns
+# UNKNOWN, so the loss line must show both members unknown.
+grep -qF "quorum LOST (healthy=0, min_healthy=1; UPS1@localhost:3493=unknown, UPS2@localhost:3493=unknown)" /tmp/test24.log \
+  || t24_fail "FAIL: quorum loss was not driven by both members being UNKNOWN"
+grep -q "REDUNDANCY GROUP SHUTDOWN" /tmp/test24.log \
+  || t24_fail "FAIL: expected fail-safe shutdown with both members UNKNOWN"
+echo "PASS: Fail-safe shutdown fired with both members UNKNOWN"
 )
 
 # ======================================================================
@@ -181,7 +229,29 @@ echo "=== Test 25: Cross-group cascade ==="
 apply_scenario low-battery UPS1
 apply_scenario online-charging UPS2
 
-timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log || true
+set +e
+timeout 18s eneru run --config $E2E_DIR/config-e2e-redundancy-cross-group.yaml --exit-after-shutdown 2>&1 | tee /tmp/test25.log
+RC=${PIPESTATUS[0]}
+set -e
+# 124 = still monitoring at the deadline, 0 = a clean --exit-after-shutdown;
+# anything else is a crash or config error, which must not pass as "held".
+if [ "$RC" -ne 124 ] && [ "$RC" -ne 0 ]; then
+  echo "FAIL: eneru exited with code $RC"
+  tail -40 /tmp/test25.log
+  exit 1
+fi
+# Positive anchors: the evaluator ran, and UPS1's critical state was seen
+# (a negative-only check would pass if the daemon never started).
+if ! grep -q "Redundancy group 'rack-1-dual-psu' evaluator started" /tmp/test25.log; then
+  echo "FAIL: evaluator did not start"
+  tail -40 /tmp/test25.log
+  exit 1
+fi
+if ! grep -q "\[E2E UPS1\] .*Trigger condition met (advisory, redundancy group)" /tmp/test25.log; then
+  echo "FAIL: UPS1's low battery was never observed"
+  tail -40 /tmp/test25.log
+  exit 1
+fi
 
 # Redundancy quorum should hold
 if grep -q "rack-1-dual-psu.* quorum LOST" /tmp/test25.log; then

@@ -15,7 +15,10 @@ the planner walks exactly this order so the two cannot silently diverge.
 """
 from typing import Any, Dict, List, Optional
 
-__all__ = ["PHASE_ORDER", "build_shutdown_plan"]
+from eneru.config import NOT_LOCAL_SKIP, single_ups_owns_host
+
+__all__ = ["PHASE_ORDER", "build_shutdown_plan", "remote_phase_groups",
+           "pre_shutdown_label"]
 
 # Canonical phase order — mirrors monitor._execute_shutdown_sequence. Keep in
 # sync (test_shutdown_plan asserts the built plan follows this order).
@@ -56,6 +59,48 @@ def _local_skip(is_local: bool, delegated: bool, enabled: bool) -> Optional[str]
     if not enabled:
         return "disabled"
     return None
+
+
+def remote_phase_groups(servers: List[Any]) -> Dict[str, Any]:
+    """Group remote servers the way ``_shutdown_remote_servers`` walks them.
+
+    Returns ``{"loopbackPre": [...], "phases": [(order, [...]), ...],
+    "loopbackPost": [...]}``: loopback delegates that have pre-shutdown
+    commands drain first, then the regular servers by EFFECTIVE order
+    (``compute_effective_order``, so legacy ``parallel`` behaves exactly as at
+    runtime; one entry per distinct order, ascending, members in config
+    order and shut down in parallel), then every loopback's poweroff last.
+    Disabled servers are left out, as the executor does.
+    """
+    enabled = [s for s in servers if s.enabled]
+    loopbacks = [s for s in enabled if s.is_host_loopback is True]
+    regulars = [s for s in enabled if s.is_host_loopback is not True]
+    grouped: Dict[int, List[Any]] = {}
+    if regulars:
+        from eneru.monitor import compute_effective_order
+        for order, s in compute_effective_order(regulars):
+            grouped.setdefault(order, []).append(s)
+    return {
+        "loopbackPre": [lb for lb in loopbacks
+                        if getattr(lb, "pre_shutdown_commands", None)],
+        "phases": [(order, grouped[order]) for order in sorted(grouped)],
+        "loopbackPost": loopbacks,
+    }
+
+
+def pre_shutdown_label(cmd: Any) -> str:
+    """One pre-shutdown step, short: the action name (plus its compose path
+    or mount list) or the custom command text."""
+    if getattr(cmd, "action", None):
+        label = cmd.action
+        if getattr(cmd, "path", None):
+            label += f" {cmd.path}"
+        mounts = [m.get("path") for m in (getattr(cmd, "mounts", None) or [])
+                  if isinstance(m, dict) and m.get("path")]
+        if mounts:
+            label += f" ({', '.join(mounts)})"
+        return label
+    return getattr(cmd, "command", None) or "?"
 
 
 def build_shutdown_plan(config: Any, *, is_local: bool = True,
@@ -200,7 +245,8 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         steps=[{"label": "Final sync before halt"}] if final_on else []))
 
     # 7) Terminal step — coordinator handoff, or the local host poweroff.
-    handoff_on = False
+    handoff_on = po_on = False
+    po_skip: Optional[str] = None
     if coordinator_mode:
         # The coordinator performs the single host poweroff — a LOCAL-ownership
         # action, so by default only a local group shows the handoff: losing a
@@ -223,9 +269,18 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
             if handoff_on else []))
     else:
         ls = config.local_shutdown
-        # Host poweroff is a LOCAL-ownership action: gate it the same way as the
-        # other local drain phases (a non-local group never powers off this host).
-        po_skip = _local_skip(is_local, delegated, ls.enabled)
+        # Single-UPS runtime (``_execute_shutdown_sequence``): the poweroff is
+        # gated on ``local_shutdown.enabled and not delegated`` and, since 6.2,
+        # on ``single_ups_owns_host`` -- an omitted ``is_local`` still powers the
+        # host off (F-178), only an EXPLICIT ``is_local: false`` keeps it up.
+        # ELI5: the drains ask "is this my kitchen?", the poweroff asks "is the
+        # main switch enabled, and did nobody say this is someone else's
+        # house?"; the plan has to ask the same questions.
+        groups = getattr(config, "ups_groups", None) or []
+        owns_host = single_ups_owns_host(groups[0] if groups else None)
+        po_skip = ("delegated to host" if delegated
+                   else "disabled" if not ls.enabled
+                   else None if owns_host else NOT_LOCAL_SKIP)
         po_on = po_skip is None
         phases.append(_phase(
             "local-poweroff", "Local host poweroff", enabled=po_on,
@@ -239,6 +294,13 @@ def build_shutdown_plan(config: Any, *, is_local: bool = True,
         note = ("Container loopback mode: VM / container / filesystem / poweroff "
                 "actions run on the host via the host-loopback SSH target (see "
                 "Remote servers), not in-process.")
+    elif not coordinator_mode and po_skip == NOT_LOCAL_SKIP:
+        note = ("is_local: false on the only UPS: this host is never powered "
+                "off by it; a trigger only shuts down its remote servers.")
+    elif not is_local and not coordinator_mode and po_on:
+        note = ("Single-UPS mode without is_local: local VM / container / "
+                "filesystem phases are skipped, but this host still powers off "
+                "when a trigger fires.")
     elif not is_local and not (coordinator_mode and handoff_on):
         note = ("Non-local UPS group: only remote-server shutdown runs; local "
                 "VM / container / filesystem / poweroff phases belong to the host "

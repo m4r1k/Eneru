@@ -10,13 +10,16 @@ spec:
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
+    # Pod Security Admission `restricted` requires an explicit seccomp profile.
+    seccompProfile:
+      type: RuntimeDefault
     runAsUser: 10001
     runAsGroup: 10001
     fsGroup: 10001
   containers:
     - name: eneru
       # ISS-053: pin to a released version, not :latest (see remote-deployment.yaml).
-      image: ghcr.io/m4r1k/eneru:6.1.6
+      image: ghcr.io/m4r1k/eneru:6.2.0
       securityContext:
         readOnlyRootFilesystem: true
         allowPrivilegeEscalation: false
@@ -46,16 +49,24 @@ spec:
         limits:
           cpu: "200m"
           memory: "128Mi"
+      # exec probes run on 127.0.0.1, so they use the API's
+      # loopback-reserved connection slots (httpGet comes from the node IP).
       livenessProbe:
-        httpGet:
-          path: /health
-          port: http
+        exec:
+          command:
+            - "python"
+            - "-c"
+            - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/health', timeout=3).read()"
         initialDelaySeconds: 45
+        timeoutSeconds: 5
       readinessProbe:
-        httpGet:
-          path: /ready
-          port: http
+        exec:
+          command:
+            - "python"
+            - "-c"
+            - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9191/ready', timeout=3).read()"
         initialDelaySeconds: 45
+        timeoutSeconds: 5
       volumeMounts:
         - name: config
           mountPath: /etc/ups-monitor/config.yaml

@@ -205,7 +205,7 @@ if ! grep -q "charge -- last 1h" /tmp/test30.log; then
   tail -20 /tmp/test30.log
   exit 1
 fi
-if ! grep -q "y-axis: 0-100%" /tmp/test30.log; then
+if ! grep -q "y-axis: 0% (bottom) to 100% (top)" /tmp/test30.log; then
   echo "FAIL: y-axis label not present"
   tail -20 /tmp/test30.log
   exit 1

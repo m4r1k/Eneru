@@ -61,24 +61,38 @@ else
   exit 1
 fi
 
-# Run multi-UPS Eneru briefly -- UPS1 should trigger shutdown for its group
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test9.log || true
+# Run multi-UPS Eneru -- UPS1 should trigger shutdown for its group only.
+# The coordinator exits once UPS1's (local) group sequence completes.
+set +e
+timeout 180s eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test9.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 0)"
+  cat /tmp/test9.log
+  exit 1
+fi
 
-# Verify UPS1 triggered shutdown
-if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test9.log; then
+# Per-UPS monitor lines carry the "[<display_name>] " prefix (multi_ups.py).
+if grep -q "^.*\[E2E UPS1\] .*Triggering immediate shutdown" /tmp/test9.log; then
   echo "PASS: UPS1 low battery triggered shutdown"
 else
   echo "FAIL: No shutdown triggered for UPS1"
   cat /tmp/test9.log
   exit 1
 fi
-
-# Verify the log shows UPS1 context (prefixed with display name or UPS name)
-if grep -q "E2E UPS1\|UPS1@localhost" /tmp/test9.log; then
-  echo "PASS: Shutdown log correctly identifies UPS1"
-else
-  echo "Note: UPS identification in logs not verified"
+if ! grep -q "Initiating remote shutdown: E2E SSH Target (UPS1)" /tmp/test9.log; then
+  echo "FAIL: UPS1's group did not drain its own remote server"
+  cat /tmp/test9.log
+  exit 1
 fi
+# Isolation: the healthy UPS2 must not have triggered anything.
+if grep -q "\[E2E UPS2\] .*Triggering immediate shutdown" /tmp/test9.log; then
+  echo "FAIL: UPS1's failure cascaded into UPS2's group"
+  cat /tmp/test9.log
+  exit 1
+fi
+echo "PASS: only UPS1's group fired"
 
 echo "PASS: Multi-UPS isolation working correctly"
 )
@@ -99,8 +113,23 @@ rm -f /tmp/eneru-e2e-shutdown-flag*
 apply_scenario online-charging UPS1
 apply_scenario online-charging UPS2
 
-# Run briefly -- should NOT trigger any shutdown
-timeout 5 eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test10.log || true
+# Run briefly -- should NOT trigger any shutdown. Like Test 2, the ONLY
+# acceptable exit is 124 (still monitoring when the timer hit): a crash or
+# config error must not pass as "no false trigger".
+set +e
+timeout 5 eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test10.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 124 = killed by timeout)"
+  cat /tmp/test10.log
+  exit 1
+fi
+if ! grep -q "starting - multi-UPS mode (2 groups)" /tmp/test10.log; then
+  echo "FAIL: multi-UPS coordinator startup line missing"
+  cat /tmp/test10.log
+  exit 1
+fi
 
 if grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED" /tmp/test10.log; then
   echo "FAIL: Shutdown triggered during normal multi-UPS operation!"
@@ -126,27 +155,34 @@ rm -f /tmp/eneru-e2e-shutdown-flag*
 apply_scenario low-battery UPS1
 apply_scenario low-battery UPS2
 
-# Run multi-UPS Eneru -- both groups should trigger shutdown
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test14.log || true
-
-# Verify shutdown was triggered
-if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test14.log; then
-  echo "FAIL: No shutdown triggered during concurrent failure"
+# Run multi-UPS Eneru -- both groups should trigger shutdown. No
+# --exit-after-shutdown here: whichever group finishes first would stop the
+# coordinator and could race the other group's first poll. In dry-run with
+# local_shutdown disabled the daemon keeps monitoring, so run it for a fixed
+# window (RC 124 = still alive) and require BOTH groups' trigger lines.
+set +e
+timeout 15s eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml 2>&1 | tee /tmp/test14.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 124 = still monitoring)"
   cat /tmp/test14.log
   exit 1
 fi
 
-# Verify both UPSes are referenced in the log
-if grep -q "E2E UPS1\|UPS1@localhost" /tmp/test14.log; then
-  echo "PASS: UPS1 shutdown logged"
-else
-  echo "Note: UPS1 identification not verified in logs"
-fi
-
-if grep -q "E2E UPS2\|UPS2@localhost" /tmp/test14.log; then
-  echo "PASS: UPS2 shutdown logged"
-else
-  echo "Note: UPS2 identification not verified in logs"
+for ups in "E2E UPS1" "E2E UPS2"; do
+  if grep -q "\[$ups\] .*Triggering immediate shutdown" /tmp/test14.log; then
+    echo "PASS: $ups group triggered shutdown"
+  else
+    echo "FAIL: $ups group did not trigger during the concurrent failure"
+    cat /tmp/test14.log
+    exit 1
+  fi
+done
+if ! grep -q "Initiating remote shutdown: E2E SSH Target (UPS1)" /tmp/test14.log; then
+  echo "FAIL: UPS1's group did not drain its remote server"
+  cat /tmp/test14.log
+  exit 1
 fi
 
 echo "PASS: Concurrent failure handled correctly"
@@ -174,22 +210,37 @@ UPS2_STATUS=$(upsc UPS2@localhost:3493 ups.status 2>/dev/null)
 echo "UPS1 status: $UPS1_STATUS (should be OL)"
 echo "UPS2 status: $UPS2_STATUS (should be OB)"
 
-# Run multi-UPS Eneru -- UPS2 (non-local) should trigger, UPS1 unaffected
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test15.log || true
-
-# Verify UPS2 triggered shutdown
-if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test15.log; then
-  echo "FAIL: No shutdown triggered for UPS2"
+# Run multi-UPS Eneru -- UPS2 (non-local) should trigger, UPS1 unaffected.
+# The coordinator exits once UPS2's non-local group completes.
+set +e
+timeout 180s eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test15.log
+RC=${PIPESTATUS[0]}
+set -e
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL: eneru exited with code $RC (expected 0)"
   cat /tmp/test15.log
   exit 1
 fi
 
-# Verify UPS2 is identified in shutdown context
-if grep -q "E2E UPS2\|UPS2@localhost" /tmp/test15.log; then
-  echo "PASS: UPS2 correctly triggered shutdown"
-else
-  echo "Note: UPS2 identification not verified in logs"
+if ! grep -q "\[E2E UPS2\] .*Triggering immediate shutdown" /tmp/test15.log; then
+  echo "FAIL: No shutdown triggered for UPS2"
+  cat /tmp/test15.log
+  exit 1
 fi
+# Non-local group: the coordinator exits without touching the local host.
+if ! grep -q "Group E2E UPS2 shutdown complete. Exiting (--exit-after-shutdown)" /tmp/test15.log; then
+  echo "FAIL: UPS2 was not handled as a non-local group"
+  cat /tmp/test15.log
+  exit 1
+fi
+# Isolation: UPS1's group (and its SSH target) must stay untouched.
+if grep -q "\[E2E UPS1\] .*Triggering immediate shutdown" /tmp/test15.log \
+   || grep -q "Initiating remote shutdown: E2E SSH Target (UPS1)" /tmp/test15.log; then
+  echo "FAIL: UPS2's failure drained UPS1's group"
+  cat /tmp/test15.log
+  exit 1
+fi
+echo "PASS: UPS2 correctly triggered only its own group"
 
 echo "PASS: Non-local failure correctly handled"
 )
@@ -211,7 +262,7 @@ apply_scenario low-battery UPS1
 apply_scenario online-charging UPS2
 
 # Run with drain config
-eneru run --config $E2E_DIR/config-e2e-multi-ups-drain.yaml --exit-after-shutdown 2>&1 | tee /tmp/test16.log || true
+timeout 180s eneru run --config $E2E_DIR/config-e2e-multi-ups-drain.yaml --exit-after-shutdown 2>&1 | tee /tmp/test16.log || true
 
 # Verify shutdown was triggered
 if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test16.log; then
@@ -221,7 +272,8 @@ if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdo
 fi
 
 # Verify drain message appears
-if grep -qi "drain" /tmp/test16.log; then
+# Exact coordinator drain line (multi_ups.py), not any "drain" substring.
+if grep -q "Draining all UPS groups" /tmp/test16.log; then
   echo "PASS: Drain message logged"
 else
   echo "FAIL: Drain message not found in logs"
@@ -249,7 +301,7 @@ apply_scenario low-battery UPS1
 apply_scenario online-charging UPS2
 
 # Run with default multi-UPS config (drain=false)
-eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test17.log || true
+timeout 180s eneru run --config $E2E_DIR/config-e2e-multi-ups.yaml --exit-after-shutdown 2>&1 | tee /tmp/test17.log || true
 
 # Verify UPS1 shutdown triggered
 if ! grep -q "SHUTDOWN SEQUENCE\|SHUTDOWN INITIATED\|Triggering immediate shutdown" /tmp/test17.log; then
@@ -336,7 +388,7 @@ rm -f /tmp/eneru-e2e-shutdown-order-flag
 # Trigger shutdown via low battery
 apply_scenario low-battery
 
-eneru run --config config-e2e-shutdown-order.yaml --exit-after-shutdown 2>&1 \
+timeout 180s eneru run --config config-e2e-shutdown-order.yaml --exit-after-shutdown 2>&1 \
   | tee /tmp/test19.log || true
 
 echo ""

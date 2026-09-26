@@ -4,7 +4,7 @@ import shlex
 import shutil
 import subprocess
 import time
-from typing import List
+from typing import List, Tuple
 
 from eneru.utils import run_command
 
@@ -22,6 +22,42 @@ _SYNC_BIN = shutil.which("sync") or "/bin/sync"
 # re-syncs during halt anyway, so abandoning a stuck sync after this many
 # seconds is safe and strictly better than never powering off.
 _SYNC_TIMEOUT_SECONDS = 30
+
+
+def _run_umount(cmd: List[str], timeout: int) -> Tuple[int, str, str]:
+    """Run ``umount`` with a TRUE wall-clock bound (F-099).
+
+    ELI5: asking a dead NFS server to let go of a mount is like knocking on
+    a door nobody will ever open. ``subprocess.run(timeout=)`` knocks, gives
+    up, then waits on the doorstep forever for the door to be answered (it
+    kills the child and BLOCKS reaping it; a umount stuck in D-state never
+    dies). Here we knock, wait at most ``timeout``, and walk away: the child
+    is signalled best-effort and abandoned, and the shutdown moves on to the
+    poweroff, where the kernel detaches the mount anyway.
+
+    Returns ``(exit_code, "", "")`` like ``run_command``: 124 on timeout,
+    127 when ``umount`` can't be started. Output is discarded (reading a
+    pipe from a stuck child would block too).
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, ValueError) as exc:
+        return 127, "", str(exc)
+    deadline = time.monotonic() + max(1, int(timeout or 1))
+    while time.monotonic() < deadline:
+        rc = proc.poll()
+        if rc is not None:
+            return rc, "", ""
+        time.sleep(0.2)
+    rc = proc.poll()
+    if rc is not None:
+        return rc, "", ""
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    return 124, "", "Command timed out"
 
 
 class FilesystemShutdownMixin:
@@ -138,7 +174,7 @@ class FilesystemShutdownMixin:
                 )
                 continue
 
-            exit_code, _, stderr = run_command(cmd, timeout=timeout)
+            exit_code, _, _ = _run_umount(cmd, timeout)
 
             if exit_code == 0:
                 self._log_message(f"  ✅  {mount_point} unmounted successfully")

@@ -1077,6 +1077,40 @@ class TestRetryAndBackoff:
         )
         assert row[0] == "pending"
 
+    @pytest.mark.unit
+    @patch("eneru.notifications.APPRISE_AVAILABLE", True)
+    @patch("eneru.notifications.apprise")
+    def test_stop_halts_drain_of_many_due_rows(self, mock_apprise,
+                                               notification_config,
+                                               registered_store):
+        """F-135: stop() mid-burst must end the drain loop (not ship up to
+        1000 more rows) and must return with the thread actually dead."""
+        sends = []
+
+        def slow_notify(*_a, **_k):
+            sends.append(time.monotonic())
+            time.sleep(0.01)
+            return True
+
+        _patch_apprise(mock_apprise, side_effect=slow_notify)
+        for i in range(300):  # ~3 s of sends: longer than stop()'s 2 s join
+            registered_store.enqueue_notification(f"row-{i}", "info", "general")
+        worker = NotificationWorker(notification_config)
+        worker.start()
+        worker.register_store(registered_store)
+        worker._wakeup_event.set()  # skip the idle 1 s first tick
+        try:
+            assert _wait_until(lambda: len(sends) >= 3)
+            t_stop = time.monotonic()
+            worker.stop()
+            assert not worker._worker_thread.is_alive()
+            # At most the one send already in flight when stop() began.
+            assert len([t for t in sends if t >= t_stop]) <= 1
+            assert len(sends) < 300
+        finally:
+            worker._stop_event.set()
+            worker._worker_thread.join(timeout=5)
+
 
 # ==============================================================================
 # Backoff-map hygiene + bounded due scan (ISS-036)

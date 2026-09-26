@@ -19,9 +19,10 @@ Design:
 
 import curses
 import errno
+import math
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from eneru import config_catalog as cat
@@ -98,6 +99,58 @@ class Row:
     is_default: bool = False
     help: str = ""
     action: str = ""
+    # Option rows only (see EditorModel._option_state): the value differs
+    # from what applies when the key is absent, where the shown value comes
+    # from, and the default as displayed.
+    changed: bool = False
+    source: str = ""  # SOURCE_FILE | SOURCE_DEFAULT | SOURCE_GLOBAL | SOURCE_UPS
+    default_text: str = ""
+    # The effective value itself (what an edit starts from).
+    raw: Any = None
+    # Per-UPS rows (U3): the global value this row inherits or overrides.
+    global_text: str = ""
+    # Global rows (U3): the UPSes/groups that override this key.
+    overridden_by: str = ""
+
+
+# Where an option row's value comes from.
+SOURCE_FILE = "file"
+SOURCE_DEFAULT = "default"
+# Per-UPS override sections only: inherited from the global block, or set
+# for this UPS (group) itself.
+SOURCE_GLOBAL = "global"
+SOURCE_UPS = "ups"
+
+# Per-UPS (per-group) sections the loader merges KEY BY KEY over the global
+# block of the same name (ConfigLoader._parse_multi_ups and
+# _parse_redundancy_groups: every unset key inherits the global value).
+_INHERITING: Dict[str, Tuple[str, ...]] = {
+    "ups": ("triggers", "nut_control", "battery_health", "self_test", "energy"),
+    "redundancy_groups": ("triggers",),
+}
+_GROUP_SPEC = {"ups": cat.UPS_ENTRY_SECTION,
+               "redundancy_groups": cat.REDUNDANCY_SECTION}
+
+_NOT_INHERITED = object()
+
+
+@dataclass
+class OptionState:
+    """The one place a row's (value, default, source, changed) is decided."""
+
+    value: Any
+    default: Any
+    source: str
+    present: bool
+    # Per-UPS rows: the global value that applies without an override.
+    inherited: Any = _NOT_INHERITED
+
+    @property
+    def changed(self) -> bool:
+        # An override always counts: it pins this UPS to its own value.
+        if self.source == SOURCE_UPS:
+            return True
+        return self.present and _differs(self.value, self.default)
 
 
 @dataclass
@@ -111,6 +164,32 @@ class Page:
     # Where the cursor was on this page when a child page was opened, so
     # Esc returns to the same row instead of the top.
     cursor: int = 0
+    # A list item added by A: leaving the page while it still equals
+    # ``template`` (or is empty) removes it again.
+    fresh: bool = False
+    template: Any = None
+    # The document before the add (its YAML text): a discard restores it, so
+    # a list or comment created for the item goes away with it.
+    before_text: str = ""
+    was_modified: bool = False
+
+
+@dataclass
+class SearchHit:
+    """One `/` search result: where the option lives and how to get there."""
+
+    stage: str
+    pages: List[Page]
+    cursor: int
+    row: Row
+    crumbs: str
+    advanced_only: bool = False
+
+    @property
+    def text(self) -> str:
+        note = ("  (advanced option: switches to advanced mode)"
+                if self.advanced_only else "")
+        return f"{self.crumbs}  {self.row.value}{note}"
 
 
 @dataclass
@@ -126,10 +205,61 @@ class Prompt:
     index: int = 0
     error: str = ""
     secret: bool = False
+    # Drawn as a red box: the answer changes what happens in an outage.
+    danger: bool = False
+
+
+DEFAULTS_TITLE = "defaults for all UPSes"
+ORDER_HELP = ("Lower phases shut down first; servers in the same phase shut "
+              "down in parallel. On a server: Left/Right moves it to the "
+              "previous or next phase, Enter opens it.")
+LEGACY_PARALLEL_HELP = (
+    "Legacy ordering key that could not be converted to shutdown_order "
+    "automatically (it is combined with shutdown_order, or is not true/false). "
+    "Set shutdown_order instead: that removes this key.")
+# Rows the cursor skips.
+_PASSIVE = ("heading", "note", "phase")
+
+DRY_RUN_PATH: Tuple[str, str] = ("behavior", "dry_run")
+DRY_RUN_OFF_WARNING = ("Eneru WILL act on power loss: it will shut down VMs, "
+                       "containers, remote servers and this host. Continue?")
+DRY_RUN_ON_WARNING = ("Eneru will only LOG what it would do; nothing is shut "
+                      "down in a real outage. Continue?")
+
+
+def dry_run_warning(new: bool) -> str:
+    """The warning for switching dry-run to ``new``."""
+    return DRY_RUN_ON_WARNING if new else DRY_RUN_OFF_WARNING
+
+
+def _dry_run_of(view: Dict[str, Any]) -> bool:
+    """dry_run as the daemon reads it from a YAML 1.1 view."""
+    behavior = view.get("behavior")
+    value = behavior.get("dry_run") if isinstance(behavior, dict) else None
+    return value if isinstance(value, bool) else cat.BEHAVIOR_SECTION.children[0].default
+
+
+def _differs(value: Any, default: Any) -> bool:
+    """Does ``value`` differ from ``default``? (`""` and null both mean empty;
+    a bool never equals a number)."""
+    a = None if isinstance(value, str) and value == "" else value
+    b = None if isinstance(default, str) and default == "" else default
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is not b
+    return a != b
+
+
+def _noun(spec: Any) -> str:
+    """"Remote server" -> "remote server"; acronyms ("UPS") stay."""
+    title = getattr(spec, "title", "") or "item"
+    return title if title[:2].isupper() else title[0].lower() + title[1:]
 
 
 def _redact_urls(opt: cat.Option, value: Any) -> Any:
-    """Apprise URLs often embed tokens/passwords: never show them raw."""
+    """Apprise URLs and MQTT brokers often embed credentials: never show raw."""
+    if opt.key == "broker" and isinstance(value, str):
+        from eneru.mqtt import _redact_broker
+        return _redact_broker(value)
     if opt.key != "urls":
         return value
     from eneru.utils import redact_apprise_url
@@ -172,9 +302,19 @@ def parse_input(opt: cat.Option, text: str) -> Tuple[bool, Any, str]:
             value = float(raw)
         except ValueError:
             return False, None, f"'{raw}' is not a number"
-    else:
+        # R2-04: float() accepts "nan"/"inf"; neither is a usable setting
+        # (a NaN threshold silently disables its trigger).
+        if not math.isfinite(value):
+            return False, None, f"'{raw}' is not a finite number"
+    elif opt.kind == "secret":
         value = text
+    else:
+        # R2-15: a pasted "UPS@localhost " would otherwise keep its stray
+        # space and every poll would fail. Secrets are kept verbatim.
+        value = raw
     if opt.kind in ("int", "float"):
+        if opt.minimum is not None and opt.minimum_exclusive and value <= opt.minimum:
+            return False, None, f"must be > {opt.minimum:g}"
         if opt.minimum is not None and value < opt.minimum:
             return False, None, f"must be >= {opt.minimum:g}"
         if opt.maximum is not None and value > opt.maximum:
@@ -207,6 +347,9 @@ def _show(path: str, value: Any) -> str:
     if any(word in path.rsplit(".", 1)[-1] for word in _SECRET_KEYS):
         return "********" if value else "(empty)"
     leaf = path.rsplit(".", 1)[-1]
+    if isinstance(value, str) and leaf == "broker":
+        from eneru.mqtt import _redact_broker
+        return _redact_broker(value)
     if isinstance(value, str) and (".urls[" in f".{path}" or leaf == "urls"
                                    or leaf == "webhook_url"):
         from eneru.utils import redact_apprise_url
@@ -268,8 +411,19 @@ class EditorModel:
         # The document as the DAEMON reads it (PyYAML / YAML 1.1). Values are
         # shown and checked from this view, never from ruamel's YAML 1.2 tree.
         self.view: Dict[str, Any] = {}
+        self._order_cache: Tuple[Any, Any, str] = (None, None, "")
         self.reset_stage()
         self.revalidate()
+        # U6: legacy `parallel` becomes the equivalent shutdown_order (in
+        # memory; written on save).
+        self.migration_notice = ""
+        migrated = self.migrate_legacy_parallel()
+        if migrated:
+            self.migration_notice = (
+                f"converted legacy `parallel` on {migrated} server(s) to "
+                "shutdown_order; same order")
+            self.revalidate()
+            self.flash(self.migration_notice + " (written when you save)")
         # Say it up front, not at Save time: a read-only config (e.g. a
         # container bind mount with :ro, or a root-owned file) can be
         # browsed and checked, but not saved.
@@ -289,6 +443,10 @@ class EditorModel:
         return self.stages[self.stage_index]
 
     def reset_stage(self) -> None:
+        # Leaving the stage leaves every page on the stack: an untouched
+        # freshly added item must not survive that either.
+        for page in reversed(self.pages[1:]):
+            self._discard_if_untouched(page)
         title = STAGES[self.stage][0]
         self.pages = [Page(title, "stage", (), self.stage)]
         self.cursor = 0
@@ -355,8 +513,40 @@ class EditorModel:
         self.flash(text, chk.LEVEL_OK)
 
     def changes(self) -> List[str]:
-        """What differs from the file on disk, as the daemon will read it."""
-        return config_changes(self.doc.saved_view(), self.view)
+        """What differs from the file on disk, as the daemon will read it.
+
+        A dry_run change is listed first: it decides whether anything is
+        shut down at all.
+        """
+        lines = config_changes(self.doc.saved_view(), self.view)
+        dotted = ".".join(DRY_RUN_PATH)
+        return sorted(lines, key=lambda ln: not ln[2:].startswith(dotted))
+
+    def dry_run_change(self) -> Optional[str]:
+        """The warning when dry_run differs from the file on disk, else None."""
+        new = _dry_run_of(self.view)
+        if new == _dry_run_of(self.doc.saved_view()):
+            return None
+        return dry_run_warning(new)
+
+    def _guard_dry_run(self, path: Tuple[Any, ...], value: Any,
+                       apply: Callable[[], None]) -> None:
+        """Ask (in red) before ``value`` flips dry_run; otherwise apply.
+
+        Every write path (toggle, prompt, reset with D) funnels through
+        here, so the question can't be skipped by editing another way.
+        """
+        if tuple(path) != DRY_RUN_PATH:
+            apply()
+            return
+        old = _dry_run_of(self.view)
+        new = (cat.BEHAVIOR_SECTION.children[0].default if value is _RESET
+               else bool(value))
+        if new == old:
+            apply()
+            return
+        self.prompt = Prompt("confirm", dry_run_warning(new),
+                             lambda yes: yes and apply(), danger=True)
 
     def row_levels(self, rows: List[Row]) -> Dict[int, str]:
         """Mark the rows a stage finding is about (error beats warning).
@@ -428,9 +618,27 @@ class EditorModel:
             node = node[key]
         return node
 
-    def _option_row(self, base: Tuple[Any, ...], opt: cat.Option,
-                    scalar_key: str = "") -> Row:
+    def _option_state(self, base: Tuple[Any, ...], opt: cat.Option,
+                      scalar_key: str = "") -> OptionState:
+        """Effective value, default, source and "changed" for one option.
+
+        The single place that decides what a row shows; per-UPS inheritance
+        (global vs this UPS) belongs here too, so the `*` mark, the help
+        context and the value always agree.
+        """
         path = base + (opt.key,)
+        glob = self._inherit_from(base)
+        gopt = self._global_option(glob + (opt.key,)) if glob else None
+        if gopt is not None:
+            # U3: mirror the loader. The key set here wins; otherwise the
+            # global block's value (or its default) applies to this UPS.
+            gstate = self._option_state(glob, gopt)
+            if self.doc.has(path):
+                return OptionState(self.vget(path), opt.default, SOURCE_UPS,
+                                   True, gstate.value)
+            return OptionState(gstate.value, opt.default,
+                               SOURCE_GLOBAL if gstate.present else SOURCE_DEFAULT,
+                               False, gstate.value)
         item = self.vget(base) if scalar_key else None
         if scalar_key and not isinstance(item, dict):
             value = item if opt.key == scalar_key else None
@@ -438,19 +646,100 @@ class EditorModel:
         else:
             present = self.doc.has(path)
             value = self.vget(path) if present else opt.default
-        return Row("option", opt.key, path, opt, _fmt_value(opt, value),
-                   is_default=not present, help=opt.help)
+        return OptionState(value, opt.default,
+                           SOURCE_FILE if present else SOURCE_DEFAULT, present)
+
+    # -- global vs per-UPS (U3) ------------------------------------------
+
+    def _inherit_from(self, base: Tuple[Any, ...]) -> Optional[Tuple[Any, ...]]:
+        """The global section path ``base`` inherits from, else None.
+
+        ``("ups", 1, "self_test")`` -> ``("self_test",)``. Only the multi-UPS
+        list layout has per-UPS sections; a single-UPS file keeps one page.
+        """
+        if (len(base) >= 3 and base[0] in _INHERITING
+                and isinstance(base[1], int)
+                and base[2] in _INHERITING[base[0]]
+                and (base[0] != "ups" or self.doc.is_multi_ups())):
+            return tuple(base[2:])
+        return None
+
+    @staticmethod
+    def _global_option(path: Tuple[Any, ...]) -> Optional[cat.Option]:
+        node: Any = cat.root_section(path[0])
+        for key in path[1:]:
+            node = cat.child(node, key) if node is not None else None
+        return node if isinstance(node, cat.Option) else None
+
+    @staticmethod
+    def _group_option(kind: str, rel: Tuple[Any, ...]) -> Optional[cat.Option]:
+        """The per-group option at ``rel`` (e.g. ``("self_test", "enabled")``)."""
+        node: Any = _GROUP_SPEC[kind]
+        for key in rel:
+            node = cat.child(node, key) if node is not None else None
+        return node if isinstance(node, cat.Option) else None
+
+    def _overriders(self, path: Tuple[Any, ...]) -> List[str]:
+        """Names of the UPSes/groups that override the global key ``path``."""
+        names: List[str] = []
+        if not path or not any(path[0] in v for v in _INHERITING.values()):
+            return names
+        for label, base in self._group_paths():
+            if (base and path[0] in _INHERITING[base[0]]
+                    and self._inherit_from(base + path[:1]) is not None
+                    and self._group_option(base[0], path) is not None
+                    and self.doc.has(base + path)):
+                names.append(label.split(" ", 1)[1])
+        return names
+
+    def _override_count(self, base: Tuple[Any, ...], spec: Any) -> int:
+        """How many keys of the per-UPS section at ``base`` are set."""
+        return sum(1 for rel, _opt in cat.iter_options(spec)
+                   if self.doc.has(base + rel))
+
+    @staticmethod
+    def _owner_noun(path: Tuple[Any, ...]) -> str:
+        return "this group" if path and path[0] == "redundancy_groups" else "this UPS"
+
+    def _option_row(self, base: Tuple[Any, ...], opt: cat.Option,
+                    scalar_key: str = "") -> Row:
+        state = self._option_state(base, opt, scalar_key)
+        row = Row("option", opt.key, base + (opt.key,), opt,
+                  _fmt_value(opt, state.value),
+                  is_default=not state.present, help=opt.help,
+                  changed=state.changed, source=state.source,
+                  default_text=_fmt_value(opt, state.default), raw=state.value)
+        if state.inherited is not _NOT_INHERITED:
+            row.global_text = _fmt_value(opt, state.inherited)
+        names = self._overriders(base + (opt.key,))
+        if names:
+            row.overridden_by = (", ".join(names) +
+                                 (" overrides" if len(names) == 1 else " override"))
+        return row
 
     def _section_rows(self, base: Tuple[Any, ...], spec: cat.Section) -> List[Row]:
         rows: List[Row] = []
         for c in spec.children:
             if not cat.has_tier(c, self.mode):
                 continue
+            if (spec is cat.REMOTE_SERVER_SECTION and c.key == "parallel"
+                    and not self.doc.has(base + (c.key,))):
+                # U6: the legacy key is converted on load; don't offer it.
+                continue
             if isinstance(c, cat.Option):
-                rows.append(self._option_row(base, c, spec.scalar_key))
+                row = self._option_row(base, c, spec.scalar_key)
+                if spec is cat.REMOTE_SERVER_SECTION and c.key == "parallel":
+                    row.label = "parallel (legacy)"
+                    row.help = LEGACY_PARALLEL_HELP
+                rows.append(row)
             elif isinstance(c, cat.Section):
-                rows.append(Row("section", f"> {c.title}", base + (c.key,), c,
-                                help=c.help))
+                label = f"> {c.title}"
+                path = base + (c.key,)
+                if len(base) == 2 and self._inherit_from(path) is not None:
+                    n = self._override_count(path, c)
+                    label += (f"  ({n} override{'s' if n != 1 else ''})" if n
+                              else "  (inherits global)")
+                rows.append(Row("section", label, path, c, help=c.help))
             else:
                 items = self.doc.get(base + (c.key,), None)
                 n = len(items) if isinstance(items, list) else 0
@@ -491,6 +780,13 @@ class EditorModel:
     def _scalar_rows(self, base: Tuple[Any, ...], opt: cat.Option) -> List[Row]:
         items = self.doc.get(base, None)
         rows: List[Row] = []
+        glob = self._inherit_from(base[:-1])
+        if glob is not None and not self.doc.has(base):
+            shown = _fmt_value(opt, self._option_state(
+                glob, self._global_option(glob + (opt.key,))).value)
+            rows.append(Row("note", f"Inherits the global list: {shown}. "
+                            f"Adding a value replaces it for "
+                            f"{self._owner_noun(base)}."))
         if isinstance(items, list):
             for i, item in enumerate(items):
                 rows.append(Row("scalar", str(_redact_urls(opt, item)),
@@ -545,7 +841,8 @@ class EditorModel:
         if stage == "safety":
             rows.append(Row("heading", "Behavior"))
             rows += self._section_rows(("behavior",), cat.BEHAVIOR_SECTION)
-            rows.append(Row("heading", "Shutdown triggers (defaults for every UPS)"))
+            rows.append(Row("heading", "Shutdown triggers" + (
+                f" ({DEFAULTS_TITLE})" if self.doc.is_multi_ups() else "")))
             rows += self._section_rows(("triggers",), cat.TRIGGERS_SECTION)
             rows.append(Row("heading", "Local host poweroff"))
             ls_rows = self._section_rows(("local_shutdown",),
@@ -590,8 +887,10 @@ class EditorModel:
             return rows
         if stage == "remote":
             groups = self._group_paths()
+            order = Row("order", "Shutdown order ▸", (), None, help=ORDER_HELP)
             if len(groups) == 1 and groups[0][1] == ():
-                return self._list_rows(("remote_servers",), cat.REMOTE_SERVERS_LIST)
+                return self._list_rows(("remote_servers",),
+                                       cat.REMOTE_SERVERS_LIST) + [order]
             for label, base in groups:
                 items = self.doc.get(base + ("remote_servers",), None)
                 n = len(items) if isinstance(items, list) else 0
@@ -600,7 +899,7 @@ class EditorModel:
                                 cat.REMOTE_SERVERS_LIST,
                                 help="Servers shut down when this group's "
                                 "shutdown starts."))
-            return rows
+            return rows + [order]
         if stage == "redundancy":
             return self._list_rows(("redundancy_groups",), cat.REDUNDANCY_LIST)
         if stage == "notifications":
@@ -633,21 +932,38 @@ class EditorModel:
         if page.kind == "stage":
             return self._stage_rows()
         if page.kind == "section":
-            return self._section_rows(page.path, page.spec)
+            rows = self._section_rows(page.path, page.spec)
+            if (len(page.path) == 3 and self._inherit_from(page.path)
+                    and self._override_count(page.path, page.spec)):
+                owner = self._owner_noun(page.path)
+                rows.append(Row("action", f"✕ Remove all overrides for {owner}",
+                                page.path, page.spec, help="Deletes this "
+                                f"section from {owner} (asks first): every key "
+                                "goes back to the global value.",
+                                action="remove_overrides"))
+            if self.item_page() is not None:
+                noun = _noun(page.spec)
+                rows.append(Row("action", f"✕ Delete this {noun}", page.path,
+                                page.spec, help=f"Removes this {noun} from the "
+                                "file (asks first). D on any row that isn't an "
+                                "option does the same.", action="delete_item"))
+            return rows
         if page.kind == "list":
             return self._list_rows(page.path, page.spec)
+        if page.kind == "order":
+            return self._order_rows()
         return self._scalar_rows(page.path, page.spec)
 
     def selectable(self) -> List[int]:
         return [i for i, r in enumerate(self.rows())
-                if r.kind not in ("heading", "note")]
+                if r.kind not in _PASSIVE]
 
     def current_row(self) -> Optional[Row]:
         rows = self.rows()
         if not rows:
             return None
         self.cursor = max(0, min(self.cursor, len(rows) - 1))
-        if rows[self.cursor].kind in ("heading", "note"):
+        if rows[self.cursor].kind in _PASSIVE:
             sel = self.selectable()
             nxt = [i for i in sel if i > self.cursor]
             self.cursor = nxt[0] if nxt else (sel[-1] if sel else self.cursor)
@@ -666,19 +982,39 @@ class EditorModel:
 
     # -- navigation ---------------------------------------------------
 
+    def item_page(self) -> Optional[Page]:
+        """The current page when it shows one list entry (a server, a UPS)."""
+        page = self.page
+        if page.kind == "section" and page.path and isinstance(page.path[-1], int):
+            return page
+        return None
+
+    def _child_page(self, row: Row) -> Optional[Page]:
+        """The page Enter opens for a section/list/item row (else None)."""
+        if row.kind == "section":
+            title = row.spec.title
+            if (len(row.path) == 1 and self.doc.is_multi_ups()
+                    and any(row.path[0] in v for v in _INHERITING.values())):
+                title = f"{title}: {DEFAULTS_TITLE}"
+            return Page(title, "section", row.path, row.spec)
+        if row.kind == "list":
+            return Page(row.spec.title, "list", row.path, row.spec)
+        if row.kind in ("item", "server"):
+            title = self._item_label(row.spec, self.doc.get(row.path), row.path[-1])
+            return Page(title, "section", row.path, row.spec)
+        if row.kind == "order":
+            return Page("Shutdown order", "order", (), None)
+        return None
+
     def open_row(self) -> None:
         row = self.current_row()
         if row is None:
             return
-        if row.kind == "option":
+        child = self._child_page(row)
+        if child is not None:
+            self._push(child)
+        elif row.kind == "option":
             self.edit_option(row)
-        elif row.kind == "section":
-            self._push(Page(row.spec.title, "section", row.path, row.spec))
-        elif row.kind == "list":
-            self._push(Page(row.spec.title, "list", row.path, row.spec))
-        elif row.kind == "item":
-            title = self._item_label(row.spec, self.doc.get(row.path), row.path[-1])
-            self._push(Page(title, "section", row.path, row.spec))
         elif row.kind == "scalar":
             self.edit_scalar(row)
         elif row.kind == "add":
@@ -693,21 +1029,62 @@ class EditorModel:
 
     def back(self) -> None:
         if len(self.pages) > 1:
-            self.pages.pop()
+            page = self.pages.pop()
             self.cursor = self.pages[-1].cursor
+            self._discard_if_untouched(page)
+
+    def _discard_if_untouched(self, page: Page) -> None:
+        """Drop a freshly added item nobody filled in (U1).
+
+        ELI5: taking an empty form from the pile and walking away shouldn't
+        leave a blank form in the filing cabinet.
+        """
+        if not page.fresh:
+            return
+        page.fresh = False
+        current = self.doc.to_plain_at(page.path)
+        if current not in (page.template, {}, None):
+            return
+        if not self.doc.restore(page.before_text):
+            self.doc.delete(page.path)
+        if self.doc.dumps() == page.before_text:
+            # Byte-identical to before the add: nothing is left to save.
+            self.doc.modified = page.was_modified
+        self.probe_findings = []
+        self.revalidate()
+        self.flash(f"discarded empty {_noun(page.spec)}")
 
     # -- editing ------------------------------------------------------
 
     def _write(self, path: Tuple[Any, ...], value: Any, label: str, *,
                secret: bool = False) -> None:
+        self._guard_dry_run(path, value, lambda: self._apply_write(
+            path, value, label, secret=secret))
+
+    def _apply_write(self, path: Tuple[Any, ...], value: Any, label: str, *,
+                     secret: bool = False) -> None:
         if value is _RESET:
             if self.doc.delete(path):
-                self._edited(f"{label} reset to its default")
+                if self._inherit_from(path[:-1]) is not None:
+                    self._prune_empty(path)
+                    self._edited(f"{label} back to global")
+                else:
+                    self._edited(f"{label} reset to its default")
             return
         self._write_through_scalar(path, value)
+        if (path[-1] == "shutdown_order" and len(path) >= 2
+                and self.doc.has(path[:-1] + ("parallel",))):
+            # U6: the two keys are mutually exclusive; the new one wins.
+            self.doc.delete(path[:-1] + ("parallel",))
         # Never echo a password into the status bar (screen shares, tmux
         # logs, PTY recordings): the input line and the row are masked too.
-        shown = "********" if secret and value else _fmt_value_generic(value)
+        if secret and value:
+            shown = "********"
+        elif label == "broker" and isinstance(value, str):
+            from eneru.mqtt import _redact_broker
+            shown = _redact_broker(value)
+        else:
+            shown = _fmt_value_generic(value)
         self._edited(f"{label} = {shown}")
 
     def _write_through_scalar(self, path: Tuple[Any, ...], value: Any) -> None:
@@ -727,6 +1104,10 @@ class EditorModel:
         opt: cat.Option = row.spec
         path = row.path
         current = self.vget(path)
+        if row.source == SOURCE_GLOBAL:
+            # U3: an inherited row starts from the global value; the edit
+            # becomes an override for this UPS only.
+            current = row.raw
         if opt.kind == "bool":
             base = current if isinstance(current, bool) else opt.default
             self._write(path, not bool(base), opt.key)
@@ -787,6 +1168,10 @@ class EditorModel:
                 raise ValueError(err)
             self._write(path, value, opt.key, secret=opt.kind == "secret")
         hint = " (empty = default)" if not opt.nullable else " (empty = unset)"
+        if self._inherit_from(path[:-1]) is not None:
+            owner = self._owner_noun(path)
+            hint = (f" (empty = unset for {owner})" if opt.nullable
+                    else " (empty = back to global)")
         self.prompt = Prompt("text", f"{opt.key}{hint}", done, buffer=start,
                              cursor=len(start), secret=opt.kind == "secret")
 
@@ -838,16 +1223,71 @@ class EditorModel:
             self.prompt = Prompt("text", f"new {opt.key} value", done)
             return
         spec: cat.ListSection = row.spec
+        if spec.item.scalar_key:
+            self._add_scalar_item(row, spec)
+            return
+        before_text, was_modified = self.doc.dumps(), self.doc.modified
         if not self.doc.has(row.path):
             self.doc.set(row.path, [], comment_lookup=cat.help_for_path)
         new = {k: v for k, v in spec.new_item}
         if spec is cat.UPS_LIST and not self.doc.get(("ups",)):
             new["is_local"] = True
         idx = self.doc.append(row.path, new)
-        self._edited(f"added {spec.item.title.lower()}")
+        self._edited(f"added {_noun(spec.item)} (Esc on an untouched one "
+                     "discards it)")
         path = row.path + (idx,)
         self._push(Page(self._item_label(spec.item, self.doc.get(path), idx),
-                        "section", path, spec.item))
+                        "section", path, spec.item, fresh=True,
+                        template=self.doc.to_plain_at(path),
+                        before_text=before_text,
+                        was_modified=was_modified))
+
+    def _add_scalar_item(self, row: Row, spec: cat.ListSection) -> None:
+        """A on a list whose item is one value (a mount, a compose file).
+
+        Ask for the value right away; Esc adds nothing. The new entry uses
+        the form the list already uses: a bare string unless every existing
+        entry is a mapping.
+        """
+        key = spec.item.scalar_key
+        opt = cat.child(spec.item, key)
+
+        def done(text: Any) -> None:
+            _ok, value, _err = parse_input(opt, text)  # a str: always ok
+            if value is _RESET or value is None:
+                raise ValueError(f"{key} cannot be empty (Esc cancels)")
+            existing = self.doc.get(row.path, None)
+            items = existing if isinstance(existing, list) else []
+            as_map = bool(items) and all(isinstance(i, dict) for i in items)
+            if not self.doc.has(row.path):
+                self.doc.set(row.path, [], comment_lookup=cat.help_for_path)
+            idx = self.doc.append(row.path, {key: value} if as_map else value)
+            self._edited(f"added {_noun(spec.item)} {value}")
+            for i, r in enumerate(self.rows()):
+                if r.path == row.path + (idx,):
+                    self.cursor = i
+        example = f", e.g. {opt.example}" if opt.example else ""
+        self.prompt = Prompt("text", f"new {_noun(spec.item)} {key}{example}",
+                             done)
+
+    def request_delete_item(self, page: Page) -> None:
+        """Delete the list entry ``page`` shows, after a confirm (U1)."""
+        noun = _noun(page.spec)
+        label = self._item_label(page.spec, self.doc.get(page.path, None),
+                                 page.path[-1])
+
+        def done(yes: Any) -> None:
+            if not yes:
+                return
+            self.doc.delete(page.path)
+            # Leave every page inside the deleted entry; nothing to discard
+            # there any more.
+            n = len(page.path)
+            while len(self.pages) > 1 and self.pages[-1].path[:n] == page.path:
+                self.pages.pop()
+            self.cursor = self.pages[-1].cursor
+            self._edited(f"deleted {noun} '{label}'")
+        self.prompt = Prompt("confirm", f"Delete this {noun} '{label}'?", done)
 
     def delete_current(self) -> None:
         row = self.current_row()
@@ -860,12 +1300,72 @@ class EditorModel:
                     self._edited(f"deleted {row.label}")
             self.prompt = Prompt("confirm", f"Delete '{row.label}'?", done)
         elif row.kind == "option":
-            if self.doc.delete(row.path):
-                self._edited(f"{row.label} removed (default applies)")
-            else:
-                self.flash(f"{row.label} already uses its default")
+            def reset() -> None:
+                if row.source == SOURCE_UPS:
+                    self.doc.delete(row.path)
+                    self._prune_empty(row.path)
+                    self._edited(f"{row.label} back to global")
+                elif self.doc.delete(row.path):
+                    self._edited(f"{row.label} removed (default applies)")
+                else:
+                    self.flash(f"{row.label} already uses its default")
+            self._guard_dry_run(row.path, _RESET, reset)
+        elif row.kind == "action" and row.action == "remove_overrides":
+            self.request_remove_overrides(row.path)
+        elif self.item_page() is not None:
+            self.request_delete_item(self.page)
         else:
             self.flash("nothing to delete here")
+
+    def delete_hint(self, row: Optional[Row]) -> str:
+        """What D does on ``row`` ("" = nothing); drives key bar and help."""
+        if row is None:
+            return ""
+        if row.kind == "option":
+            if row.source == SOURCE_UPS:
+                return "remove override"
+            return "" if row.is_default else "reset"
+        if row.kind in ("item", "scalar"):
+            return "delete"
+        if row.kind == "action" and row.action == "remove_overrides":
+            return "remove overrides"
+        if self.item_page() is not None:
+            return f"delete {_noun(self.page.spec)}"
+        return ""
+
+    def row_context(self, row: Optional[Row]) -> str:
+        """One dim line under the help: the default, the `*` legend and
+        where D applies."""
+        if row is None:
+            return ""
+        parts: List[str] = []
+        if row.kind == "option" and row.global_text:
+            owner = self._owner_noun(row.path)
+            if self.mode == MODE_ADVANCED:
+                parts.append(f"default: {row.default_text}")
+                parts.append(f"global: {row.global_text}")
+            if row.source == SOURCE_UPS:
+                parts.append(f"* = override for {owner}")
+                parts.append("D removes it (back to global)")
+            else:
+                parts.append(f"editing sets an override for {owner} only")
+        elif row.kind == "option":
+            if self.mode == MODE_ADVANCED:
+                parts.append(f"default: {row.default_text}")
+            if row.overridden_by:
+                parts.append(row.overridden_by)
+            parts.append("* = changed from default")
+            if not row.is_default:
+                parts.append("D resets it")
+        elif row.kind == "server":
+            parts.append("Left/Right: previous/next phase   Enter: open")
+        elif row.kind == "item":
+            parts.append(f"D deletes this {_noun(row.spec)}")
+        elif row.kind == "scalar":
+            parts.append("D deletes this value")
+        elif self.item_page() is not None:
+            parts.append(f"D deletes this {_noun(self.page.spec)}")
+        return "   ".join(parts)
 
     def move_item(self, delta: int) -> None:
         row = self.current_row()
@@ -876,6 +1376,221 @@ class EditorModel:
             return
         self.cursor += delta
         self._edited("order changed (shutdown runs top to bottom)")
+
+    def _prune_empty(self, path: Tuple[Any, ...]) -> None:
+        """After an override is removed, drop the per-UPS mappings it leaves
+        empty (``self_test: {}``), up to the override section itself."""
+        parent = tuple(path[:-1])
+        while len(parent) >= 3 and self._inherit_from(parent) is not None:
+            node = self.doc.get(parent, None)
+            if not (isinstance(node, dict) and not node):
+                return
+            self.doc.delete(parent)
+            parent = parent[:-1]
+
+    def request_remove_overrides(self, path: Tuple[Any, ...]) -> None:
+        """Delete a whole per-UPS override section, after a confirm (U3)."""
+        n = self._override_count(path, self.page.spec)
+        owner = self._owner_noun(path)
+        title = self.page.spec.title
+
+        def done(yes: Any) -> None:
+            if yes:
+                self.doc.delete(path)
+                self._edited(f"removed {n} override(s): {title} is back to "
+                             "global")
+        self.prompt = Prompt("confirm", f"Remove all {n} override(s) for "
+                             f"{owner} in '{title}'?", done)
+
+    # -- legacy `parallel` (U6) -------------------------------------------
+
+    def migrate_legacy_parallel(self) -> int:
+        """Rewrite legacy ``parallel`` as the equivalent ``shutdown_order``.
+
+        ELI5: the old tickets said "go before everyone" (parallel: false);
+        the new ones carry a queue number. Every ticket is renumbered so the
+        queue is exactly the same, then the old stamp is removed. Returns the
+        number of servers whose ``parallel`` was removed.
+        """
+        total = 0
+        for _label, base in self._group_paths():
+            path = base + ("remote_servers",)
+            orders = self._parallel_as_orders(self.vget(path))
+            if orders is None:
+                continue
+            servers = self.vget(path)
+            for i, entry in enumerate(servers):
+                new = orders.get(i)
+                old = entry.get("shutdown_order")
+                if new is not None and (type(old) is not int or old != new):
+                    # Bulk rewrite: no per-key help comment (it would add
+                    # one block per server).
+                    self.doc.set(path + (i, "shutdown_order"), new)
+                if "parallel" in entry:
+                    self.doc.delete(path + (i, "parallel"))
+                    total += 1
+        return total
+
+    @staticmethod
+    def _parallel_as_orders(servers: Any) -> Optional[Dict[int, int]]:
+        """{index: new shutdown_order} that keeps the phases identical, or
+        None when there is no legacy ``parallel`` or it can't be converted.
+
+        The grouping comes from the runtime's own ``compute_effective_order``
+        (a unique negative order per ``parallel: false`` server, 0 for the
+        default batch, explicit orders as is), ranked to 1..K. Loopback
+        delegates are left alone (their order is ignored at runtime).
+        """
+        if not isinstance(servers, list) or not servers or not all(
+                isinstance(s, dict) for s in servers):
+            return None
+        legacy = [s for s in servers if "parallel" in s]
+        if not legacy:
+            return None
+        for s in servers:
+            so = s.get("shutdown_order")
+            if "parallel" in s and (so is not None or not (
+                    s["parallel"] is None or isinstance(s["parallel"], bool))):
+                return None  # mutually exclusive / not a bool: leave it
+            if so is not None and (type(so) is not int or so < 1):
+                return None
+        from eneru.config import ConfigLoader
+        from eneru.monitor import compute_effective_order
+        try:
+            parsed = ConfigLoader._parse_remote_servers(servers)
+        except Exception:  # noqa: BLE001 - the checker reports the shape
+            return None
+        regular = [(i, s) for i, s in enumerate(parsed)
+                   if s.is_host_loopback is not True]
+        effective = compute_effective_order([s for _i, s in regular])
+        if all(order >= 0 for order, _s in effective):
+            # Only `parallel: true`/null: dropping it keeps the batch at 0.
+            return {}
+        rank = {o: n for n, o in enumerate(sorted({o for o, _s in effective}), 1)}
+        return {i: rank[order] for (i, _s), (order, _s2) in zip(regular, effective)}
+
+    # -- shutdown order page (U7) -----------------------------------------
+
+    def _order_tree(self) -> Tuple[Any, str]:
+        """``config_check.shutdown_order_tree`` for the current view (cached
+        per view: the rows are rebuilt many times per key press)."""
+        if self._order_cache[0] is not self.view:
+            config, findings = chk.build_config(self.view)
+            tree = chk.shutdown_order_tree(config) if config is not None else None
+            error = "; ".join(f.message for f in findings[:2])
+            self._order_cache = (self.view, tree, error)
+        return self._order_cache[1], self._order_cache[2]
+
+    def _order_base(self, group: Dict[str, Any]) -> Tuple[Any, ...]:
+        if group["kind"] == "redundancy":
+            return ("redundancy_groups", group["index"])
+        return ("ups", group["index"]) if self.doc.is_multi_ups() else ()
+
+    def _order_rows(self) -> List[Row]:
+        tree, error = self._order_tree()
+        if tree is None:
+            return [Row("note", "Fix the config errors first to see the "
+                        f"shutdown order ({error}).")]
+        rows: List[Row] = []
+        for group in tree:
+            if len(tree) > 1:
+                head = "UPS" if group["kind"] == "ups" else "Redundancy group"
+                rows.append(Row("heading", f"{head} {group['group']} "
+                                f"({group['role']})"))
+            base = self._order_base(group)
+            if not group["phases"]:
+                rows.append(Row("phase", "  Nothing to shut down: notify only."))
+            remote_n = 0
+            for phase in group["phases"]:
+                n, kind = phase["number"], phase["kind"]
+                if kind == "local":
+                    text = (f"{n:>2}. This host: {' -> '.join(phase['steps'])}"
+                            "   (local, always first)")
+                elif kind == "loopback-pre":
+                    text = f"{n:>2}. Loopback pre-actions, before any other server"
+                elif kind == "remote":
+                    remote_n += 1
+                    text = (f"{n:>2}. Phase {remote_n}" +
+                            ("  ── in parallel ──" if phase["parallel"] else "")
+                            + f"   ({phase['title']})")
+                elif kind == "loopback-poweroff":
+                    text = f"{n:>2}. This host powers off via the loopback delegate"
+                else:
+                    text = f"{n:>2}. {phase['title'][:1].upper()}{phase['title'][1:]}" \
+                           "   (always last)"
+                rows.append(Row("phase", text))
+                for server in phase["servers"]:
+                    rows.append(self._order_server_row(
+                        base, server, "move" if kind == "remote" else "loopback"))
+            # Servers the plan leaves out are the disabled ones (the
+            # executor skips them); list them so they can still be opened.
+            placed = {sv["index"] for ph in group["phases"] for sv in ph["servers"]}
+            entries = self.vget(base + ("remote_servers",))
+            skipped = [(i, e) for i, e in enumerate(entries or [])
+                       if i not in placed]
+            if skipped:
+                rows.append(Row("phase", "    Skipped (not enabled):"))
+            for i, entry in skipped:
+                rows.append(self._order_server_row(base, {
+                    "index": i, "name": entry.get("name") or entry.get("host"),
+                    "target": f"{entry.get('user', '')}@{entry.get('host', '')}"},
+                    "disabled"))
+        return rows
+
+    @staticmethod
+    def _order_server_row(base: Tuple[Any, ...], server: Dict[str, Any],
+                          how: str) -> Row:
+        return Row("server", f"      {server['name']}  ({server['target']})",
+                   base + ("remote_servers", server["index"]),
+                   cat.REMOTE_SERVER_SECTION, help=ORDER_HELP, action=how)
+
+    def move_phase(self, delta: int) -> None:
+        """Left/Right on the order page: move a server one phase earlier or
+        later (a new phase at either end), renumber 1..K and write only the
+        servers whose shutdown_order changes."""
+        row = self.current_row()
+        if row is None or row.kind != "server":
+            return
+        if row.action == "loopback":
+            self.flash("a loopback delegate always drains first and powers "
+                       "off last; its order can't change")
+            return
+        if row.action == "disabled":
+            self.flash("this server is disabled (skipped); enable it first")
+            return
+        tree, _error = self._order_tree()
+        base, idx = row.path[:-2], row.path[-1]
+        group = next(g for g in tree if self._order_base(g) == base)
+        phases = [[s["index"] for s in ph["servers"]]
+                  for ph in group["phases"] if ph["kind"] == "remote"]
+        at = next(n for n, ph in enumerate(phases) if idx in ph)
+        target = at + delta
+        if not 0 <= target < len(phases) and len(phases[at]) == 1:
+            self.flash("already on its own in the "
+                       f"{'first' if delta < 0 else 'last'} phase")
+            return
+        phases[at].remove(idx)
+        if target < 0:
+            phases.insert(0, [idx])
+        elif target >= len(phases):
+            phases.append([idx])
+        else:
+            phases[target].append(idx)
+        phases = [ph for ph in phases if ph]
+        path = base + ("remote_servers",)
+        servers = self.vget(path)
+        for number, members in enumerate(phases, 1):
+            for i in members:
+                old = servers[i].get("shutdown_order")
+                if type(old) is not int or old != number:
+                    self.doc.set(path + (i, "shutdown_order"), number)
+                if "parallel" in servers[i]:
+                    self.doc.delete(path + (i, "parallel"))
+        new_phase = next(n for n, ph in enumerate(phases, 1) if idx in ph)
+        self._edited(f"{row.label.strip()} -> phase {new_phase}")
+        for i, r in enumerate(self.rows()):
+            if r.kind == "server" and r.path == row.path:
+                self.cursor = i
 
     # -- actions ------------------------------------------------------
 
@@ -901,6 +1616,10 @@ class EditorModel:
             self._schedule("Running every live check...", self._check_all)
         elif action == "save":
             self.request_save()
+        elif action == "delete_item" and self.item_page() is not None:
+            self.request_delete_item(self.page)
+        elif action == "remove_overrides":
+            self.request_remove_overrides(row.path)
 
     def _schedule(self, busy: str, fn: Callable[[], None]) -> None:
         self.busy_text = busy
@@ -967,7 +1686,7 @@ class EditorModel:
         page = self.page
         spec = page.spec if page.kind == "section" else None
         row = self.current_row()
-        if row is not None and row.kind == "item":
+        if row is not None and row.kind in ("item", "server"):
             spec, path = row.spec, row.path
         else:
             path = page.path
@@ -985,6 +1704,18 @@ class EditorModel:
 
     def request_save(self) -> None:
         self.revalidate()
+        warning = self.dry_run_change() if self.doc.existed else None
+        if warning:
+            # Whatever path got it there (toggle, reset, typed YAML), a save
+            # that flips dry_run against the file on disk asks once more.
+            self.prompt = Prompt(
+                "confirm", f"Saving changes behavior.dry_run to "
+                f"{'on' if _dry_run_of(self.view) else 'off'}. {warning}",
+                lambda yes: yes and self._request_save_checked(), danger=True)
+            return
+        self._request_save_checked()
+
+    def _request_save_checked(self) -> None:
         errors = sum(1 for f in self.findings if f.level == chk.LEVEL_ERROR)
         if errors:
             self.prompt = Prompt(
@@ -1015,10 +1746,115 @@ class EditorModel:
                     in (errno.EACCES, errno.EPERM, errno.EROFS) else "")
             self.flash(f"Save failed: {exc}.{hint}", chk.LEVEL_ERROR)
             return
+        self.migration_notice = ""
         backup = self.doc.last_backup
         where = f" (previous version: {backup})" if backup else ""
         self.flash(f"Saved {n_changes} change(s) to {path}{where}. {reload_hint()}",
                    chk.LEVEL_OK)
+
+    # -- search (U5) ----------------------------------------------------
+
+    def _walk(self, mode: str) -> List[SearchHit]:
+        """Every option row reachable in ``mode``, with the page stack that
+        shows it. Uses the real row builders, so navigation can't drift."""
+        saved = (self.mode, self.stage_index, self.pages, self.cursor)
+        hits: List[SearchHit] = []
+        try:
+            self.mode = mode
+            for i, stage in enumerate(self.stages):
+                if stage == "review":
+                    continue
+                self.stage_index = i
+                self.pages = [Page(STAGES[stage][0], "stage", (), stage)]
+                self._walk_page(hits, [STAGES[stage][0]])
+        finally:
+            self.mode, self.stage_index, self.pages, self.cursor = saved
+        return hits
+
+    def _walk_page(self, hits: List[SearchHit], trail: List[str]) -> None:
+        heading = ""
+        for idx, row in enumerate(self.rows()):
+            if row.kind == "heading":
+                heading = row.label.split(" (")[0]
+                continue
+            here = trail + ([heading] if heading else [])
+            if row.kind in ("option", "order"):
+                hits.append(SearchHit(self.stage, [replace(p) for p in self.pages],
+                                      idx, row, " › ".join(here + [row.label])))
+                continue
+            child = self._child_page(row)
+            if child is None:
+                continue
+            self.pages[-1].cursor = idx
+            self.pages.append(child)
+            self._walk_page(hits, here + [child.title])
+            self.pages.pop()
+
+    def search(self, query: str) -> List[SearchHit]:
+        """Options whose key, label or help match every word of ``query``.
+
+        Key matches rank first. In basic mode, options that only advanced
+        mode shows come last, flagged: picking one switches modes.
+        """
+        words = _search_words(query)
+        if not words:
+            return []
+        joined = "_".join(words)
+
+        def rank(hit: SearchHit) -> Optional[int]:
+            key = (hit.row.spec.key if hit.row.spec is not None
+                   else hit.row.label).lower()
+            section = hit.crumbs.rsplit(" › ", 2)[-2]
+            text = " ".join(_search_words(
+                f"{key} {hit.row.label} {hit.row.help} {section}"))
+            if not all(w in text for w in words):
+                return None
+            if key == joined:
+                return 0
+            return 1 if joined in key else 2
+
+        hits = self._walk(self.mode)
+        if self.mode == MODE_BASIC:
+            seen = {h.row.path for h in hits}
+            for hit in self._walk(MODE_ADVANCED):
+                if hit.row.path not in seen:
+                    hit.advanced_only = True
+                    hits.append(hit)
+                    seen.add(hit.row.path)
+        ranked: List[Tuple[int, int, SearchHit]] = []
+        for n, hit in enumerate(hits):
+            r = rank(hit)
+            if r is not None:
+                ranked.append((r + (10 if hit.advanced_only else 0), n, hit))
+        return [h for _, _, h in sorted(ranked, key=lambda t: (t[0], t[1]))]
+
+    def start_search(self) -> None:
+        """`/`: type a query, pick a result, land on its row."""
+        def done(text: Any) -> None:
+            query = str(text).strip()
+            if not query:
+                return
+            hits = self.search(query)[:SEARCH_LIMIT]
+            if not hits:
+                raise ValueError(f"nothing matches '{query}'")
+            prompt = Prompt("choice", f"{len(hits)} match(es) for '{query}' "
+                            "(Enter goes there, Esc cancels)",
+                            lambda _choice: self.go_to(hits[prompt.index]),
+                            options=[h.text for h in hits])
+            self.prompt = prompt
+        self.prompt = Prompt("text", "Search options (key, label or help)", done)
+
+    def go_to(self, hit: SearchHit) -> None:
+        """Navigate to a search hit: mode, stage, page stack, cursor."""
+        self.reset_stage()  # discards an untouched fresh item first
+        if hit.advanced_only:
+            self.mode = MODE_ADVANCED
+        self.stage_index = self.stages.index(hit.stage)
+        self._override_stage = None
+        self.review_scroll = 0
+        self.pages = [replace(p) for p in hit.pages]
+        self.cursor = hit.cursor
+        self.flash(("advanced mode: " if hit.advanced_only else "") + hit.crumbs)
 
     def request_quit(self) -> None:
         if not self.doc.modified:
@@ -1049,6 +1885,24 @@ def reload_hint() -> str:
         return ("Apply with `docker kill -s HUP <container>` (hot reload) or "
                 "a restart.")
     return "Apply with `systemctl reload eneru` or a restart."
+
+
+SEARCH_LIMIT = 50
+
+
+def _search_words(text: str) -> List[str]:
+    """Lower-case words; `-` and `_` split words ("self-test", "dry_run")."""
+    return text.lower().replace("-", " ").replace("_", " ").split()
+
+
+def source_tag(row: Row) -> str:
+    """The dim/bright tag after an option's value: where it comes from."""
+    if row.source == SOURCE_UPS:
+        return ("(this group)" if row.path and row.path[0] == "redundancy_groups"
+                else "(this UPS)")
+    if row.source == SOURCE_GLOBAL:
+        return "(global)"
+    return "(default)" if row.is_default else ""
 
 
 def _fmt_value_generic(value: Any) -> str:
@@ -1182,7 +2036,10 @@ def handle_key(model: EditorModel, key: int) -> None:
         _handle_prompt(model, key)
         return
     model.message = ""
-    if key in (curses.KEY_UP, ord("k")):
+    if (model.page.kind == "order" and key in (
+            curses.KEY_LEFT, curses.KEY_RIGHT, ord("<"), ord(">"))):
+        model.move_phase(-1 if key in (curses.KEY_LEFT, ord("<")) else 1)
+    elif key in (curses.KEY_UP, ord("k")):
         model.move(-1)
     elif key in (curses.KEY_DOWN, ord("j")):
         model.move(1)
@@ -1217,6 +2074,8 @@ def handle_key(model: EditorModel, key: int) -> None:
         model.move_item(1)
     elif key in (ord("m"), ord("M")):
         model.set_mode(MODE_ADVANCED if model.mode == MODE_BASIC else MODE_BASIC)
+    elif key == ord("/"):
+        model.start_search()
     elif key in (ord("s"), ord("S")):
         model.request_save()
     elif key in (ord("q"), ord("Q")):
@@ -1340,18 +2199,30 @@ def _draw_rows(win, model: EditorModel, x: int, top: int, bottom: int,
             for k, line in enumerate(wrap(row.label, width - 4)[:2]):
                 safe_addstr(win, y + k, x + 2, line, gray)
             continue
+        if row.kind == "phase":
+            safe_addstr(win, y, x + 1, truncate_to_width(row.label, width - 2),
+                        gray | curses.A_BOLD)
+            continue
         mark = marks.get(idx)
         if mark:
             safe_addstr(win, y, x, "x" if mark == chk.LEVEL_ERROR else "!",
                         curses.color_pair(C_STATUS_OB if mark == chk.LEVEL_ERROR
                                           else C_BADGE_WARN) | curses.A_BOLD)
+        if row.kind == "option" and row.changed:
+            safe_addstr(win, y, x + 1, "*",
+                        curses.color_pair(C_GOLD_KEY) | curses.A_BOLD)
         label = row.label
         safe_addstr(win, y, x + 2, truncate_to_width(label, label_w
                     if row.kind == "option" else width - 4),
                     attr | (curses.A_BOLD if row.kind != "option" else 0))
         if row.kind == "option":
-            value = row.value + ("  (default)" if row.is_default else "")
+            tag = source_tag(row)
+            value = row.value + (f"  {tag}" if tag else "")
+            if row.overridden_by:
+                value += f"   ({row.overridden_by})"
             vattr = attr | (curses.A_DIM if row.is_default and not selected else 0)
+            if row.source == SOURCE_UPS:
+                vattr = attr | curses.A_BOLD
             safe_addstr(win, y, x + 3 + label_w,
                         truncate_to_width(value, width - label_w - 5), vattr)
 
@@ -1371,12 +2242,18 @@ def _draw_review(win, model: EditorModel, x: int, top: int, bottom: int,
     changes = model.changes()
     lines = [f"Changes not yet saved ({len(changes)}):" if model.doc.modified
              else f"Changes since the file was loaded ({len(changes)}):"]
+    warning = model.dry_run_change()
+    if warning:
+        lines.append(f"  ! {warning.replace(' Continue?', '')}")
+    if model.migration_notice:
+        lines.append(f"  i {model.migration_notice} (written when you save)")
     lines += [f"  {c}" for c in changes] or ["  (none)"]
     lines += ["", "What happens on power loss:"] + [f"  {ln}" for ln in model.plan]
     wrapped: List[str] = []
     for ln in lines:
         wrapped.extend(wrap(ln, width - 4))
     wrapped = wrapped[model.review_scroll:]
+    dry_run_key = ".".join(DRY_RUN_PATH)
     for ln in wrapped:
         if y >= bottom:
             break
@@ -1384,6 +2261,8 @@ def _draw_review(win, model: EditorModel, x: int, top: int, bottom: int,
         attr = gray | bold
         if ln.startswith(("  + ", "  - ", "  ~ ")):
             attr = curses.color_pair(C_GOLD_BG)  # changed options stand out
+        if ln.startswith("  ! ") or ln[4:].startswith(dry_run_key):
+            attr = curses.color_pair(C_STATUS_OB) | curses.A_BOLD
         safe_addstr(win, y, x + 2, ln, attr)
         y += 1
 
@@ -1403,7 +2282,11 @@ def _draw_bottom(win, model: EditorModel, x: int, top: int, bottom: int,
     for line in wrap(help_text, width - 4)[:3]:
         safe_addstr(win, y, x + 2, line, gold)
         y += 1
-    y = top + 3
+    context = model.row_context(row)
+    if context:
+        safe_addstr(win, top + 3, x + 2, truncate_to_width(context, width - 4),
+                    curses.color_pair(C_GOLD_DIM))
+    y = top + 4
     findings = (model.findings + model.probe_findings
                 if model.stage == "review"
                 else model.stage_findings(model.stage))
@@ -1429,6 +2312,23 @@ def _draw_bottom(win, model: EditorModel, x: int, top: int, bottom: int,
                     f"+{len(findings) - len(shown)} more", gold | curses.A_BOLD)
 
 
+def keybar_keys(model: EditorModel) -> List[Tuple[str, str]]:
+    """The key bar for the current row: A and D only where they apply."""
+    on_review = model.stage == "review" and len(model.pages) == 1
+    row = None if on_review else model.current_row()
+    keys = [("Enter", "edit/open"), ("Esc", "back"), ("/", "search"),
+            ("N/P", "stage"), ("T", "test")]
+    if row is not None and row.kind == "server":
+        keys.insert(1, ("Left/Right", "phase"))
+    if any(r.kind == "add" for r in ([] if on_review else model.rows())):
+        keys.append(("A", "add"))
+    d_hint = model.delete_hint(row)
+    if d_hint:
+        keys.append(("D", d_hint))
+    keys += [("M", "mode"), ("S", "save"), ("Q", "quit")]
+    return keys
+
+
 def _draw_keybar(win, model: EditorModel, y: int, width: int) -> None:
     fill_row(win, y, curses.color_pair(C_GOLD_BG))
     if model.busy_text:
@@ -1441,9 +2341,7 @@ def _draw_keybar(win, model: EditorModel, y: int, width: int) -> None:
         safe_addstr(win, y, 0, " " * (width - 1), curses.color_pair(pair))
         safe_addstr(win, y, 1, model.message, curses.color_pair(pair) | curses.A_BOLD)
         return
-    keys = [("Enter", "edit/open"), ("Esc", "back"), ("N/P", "stage"),
-            ("T", "test"), ("A", "add"), ("D", "delete/reset"), ("M", "mode"),
-            ("S", "save"), ("Q", "quit")]
+    keys = keybar_keys(model)
     x = 1
     for key, desc in keys:
         if x + len(key) + len(desc) + 3 >= width:
@@ -1480,6 +2378,9 @@ def _draw_prompt(win, model: EditorModel, height: int, width: int) -> None:
         safe_addstr(win, top + box_h - 1, left + 1, "Up/Down, Enter pick, Esc cancel",
                     curses.color_pair(C_GRAY_DIM))
         return
+    if p.kind == "confirm" and p.danger:
+        _draw_danger(win, p, height, width)
+        return
     y = height - 3
     head = curses.color_pair(C_HEADER) | curses.A_BOLD
     fill_row(win, y, curses.color_pair(C_HEADER))
@@ -1501,6 +2402,22 @@ def _draw_prompt(win, model: EditorModel, height: int, width: int) -> None:
         win.move(y + 1, 3 + p.cursor - offset)
     except curses.error:
         pass
+
+
+def _draw_danger(win, p: Prompt, height: int, width: int) -> None:
+    """A centered red box for a question that changes outage behavior."""
+    box_w = min(width - 4, 64)
+    lines = wrap(p.title, box_w - 4)
+    box_h = min(height - 2, len(lines) + 4)
+    top = max(1, (height - box_h) // 2)
+    left = max(0, (width - box_w) // 2)
+    red = curses.color_pair(C_STATUS_OB) | curses.A_BOLD
+    for y in range(top, top + box_h):
+        safe_addstr(win, y, left, " " * box_w, red)
+    for n, line in enumerate(lines[:box_h - 4]):
+        safe_addstr(win, top + 1 + n, left + 2, line, red)
+    safe_addstr(win, top + box_h - 2, left + 2, "[y] yes   [n] no (Enter = no)",
+                red)
 
 
 def draw(win, model: EditorModel) -> None:
@@ -1537,6 +2454,9 @@ def run_editor(doc: ConfigDocument, mode: Optional[str] = None) -> int:
             def pick(choice: Any) -> None:
                 model.set_mode(MODE_ADVANCED if choice.startswith("Advanced")
                                else MODE_BASIC)
+                if model.migration_notice:
+                    # set_mode clears the status line; this one must be seen.
+                    model.flash(model.migration_notice + " (written when you save)")
             model.prompt = Prompt(
                 "choice", "How do you want to configure Eneru?", pick,
                 options=["Basic - guided, safe defaults, the essentials",
