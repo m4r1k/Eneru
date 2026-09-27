@@ -34,8 +34,11 @@ sudo apt install eneru</pre>
 
     <h3>RHEL 9/10 / Fedora</h3>
     <pre>
-# RHEL 8/9: Enable EPEL first (required for apprise dependency)
+# RHEL 9: Enable EPEL first (required for apprise dependency)
 sudo dnf install -y epel-release
+# Optional, RHEL 9: CodeReady Builder provides python3-ruamel-yaml for the `eneru config` editor.
+# Rocky/Alma: sudo dnf install -y dnf-plugins-core && sudo dnf config-manager --set-enabled crb
+# RHEL:       sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms
 
 # Add repository
 sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru.repo
@@ -43,11 +46,7 @@ sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/eneru
 # Install
 sudo dnf install eneru</pre>
 
-    <h3>RHEL 8</h3>
-    <pre>
-sudo dnf install -y epel-release
-sudo curl -o /etc/yum.repos.d/eneru.repo https://m4r1k.github.io/Eneru/rpm/el8/eneru-el8.repo
-sudo dnf install eneru</pre>
+    <p class="note"><strong>RHEL 8:</strong> RPM packages ended with 6.1.x. Use the container image (Docker/Podman) for newer releases.</p>
   </div>
 
   <div class="section">
@@ -75,11 +74,6 @@ sudo apt install eneru</pre>
 sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/eneru-testing.repo
 
 # Install pre-release version
-sudo dnf install eneru</pre>
-
-    <h3>RHEL 8</h3>
-    <pre>
-sudo curl -o /etc/yum.repos.d/eneru-testing.repo https://m4r1k.github.io/Eneru/rpm/testing/el8/eneru-testing-el8.repo
 sudo dnf install eneru</pre>
   </div>
 
