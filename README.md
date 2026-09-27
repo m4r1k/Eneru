@@ -20,6 +20,7 @@ A Python-based UPS monitoring daemon for [Network UPS Tools (NUT)](https://netwo
 [Documentation](https://eneru.readthedocs.io/) •
 [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) •
 [Configuration](https://eneru.readthedocs.io/latest/configuration/) •
+[Config editor](https://eneru.readthedocs.io/latest/config-editor/) •
 [Dashboard](https://eneru.readthedocs.io/latest/dashboard/) •
 [Changelog](https://eneru.readthedocs.io/latest/changelog/) •
 [Roadmap](https://eneru.readthedocs.io/latest/roadmap/)
@@ -51,6 +52,7 @@ Most UPS shutdown tools handle one machine. If you have more than one, things ge
 | Network down during outage | ✅  Non-blocking notifications with persistent retry |
 | Firmware recalibrates battery silently | ✅  Battery anomaly detection and alerts |
 | Need power-quality telemetry | ✅  Browser dashboard, API, Prometheus, MQTT, Grafana, JSON logs, and SQLite events |
+| Config mistakes only show up during a real outage | ✅  Guided config editor (`eneru config`) and a read-only pre-flight check of NUT, SSH and sudo (`eneru config check`) |
 
 ---
 
@@ -65,6 +67,7 @@ Eneru sits on top of NUT and adds what these tools lack:
 - **Multi-UPS coordination**, monitor multiple UPSes with per-group triggers and shutdown policies, each with independent failure handling
 - **Browser dashboard and authenticated control**, live status, event history, event deletion, config reload, and allowlisted NUT `upscmd` / `upsrw` actions from the embedded API
 - **Battery anomaly detection**, catches firmware recalibrations and battery degradation with vendor-specific jitter filtering (APC, CyberPower, Ubiquiti)
+- **Guided setup and a pre-flight check**, `eneru config` walks you through the config in a terminal UI and explains every option; `eneru config check` logs in to NUT, SSHes to every remote server, proves sudo rules without running anything, and shows what would happen on power loss
 
 See the [full comparison](https://eneru.readthedocs.io/latest/#how-eneru-compares) in the documentation.
 
@@ -136,17 +139,26 @@ RPM packages support RHEL 9 and 10 (and compatible rebuilds). RHEL 8 packages en
 
 ### Configuration
 
+The guided editor is the quickest way in. It asks for the UPS and its NUT
+login, your remote servers and notifications, explains every option as you
+go, tests each connection, and shows the full power-loss sequence before it
+saves. Existing files are edited in place with your comments kept.
+
 ```bash
-# Edit configuration
-sudo nano /etc/ups-monitor/config.yaml
+# Create or edit the config (basic mode for the essentials, advanced for everything)
+sudo eneru config
 
-# Validate and start
-eneru validate --config /etc/ups-monitor/config.yaml
+# Pre-flight: validation + live, read-only NUT/SSH/sudo checks + power-loss preview
+sudo eneru config check
+
+# Start, then watch it in real time
 sudo systemctl enable --now eneru.service
-
-# Monitor in real time
 eneru monitor --config /etc/ups-monitor/config.yaml
 ```
+
+Prefer a text editor? `/etc/ups-monitor/config.yaml` is plain YAML;
+[`examples/config-reference.yaml`](examples/config-reference.yaml) documents
+every option, and `eneru config check` works on hand-written files too.
 
 ### Single UPS
 
@@ -191,6 +203,8 @@ See the [full documentation](https://eneru.readthedocs.io/) for complete configu
 
 ## Features
 
+- Guided config editor (`eneru config`, basic and advanced modes) that explains every option, validates as you go and keeps your comments
+- Pre-flight inspector (`eneru config check`): live, read-only NUT, SSH and sudo checks for every shutdown step, plus a power-loss preview
 - Monitor one or more UPSes from a single instance, each with its own shutdown group
 - Browser dashboard served by the embedded API, with authentication, history graphs, event management, and UPS control
 - Real-time TUI dashboard (`eneru monitor`) with color-coded status
@@ -246,6 +260,7 @@ Named after [Eneru (エネル)](https://onepiece.fandom.com/wiki/Enel) from *One
 Full documentation at [eneru.readthedocs.io](https://eneru.readthedocs.io/):
 
 - [Getting Started](https://eneru.readthedocs.io/latest/getting-started/) - installation and basic setup
+- [Config editor and checker](https://eneru.readthedocs.io/latest/config-editor/) - `eneru config` and `eneru config check`
 - [Configuration](https://eneru.readthedocs.io/latest/configuration/) - full config reference
 - [Dashboard](https://eneru.readthedocs.io/latest/dashboard/) - browser dashboard and event management
 - [Authentication](https://eneru.readthedocs.io/latest/authentication/) - users, API keys, and read gating

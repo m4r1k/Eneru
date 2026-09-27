@@ -4,7 +4,7 @@
   <img src="images/eneru-diagram.svg" alt="Eneru architecture" width="640">
 </p>
 
-Eneru monitors UPSes through [Network UPS Tools](https://networkupstools.org/) and coordinates shutdown before the batteries are exhausted. It is built for hosts that run more than one thing: VMs, containers, NAS mounts, remote servers, and multiple UPS groups. v6.0 added a browser dashboard, authenticated API write paths, UPS control, and config hot-reload; v6.1 adds battery-health scoring with replacement prediction, energy and cost tracking, scheduled self-tests, periodic reports, and a read-only shutdown-plan view.
+Eneru monitors UPSes through [Network UPS Tools](https://networkupstools.org/) and coordinates shutdown before the batteries are exhausted. It is built for hosts that run more than one thing: VMs, containers, NAS mounts, remote servers, and multiple UPS groups. v6.0 added a browser dashboard, authenticated API write paths, UPS control, and config hot-reload; v6.1 adds battery-health scoring with replacement prediction, energy and cost tracking, scheduled self-tests, periodic reports, and a read-only shutdown-plan view; v6.2 adds `eneru config`, a guided terminal editor for the configuration, and `eneru config check`, a read-only pre-flight check of NUT, SSH and sudo with a power-loss preview.
 
 <p align="center">
   <img src="images/eneru-mon.gif" alt="Eneru TUI monitor dashboard" height="260">
@@ -24,6 +24,7 @@ Eneru is the layer above NUT. NUT talks to the UPS hardware. Eneru decides what 
 | Multiple UPSes | Independent UPS groups, shared configuration defaults, and one local-shutdown owner |
 | Redundant power | Quorum-based redundancy groups for dual-PSU servers and A+B power feeds |
 | Battery and energy | Battery-health score (0-100) with replacement prediction and tiered alerts, scheduled NUT self-tests, kWh and cost tracking, and daily/weekly/monthly reports |
+| Setup | `eneru config`: a guided editor (basic or advanced) that explains every option, validates each step and keeps your comments; `eneru config check`: live, read-only NUT/SSH/sudo checks of every shutdown step and a "what happens on power loss" preview |
 | Operators | Browser dashboard, TUI dashboard, one-shot status output, SQLite history/events, authenticated API writes, a read-only shutdown-plan view, Prometheus, MQTT, Grafana, JSON/syslog logs, and Apprise notifications |
 | Deployment | Native systemd packages, plus an OCI image that is first-class for both remote-only AND full local-host ownership (v5.5+ SSH loopback delegate) |
 
@@ -72,11 +73,12 @@ Multi-UPS mode runs the same sequence per UPS group. Redundancy groups use the s
 | Redundant A+B feeds | No | No | No | Quorum evaluator |
 | Notifications | Script yourself | Event scripts | No | Apprise with persistent retry |
 | Dashboard and history | Limited | Limited | Dashboard | Browser dashboard, TUI, graphs, SQLite events |
+| Setup and pre-flight check | Edit files by hand | Edit files by hand | No | Guided editor and live, read-only config check |
 
 ## Start here
 
 1. Pick the right install for your deployment: [Choose your install](install-comparison.md) (native vs OCI container vs Kubernetes).
-2. Install Eneru and create a minimal config: [Getting started](getting-started.md).
+2. Install Eneru and create a config with the guided editor (`eneru config`), then pre-flight it with `eneru config check`: [Getting started](getting-started.md), [Config editor and checker](config-editor.md).
 3. Choose your shutdown policy: [Configuration reference](configuration.md).
 4. Tune the shutdown thresholds: [Shutdown triggers](triggers.md).
 5. Add remote systems if needed: [Remote servers](remote-servers.md).

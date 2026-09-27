@@ -1,9 +1,11 @@
 # Scenario: Forced Shutdown - UPS signals immediate shutdown required
+# Charge/runtime stay above the E2E thresholds (20% / 600s) so only the
+# FSD flag can trigger the shutdown (Test 5 asserts the exact FSD reason).
 ups.status: OB FSD
 ups.load: 45
 
-battery.charge: 10
-battery.runtime: 60
+battery.charge: 80
+battery.runtime: 1800
 battery.voltage: 42.0
 
 input.voltage: 0.0

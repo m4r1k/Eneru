@@ -1,13 +1,16 @@
 """Thread-safe, failure-isolated shutdown progress snapshots."""
 
 import copy
+import json
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import re
 
 from eneru.logger import redact_sensitive_text
+from eneru.utils import read_side_file, write_side_file
 from eneru.shutdown.plan import PHASE_ORDER
 
 # Remote command output can be long (a chatty shutdown script). Keep the
@@ -33,6 +36,23 @@ _OUTPUT_SECRET_PATTERNS = (
 )
 
 
+def progress_sidecar_path(state_file_path: Any) -> Path:
+    """Where the progress snapshot for a state file lives (TUI reads it)."""
+    path = Path(state_file_path)
+    return path.with_name(path.name + ".shutdown-progress.json")
+
+
+def read_progress_sidecar(path: Any) -> Optional[Dict[str, Any]]:
+    """Read a progress sidecar; None when missing or unreadable."""
+    try:
+        # Capped, regular-file-only read (F-183): the sidecar may sit in a
+        # container-writable bind mount that host root reads.
+        data = json.loads(read_side_file(path))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _detail_text(value: Any) -> str:
     """Redact credentials and keep the last REMOTE_DETAIL_MAX_CHARS chars."""
     text = redact_sensitive_text(str(value or ""))
@@ -47,8 +67,17 @@ def _detail_text(value: Any) -> str:
 class ShutdownProgress:
     """Keep the current or most recent shutdown run in memory for the API."""
 
-    def __init__(self, kind: str, name: str):
+    def __init__(self, kind: str, name: str,
+                 sidecar_path: Optional[Path] = None):
         self._lock = threading.Lock()
+        # Optional JSON mirror of the ANONYMOUS snapshot so an out-of-process
+        # reader (the `eneru monitor` TUI) can follow a shutdown without the
+        # API. ELI5: the whiteboard in the hallway, copied from the one in the
+        # control room -- only the public bits, never raw command output.
+        # Writes are best-effort and can never raise into the shutdown path.
+        self.sidecar_path: Optional[Path] = (
+            Path(sidecar_path) if sidecar_path is not None else None)
+        self._write_lock = threading.Lock()
         self._kind = kind
         self._name = name
         self._run_id = 0
@@ -88,6 +117,7 @@ class ShutdownProgress:
                 })
         except Exception:
             pass
+        self.persist()
 
     def phase_start(self, phase_id: str) -> None:
         self._set_phase(phase_id, "running", started=True)
@@ -131,6 +161,7 @@ class ShutdownProgress:
                     row["detail"] = str(detail or "")[:300]
         except Exception:
             pass
+        self.persist()
 
     def remote_start(self, server: str, host: str) -> Optional[int]:
         """Mark one remote worker running and return its run generation."""
@@ -144,9 +175,11 @@ class ShutdownProgress:
                     "outcome": "",
                     "error": "",
                 })
-                return self._run_id
+                generation = self._run_id
         except Exception:
             return None
+        self.persist()
+        return generation
 
     def remote_finish(self, result: Any, generation: Optional[int]) -> None:
         """Publish a sanitized remote result."""
@@ -207,6 +240,7 @@ class ShutdownProgress:
                 })
         except Exception:
             pass
+        self.persist()
 
     def _remote_row(self, server: str, host: str) -> Dict[str, Any]:
         row = next(
@@ -233,6 +267,7 @@ class ShutdownProgress:
                 self._data["finishedAt"] = time.time()
         except Exception:
             pass
+        self.persist()
 
     def snapshot(self, include_detail: bool = False) -> Dict[str, Any]:
         """Return a detached JSON-safe copy.
@@ -252,3 +287,21 @@ class ShutdownProgress:
                 return data
         except Exception:
             return self._idle_snapshot()
+
+    def persist(self) -> None:
+        """Mirror the anonymous snapshot to ``sidecar_path`` (best-effort)."""
+        path = self.sidecar_path
+        if path is None:
+            return
+        try:
+            # F-182: snapshot INSIDE the write lock. Taken outside, a slow
+            # writer's older "running" copy could land after a newer
+            # "succeeded" one and leave the TUI showing "Shutting down"
+            # forever. Lock order is always _write_lock -> _lock (snapshot);
+            # nothing holds _lock while calling persist().
+            with self._write_lock:
+                payload = self.snapshot()
+                payload["writtenAt"] = time.time()
+                write_side_file(path, json.dumps(payload, sort_keys=True))
+        except Exception:
+            pass

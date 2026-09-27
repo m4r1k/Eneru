@@ -88,7 +88,9 @@ container):
 - `network_mode: "host"` — so the container's `127.0.0.1` reaches the
   host's `sshd`. Bridge mode works too but requires overriding the
   loopback `host` field to the host's bridge IP (`172.17.0.1` on
-  Linux default Docker bridge).
+  Linux default Docker bridge), and then the host key must be pinned
+  instead of `StrictHostKeyChecking=no` (see
+  [Pin the host key](containers-kubernetes.md#pin-the-host-key-outside-network-host)).
 - `-v /etc/machine-id:/etc/machine-id:ro` — **mandatory** for the
   host identity guard. Eneru reads it inside the container and
   compares it to what the host's `sshd` returns. Without the mount,

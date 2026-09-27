@@ -56,6 +56,7 @@ def assess_health(
     connection_grace_enabled: bool = False,
     connection_grace_duration: int = 60,
     now: Optional[float] = None,
+    now_mono: Optional[float] = None,
 ) -> UPSHealth:
     """Classify a UPS snapshot into a :class:`UPSHealth` tier.
 
@@ -94,8 +95,26 @@ def assess_health(
         connection_grace_duration: Configured connection-loss grace duration
             in seconds.
         now: Optional ``time.time()`` override -- only used by tests.
+        now_mono: Optional ``time.monotonic()`` override -- only used by
+            tests.
+
+    R2-01: ages are measured on the monotonic clock whenever the snapshot
+    carries monotonic stamps (``last_update_mono`` / ``connection_lost_mono``),
+    so a wall-clock step (NTP correcting the clock after boot, a VM resume)
+    cannot age every member past the stale threshold at once. The wall-clock
+    path is only a fallback for snapshots without monotonic stamps, or when a
+    test pins ``now`` without ``now_mono``.
     """
-    current_time = now if now is not None else time.time()
+    last_mono = getattr(snapshot, "last_update_mono", 0.0) or 0.0
+    use_mono = last_mono > 0 and (now_mono is not None or now is None)
+    if use_mono:
+        current = now_mono if now_mono is not None else time.monotonic()
+        last_seen = last_mono
+        lost_at = getattr(snapshot, "connection_lost_mono", 0.0) or 0.0
+    else:
+        current = now if now is not None else time.time()
+        last_seen = snapshot.last_update_time
+        lost_at = getattr(snapshot, "connection_lost_time", 0.0) or 0.0
     interval = max(1, int(check_interval) if check_interval else 1)
 
     # 1. UNKNOWN
@@ -108,7 +127,7 @@ def assess_health(
     # connection-loss grace. A member that had a good poll before the
     # flap contributes DEGRADED while stale/lost data is still being
     # retried; only FAILED after grace expiry becomes UNKNOWN.
-    age = current_time - snapshot.last_update_time
+    age = current - last_seen
     try:
         tolerance = max(1, int(max_stale_data_tolerance))
     except (TypeError, ValueError):
@@ -131,9 +150,8 @@ def assess_health(
         and age <= pre_grace_stale_window
     )
     if snapshot.connection_state == "GRACE_PERIOD":
-        lost_at = getattr(snapshot, "connection_lost_time", 0.0)
         if lost_at:
-            grace_age = current_time - lost_at
+            grace_age = current - lost_at
         else:
             # Back-compat path: a snapshot in GRACE_PERIOD with no
             # ``connection_lost_time`` predates that field. Approximate the

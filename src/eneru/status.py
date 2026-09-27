@@ -6,9 +6,11 @@ import shlex
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from eneru.config import Config, UPSGroupConfig, resolve_energy_config
+from eneru.config import (
+    Config, UPSGroupConfig, host_poweroff_possible, resolve_energy_config,
+)
 from eneru.health_model import UPSHealth, assess_health
 from eneru.remote_health import (
     REMOTE_HEALTH_DISABLED,
@@ -19,7 +21,10 @@ from eneru.remote_health import (
 )
 from eneru.redundancy import effective_redundancy_health
 from eneru.stats import StatsStore
-from eneru.utils import command_exists, sanitize_name
+from eneru.utils import (
+    command_exists, format_seconds, is_numeric, runs_coordinator, sanitize_name,
+    status_has_token, ups_state_file_path,
+)
 from eneru.version import __version__
 
 
@@ -74,16 +79,15 @@ LIFECYCLE_EVENT_TYPES = {
 
 
 def stats_db_path_for_group(config: Config, group: UPSGroupConfig) -> Path:
-    """Return the stats DB path for a group."""
-    stem = sanitize_name(group.ups.name) if config.multi_ups else "default"
+    """Return the stats DB path for a group (per-UPS under the coordinator,
+    which also runs for a single UPS in a redundancy group; F-181)."""
+    stem = sanitize_name(group.ups.name) if runs_coordinator(config) else "default"
     return Path(config.statistics.db_directory) / f"{stem}.db"
 
 
 def state_file_path_for_group(config: Config, group: UPSGroupConfig) -> Path:
     """Return the state file path for a group."""
-    if config.multi_ups:
-        return Path(config.logging.state_file + f".{sanitize_name(group.ups.name)}")
-    return Path(config.logging.state_file)
+    return Path(ups_state_file_path(config, group))
 
 
 def redundancy_state_file_path(config: Config, group_name: str) -> Path:
@@ -254,14 +258,32 @@ def power_series(store: Any, start: int, end: int,
     return out
 
 
-def monitor_status(monitor: Any) -> Dict[str, Any]:
-    """Return one monitor's live status as a JSON-serializable dict."""
+def _outlook_blocks(monitor: Any, source_config: Any) -> Dict[str, Any]:
+    """UX v6.2 read-only blocks (statusSummary / triggerOutlook / nextTrigger /
+    role / freshness). Never lets a display derivation fail a status read."""
+    try:
+        from eneru.outlook import monitor_outlook
+        return monitor_outlook(monitor, source_config)
+    except Exception:
+        return {"statusSummary": None, "triggerOutlook": None,
+                "nextTrigger": None, "role": None, "freshness": None}
+
+
+def monitor_status(monitor: Any, *, source_config: Any = None) -> Dict[str, Any]:
+    """Return one monitor's live status as a JSON-serializable dict.
+
+    ``source_config`` (the daemon-wide config) lets the ``role`` block name
+    the redundancy groups this UPS belongs to.
+    """
     config = monitor.config
     group = config.ups_groups[0] if config.ups_groups else None
     snap = monitor.state.snapshot()
     label = config.ups.label
     group_id = sanitize_name(config.ups.name)
-    return {
+    blocks = _outlook_blocks(monitor, source_config)
+    outlook = blocks.get("triggerOutlook") or {}
+    on_battery = status_has_token(snap.status, "OB")
+    row = {
         "groupId": group_id,
         "name": config.ups.name,
         "label": label,
@@ -305,11 +327,23 @@ def monitor_status(monitor: Any) -> Dict[str, Any]:
         "triggerActive": snap.trigger_active,
         "triggerReason": snap.trigger_reason,
         "staleDataCount": snap.stale_data_count,
+        # F-180: hard NUT failures so far (FAILSAFE fires on battery once
+        # either count reaches max_stale_data_tolerance).
+        "connectionErrorCount": getattr(
+            getattr(monitor, "state", None), "connection_error_count", 0),
         "remoteHealth": remote_health_for_monitor(monitor),
         "batteryHealth": _battery_health_for_monitor(monitor),
         "energy": _energy_for_monitor(monitor),
         "selfTest": _self_test_for_monitor(monitor),
+        # M3: display strings so no surface prints "1205s" again.
+        "timeOnBatteryText": (
+            format_seconds(outlook.get("timeOnBattery", snap.time_on_battery))
+            if on_battery else None),
+        "runtimeText": (format_seconds(snap.runtime)
+                        if is_numeric(snap.runtime) else None),
     }
+    row.update(blocks)
+    return row
 
 
 def collect_status(source: Any) -> Dict[str, Any]:
@@ -320,7 +354,7 @@ def collect_status(source: Any) -> Dict[str, Any]:
     # can read the running build AND where it runs — baremetal / container /
     # Kubernetes — without digging into the nested `runtime` object below.
     runtime_label = _runtime_context_label()
-    ups_rows = [monitor_status(m) for m in monitors]
+    ups_rows = [monitor_status(m, source_config=config) for m in monitors]
     payload: Dict[str, Any] = {
         "generatedAt": time.time(),
         "version": __version__,
@@ -504,12 +538,25 @@ def redundancy_group_statuses(source: Any, config: Optional[Config], *,
     for group in config.redundancy_groups:
         members = []
         healthy_count = 0
+        member_snaps: Dict[str, Any] = {}
+        member_raw: Dict[str, UPSHealth] = {}
+        member_ages: Dict[str, float] = {}
         for ups_name in group.ups_sources:
             monitor = monitors_by_name.get(ups_name)
             raw = (
                 _redundancy_member_health(monitor, group)
                 if monitor is not None else UPSHealth.UNKNOWN
             )
+            member_raw[ups_name] = raw
+            if monitor is not None:
+                try:
+                    snap = monitor.state.snapshot()
+                    member_snaps[ups_name] = snap
+                    last_mono = getattr(snap, "last_update_mono", 0.0) or 0.0
+                    member_ages[ups_name] = (
+                        time.monotonic() - last_mono if last_mono > 0 else 0.0)
+                except Exception:
+                    pass
             effective = effective_redundancy_health(group, raw)
             if effective == UPSHealth.HEALTHY:
                 healthy_count += 1
@@ -573,7 +620,42 @@ def redundancy_group_statuses(source: Any, config: Optional[Config], *,
             },
             "shutdownProgress": tracker.snapshot() if tracker is not None else None,
         })
+        rows[-1].update(_redundancy_outlook_fields(
+            group, config, executor, member_snaps, member_raw, member_ages,
+            cold_start_hold, rows[-1]["shutdownProgress"], members))
     return rows
+
+
+def _redundancy_outlook_fields(group: Any, config: Config, executor: Any,
+                               snaps: Dict[str, Any],
+                               raw: Dict[str, UPSHealth],
+                               ages: Dict[str, float], deferred: bool,
+                               progress: Optional[dict],
+                               members: List[dict]) -> Dict[str, Any]:
+    """M9: who is failing, what happens next, and the group's role.
+
+    Adds ``nextTrigger`` / ``healthReason`` to each member row in place and
+    returns the group-level keys. Display-only; never fails the status read.
+    """
+    try:
+        from eneru.outlook import redundancy_group_outlook, redundancy_role
+        role = redundancy_role(group, config, executor)
+        out = redundancy_group_outlook(
+            group, snaps, raw, quorum_deferred=deferred,
+            progress_state=(progress or {}).get("state"), role=role,
+            now_age=ages)
+        for member in members:
+            member.update(out["members"].get(member["name"], {}))
+        return {
+            "failingMembers": out["failingMembers"],
+            "healthyMembers": out["healthyMembers"],
+            "failuresTolerated": out["failuresTolerated"],
+            "outlook": out["outlook"],
+            "role": role,
+        }
+    except Exception:
+        return {"failingMembers": None, "healthyMembers": None,
+                "failuresTolerated": None, "outlook": None, "role": None}
 
 
 # -----------------------------------------------------------------------------
@@ -620,12 +702,9 @@ def _required_capabilities(config: Config) -> List[str]:
             caps.append("local_container_teardown")
         if group.filesystems.unmount.enabled:
             caps.append("local_filesystem_unmount")
-    has_local = any(g.is_local for g in config.ups_groups) or any(
-        g.is_local for g in config.redundancy_groups
-    )
-    if config.local_shutdown.enabled and (
-        has_local or not config.ups_groups or config.local_shutdown.trigger_on == "any"
-    ):
+    # 6.2: same rule as the root check (a lone list entry with an explicit
+    # `is_local: false` never powers the host off).
+    if host_poweroff_possible(config):
         caps.append("local_host_poweroff")
     remote_targets: List[Tuple[str, str]] = []
     for group in config.ups_groups:
@@ -1084,7 +1163,8 @@ def live_remote_health(source: Any, config: Config) -> List[dict]:
 def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
                  start_ts: Optional[int] = None, end_ts: Optional[int] = None,
                  before_ts: Optional[int] = None,
-                 before_cursor: Optional[tuple] = None) -> List[dict]:
+                 before_cursor: Optional[tuple] = None,
+                 hide_types: Optional[frozenset] = None) -> List[dict]:
     """Return recent event rows aggregated from all per-UPS stats DBs.
 
     Each row carries a **source-qualified identity** — ``source`` (the UPS
@@ -1105,6 +1185,9 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
         (int(end_ts) if end_ts is not None else now)
     include_types = POWER_EVENT_TYPES if verbosity == 0 else None
     exclude_types = LIFECYCLE_EVENT_TYPES if verbosity == 1 else None
+    if hide_types:
+        # F-109: filtered in SQL (not after the LIMIT) so a page stays full.
+        exclude_types = set(exclude_types or ()) | set(hide_types)
     for group in config.ups_groups:
         source = sanitize_name(group.ups.name)
         local_end = end
@@ -1147,6 +1230,70 @@ def query_events(config: Config, *, limit: int = 100, verbosity: int = 2,
                 pass
     rows.sort(key=lambda row: (row["ts"], row["source"], row["id"]))
     return rows[-limit:]
+
+
+def select_event_rows(rows: Iterable[Any], *, max_events: Optional[int],
+                      tier_of: Callable[[Any], str],
+                      ts_of: Callable[[Any], Any] = lambda row: row[0],
+                      tier_order: Sequence[str] = (
+                          "power", "diagnostics", "lifecycle"),
+                      first_share: float = 0.5) -> List[Any]:
+    """Trim event rows to ``max_events`` while keeping every tier visible (M5).
+
+    ELI5: a fixed number of seats on the bus. Power events used to take all
+    of them, so once a long-running install had 30 old outages the
+    ``-v``/``-vv`` passengers (diagnostics, lifecycle) never got on and the
+    verbosity key "did nothing". Now power gets a reserved half, every other
+    tier present gets an equal slice of the rest, and any empty seats go to
+    the newest rows of whichever tier is left.
+
+    Rows whose tier is not in ``tier_order`` are dropped. Output is sorted
+    ascending by ``ts_of``. ``max_events`` falsy means no cap.
+    """
+    order = list(tier_order)
+    by_tier: Dict[str, List[Any]] = {name: [] for name in order}
+    for row in rows:
+        tier = tier_of(row)
+        if tier in by_tier:
+            by_tier[tier].append(row)
+    kept_all = [row for name in order for row in by_tier[name]]
+    if not max_events or len(kept_all) <= max_events:
+        return sorted(kept_all, key=ts_of)
+    for name in order:
+        by_tier[name].sort(key=ts_of)
+    present = [name for name in order if by_tier[name]]
+    taken: Dict[str, int] = {name: 0 for name in order}
+    budget = int(max_events)
+    first = order[0]
+    if by_tier[first]:
+        share = min(len(by_tier[first]), int(math.ceil(budget * first_share)))
+        if len(present) == 1:
+            share = min(len(by_tier[first]), budget)
+        taken[first] = share
+        budget -= share
+    others = [name for name in present if name != first]
+    if others and budget > 0:
+        slice_size = max(1, budget // len(others))
+        for name in others:
+            if budget <= 0:
+                break
+            take = min(len(by_tier[name]), slice_size, budget)
+            taken[name] = take
+            budget -= take
+    if budget > 0:
+        # Leftover seats: newest remaining rows across all tiers.
+        rest = []
+        for name in order:
+            remaining = by_tier[name][:len(by_tier[name]) - taken[name]]
+            rest.extend((ts_of(row), name) for row in remaining)
+        rest.sort(key=lambda item: item[0], reverse=True)
+        for _, name in rest[:budget]:
+            taken[name] += 1
+    kept = []
+    for name in order:
+        if taken[name]:
+            kept.extend(by_tier[name][-taken[name]:])
+    return sorted(kept, key=ts_of)
 
 
 def query_history(config: Config, ups_name: str, metric: str,

@@ -2029,6 +2029,48 @@ class TestPurge:
             s.close()
 
     @pytest.mark.unit
+    def test_purge_keeps_events_for_the_hourly_retention(self, tmp_path):
+        # F-153: events follow the HOURLY (days) retention, not the raw
+        # (hours) one -- a 2 h old event must survive a 1 h raw window.
+        s = StatsStore(tmp_path / "purge_ev.db", retention_raw_hours=1,
+                       retention_hourly_days=1)
+        s.open()
+        try:
+            now = int(time.time())
+            s.log_event("ON_BATTERY", "old", ts=now - 2 * 86400)
+            s.log_event("ON_BATTERY", "hours", ts=now - 7200)
+            s.flush()
+            s.purge()
+            rows = s._conn.execute("SELECT detail FROM events").fetchall()
+            assert [r[0] for r in rows] == ["hours"]
+        finally:
+            s.close()
+
+    @pytest.mark.unit
+    def test_purge_raw_cutoff_is_exclusive(self, tmp_path, monkeypatch):
+        # F-154: a sample exactly at the (bucket-aligned) raw cutoff is kept.
+        import types
+        import eneru.stats as stats_mod
+        now = 2_000_000_150         # now - 1h = ...550, aligned down to ...500
+        fake = types.SimpleNamespace(
+            **{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
+        fake.time = lambda: float(now)
+        monkeypatch.setattr(stats_mod, "time", fake)
+        s = StatsStore(tmp_path / "purge_edge.db", retention_raw_hours=1)
+        s.open()
+        try:
+            cutoff = ((now - 3600) // BUCKET_5MIN) * BUCKET_5MIN
+            assert cutoff != now - 3600      # the alignment really moves it
+            s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff - 1)
+            s.buffer_sample(SAMPLE_UPS_DATA, ts=cutoff)
+            s.flush()
+            s.purge()
+            rows = s._conn.execute("SELECT ts FROM samples").fetchall()
+            assert [r[0] for r in rows] == [cutoff]
+        finally:
+            s.close()
+
+    @pytest.mark.unit
     def test_purge_swallows_sqlite_error(self, store):
         class _BoomConn:
             def __enter__(self): return self
@@ -2055,6 +2097,15 @@ class TestQueryRange:
         assert StatsStore._pick_tier(now - 3600, now) == "samples"
         assert StatsStore._pick_tier(now - 7 * 86400, now) == "agg_5min"
         assert StatsStore._pick_tier(now - 365 * 86400, now) == "agg_hourly"
+
+    @pytest.mark.unit
+    def test_pick_tier_boundaries_are_inclusive(self):
+        # F-154: exactly 24 h stays raw; exactly 30 d stays 5-min.
+        now = 10_000_000
+        assert StatsStore._pick_tier(now - 86400, now) == "samples"
+        assert StatsStore._pick_tier(now - 86401, now) == "agg_5min"
+        assert StatsStore._pick_tier(now - 30 * 86400, now) == "agg_5min"
+        assert StatsStore._pick_tier(now - 30 * 86400 - 1, now) == "agg_hourly"
 
     @pytest.mark.unit
     def test_query_range_returns_samples_in_window(self, store):
@@ -2309,14 +2360,22 @@ class TestConcurrentReaderWriter:
         try:
             # Reader iterates while writer writes; must not raise.
             ro = StatsStore.open_readonly(store.db_path)
+            counts = []
             for _ in range(10):
                 cur = ro.execute("SELECT COUNT(*) FROM samples")
-                cur.fetchone()
+                counts.append(cur.fetchone()[0])
                 time.sleep(0.005)
-            ro.close()
         finally:
             stop.set()
             wt.join()
+        # F-154: the reader saw a consistent, never-shrinking row count while
+        # the writer ran, and sees every committed row once it is done.
+        try:
+            assert all(0 <= c <= 20 for c in counts)
+            assert counts == sorted(counts)
+            assert ro.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 20
+        finally:
+            ro.close()
 
 
 # ===========================================================================
@@ -2435,6 +2494,44 @@ class TestEdgeCases:
             assert int(cur.fetchone()[0]) == SCHEMA_VERSION
         finally:
             s2.close()
+
+    @pytest.mark.unit
+    def test_non_finite_nut_values_are_not_stored(self, store):
+        """R2-05: NUT `battery.runtime: inf` (or nan / 1e400) is stored as
+        NULL, so /history stays valid JSON (no literal Infinity) and the
+        aggregates are not poisoned."""
+        import json
+        now = int(time.time())
+        for i, raw in enumerate(["100", "inf", "nan", "1e400"]):
+            store.buffer_sample({
+                "ups.status": "OL", "battery.charge": raw,
+                "battery.runtime": raw, "ups.load": "20",
+            }, ts=now - 100 + i)
+        store.flush()
+        stored = store._conn.execute(
+            "SELECT battery_runtime, battery_charge FROM samples "
+            "WHERE ts >= ? ORDER BY ts", (now - 100,)).fetchall()
+        assert stored == [(100.0, 100.0)] + [(None, None)] * 3
+        rows = store.query_range("battery_runtime", now - 200, now)
+        assert [v for _ts, v in rows] == [100.0]
+        json.dumps(rows, allow_nan=False)  # raises on inf/nan
+        store.aggregate()
+        agg = store.query_range("battery_runtime", now - 3 * 86400, now,
+                                prefer_tier="agg_5min")
+        json.dumps(agg, allow_nan=False)
+
+    @pytest.mark.unit
+    def test_legacy_non_finite_rows_are_kept_out_of_history(self, store):
+        """An inf stored by an older version never reaches /history."""
+        import json
+        now = int(time.time())
+        with store._write() as conn:
+            conn.execute(
+                "INSERT INTO samples (ts, battery_runtime) VALUES (?, ?)",
+                (now - 10, float("inf")))
+        rows = store.query_range("battery_runtime", now - 200, now)
+        assert rows == []
+        json.dumps(rows, allow_nan=False)
 
     @pytest.mark.unit
     def test_text_fields_round_trip(self, store):

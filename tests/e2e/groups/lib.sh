@@ -152,6 +152,37 @@ restart_redundancy_nut_server() {
   dbg "restart_redundancy_nut_server: UPS1+UPS2 reset to online (scenarios confirmed live)"
 }
 
+# stop_redundancy_nut_driver <UPS1|UPS2>
+#
+#   Kill ONE member's dummy-ups driver so upsd serves stale data for it
+#   while the other member keeps reporting. Same [d] bracket trick as
+#   stop_redundancy_nut_drivers below. Recover with
+#   restart_redundancy_nut_server.
+stop_redundancy_nut_driver() {
+  local ups="$1"
+  dbg "stop_redundancy_nut_driver: pkill ${ups} dummy-ups in container"
+  (
+    cd "$E2E_DIR"
+    timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
+      "pkill -f '[d]ummy-ups.*-a ${ups}' || true"
+  )
+  # SIGTERM delivery is async: poll briefly, then fail at the kill boundary
+  # if the driver is still alive, instead of letting the quorum assertions
+  # fail later with a confusing log.
+  local _i
+  for _i in $(seq 1 10); do
+    if ! ( cd "$E2E_DIR" \
+        && timeout 5s docker compose exec -T nut-server sh -c \
+             "ps -ef | grep -E '[d]ummy-ups.*-a ${ups}'" ) >/dev/null 2>&1; then
+      dbg "stop_redundancy_nut_driver: ${ups} driver gone"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "ERROR: stop_redundancy_nut_driver: ${ups} dummy-ups still running after pkill" >&2
+  return 1
+}
+
 stop_redundancy_nut_drivers() {
   dbg "stop_redundancy_nut_drivers: pkill UPS1+UPS2 dummy-ups in container"
   (
@@ -171,4 +202,35 @@ stop_redundancy_nut_drivers() {
       && timeout --kill-after=5s 10s docker compose exec -T nut-server sh -c \
            'ps -ef | grep -E "[d]ummy-ups.*-a UPS[12]" || echo "    (no UPS1/UPS2 driver processes)"' ) \
       2>&1 | sed 's/^/    /' || true
+}
+
+# assert_dry_run_confirm_shown <pty-log> <on|off>
+#
+#   The editor asks twice before flipping behavior.dry_run: on the toggle
+#   itself (config_tui.py _guard_dry_run) and again on save (request_save,
+#   "Saving changes behavior.dry_run to on. ..."). Like a lift that asks
+#   "are you sure?" at the button AND at the door: both questions must be on
+#   the captured screen, so the `y` in a key script provably answered the
+#   toggle prompt instead of landing on nothing. The text is
+#   DRY_RUN_ON_WARNING / DRY_RUN_OFF_WARNING verbatim.
+assert_dry_run_confirm_shown() {
+  local log="$1" state="$2" warning screen count
+  if [ "$state" = on ]; then
+    warning="Eneru will only LOG what it would do; nothing is shut down in a real outage. Continue?"
+  else
+    warning="Eneru WILL act on power loss: it will shut down VMs, containers, remote servers and this host. Continue?"
+  fi
+  # The red box wraps the prompt over several rows. Turn every CSI escape
+  # (cursor moves, erase-chars) and line break into a space, then squeeze,
+  # so the wrapped fragments re-join with one space. Here-strings, not
+  # pipes into grep -q, so pipefail can't SIGPIPE a producer.
+  screen=$(sed 's/\x1b\[[0-9;?]*[A-Za-z]/ /g' "$log" | tr '\r\n' '  ' | tr -s ' ')
+  count=$({ grep -oF "$warning" <<<"$screen" || true; } | wc -l)
+  if [ "$count" -lt 2 ] || \
+     ! grep -qF "Saving changes behavior.dry_run to $state. $warning" <<<"$screen"; then
+    echo "--- editor output (escape codes stripped) ---"
+    printf '%s\n' "$screen" | fold -w 160 | tail -40
+    echo "FAIL: the dry_run confirm (\"$warning\") was not shown on toggle and save (seen $count)"
+    return 1
+  fi
 }

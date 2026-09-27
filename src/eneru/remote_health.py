@@ -94,7 +94,11 @@ def is_safe_probe_command(command: str) -> bool:
 
 def build_ssh_probe_command(server: RemoteServerConfig,
                             probe_command: str) -> List[str]:
-    """Build an SSH argv for a remote health probe.
+    """Build the SSH argv for ``server`` running ``probe_command``.
+
+    The ONE builder: remote health probes, the loopback identity probe,
+    `eneru config check` and the real shutdown path (F-095) all use it, so
+    they can never disagree about how ``ssh_options`` are split.
 
     Raises:
         ValueError: If ``server.ssh_options`` ends with a flag that
@@ -110,11 +114,16 @@ def build_ssh_probe_command(server: RemoteServerConfig,
     pending_arg = False
     for opt in [*eneru_utils.runtime_default_ssh_options(server.ssh_options),
                 *server.ssh_options]:
+        parts = opt.split(None, 1)
         if pending_arg:
             ssh_cmd.append(opt)
             pending_arg = False
-        elif opt.startswith("-o "):
-            ssh_cmd.extend(opt.split(None, 1))
+        elif len(parts) == 2 and parts[0] in SSH_OPTIONS_WITH_SEPARATE_ARG:
+            # R2-02: "-i /root/.ssh/key" typed as ONE list item (the natural
+            # command-line habit) becomes two argv elements. Passed whole,
+            # ssh would read the key path with a leading space and fall back
+            # to its default keys -- every remote shutdown would fail.
+            ssh_cmd.extend(parts)
         elif opt.startswith("-"):
             ssh_cmd.append(opt)
             pending_arg = opt in SSH_OPTIONS_WITH_SEPARATE_ARG
@@ -129,6 +138,9 @@ def build_ssh_probe_command(server: RemoteServerConfig,
     ssh_cmd.extend([
         "-o", f"ConnectTimeout={server.connect_timeout}",
         "-o", "BatchMode=yes",
+        # F-104: `--` ends option parsing, so a user/host that starts with
+        # "-" (e.g. "-oProxyCommand=...") can never be read as an ssh option.
+        "--",
         f"{server.user}@{server.host}",
         probe_command,
     ])
@@ -667,9 +679,8 @@ class RemoteHealthManager:
                 "servers": self.snapshot(),
             }
             self.sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.sidecar_path.with_name(self.sidecar_path.name + ".tmp")
-            tmp.write_text(json.dumps(payload, sort_keys=True))
-            tmp.replace(self.sidecar_path)
+            eneru_utils.write_side_file(
+                self.sidecar_path, json.dumps(payload, sort_keys=True))
         except Exception as exc:
             key = str(self.sidecar_path)
             if key not in self._sidecar_write_failed_paths:

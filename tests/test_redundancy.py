@@ -845,6 +845,60 @@ class TestExecutorShutdown:
         assert ex.shutdown(reason="x") is False  # second call is a no-op
 
     @pytest.mark.unit
+    def test_lock_holds_when_first_caller_stalls_inside_guard(self, tmp_path):
+        """F-131 (redundancy twin): stall thread 1 INSIDE the locked
+        check-and-create so thread 2 arrives mid-section. With the lock,
+        thread 2 waits and sees ``_shutdown_done``; without it, thread 2 hits
+        the O_EXCL flag and logs a false 'startup cleanup bypassed' warning."""
+        cfg = _base_config(dry_run=False, tmp_path=tmp_path)
+        ex = RedundancyGroupExecutor(_redundancy_group(), base_config=cfg)
+        ex.logger = MagicMock()
+        inside = threading.Event()
+        t2_entering = threading.Event()
+        t2_done = threading.Event()
+        real_identity = ex._current_owner_identity
+
+        def stalling_identity():
+            if not inside.is_set():
+                inside.set()
+                # Deterministic overlap: thread 1 stays inside the guard until
+                # thread 2 has entered shutdown(). Without the lock thread 2
+                # runs to completion here (and logs the false warning); with
+                # it, thread 2 blocks and this wait just times out.
+                assert t2_entering.wait(timeout=5)
+                t2_done.wait(timeout=0.5)
+            return real_identity()
+
+        ex._current_owner_identity = stalling_identity
+        results = []
+        errors = []
+
+        def call(reason):
+            try:
+                if reason == "b":
+                    t2_entering.set()
+                results.append(ex.shutdown(reason))
+            except BaseException as exc:  # surface it in the main thread
+                errors.append(exc)
+            finally:
+                if reason == "b":
+                    t2_done.set()
+
+        t1 = threading.Thread(target=call, args=("a",), daemon=True)
+        t1.start()
+        assert inside.wait(timeout=2)
+        t2 = threading.Thread(target=call, args=("b",), daemon=True)
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not t1.is_alive() and not t2.is_alive()
+        assert errors == []
+        assert sorted(results) == [False, True]
+        logged = " ".join(c.args[0] for c in ex.logger.log.call_args_list)
+        assert "suppressed" not in logged
+
+    @pytest.mark.unit
     def test_idempotent_against_existing_flag_file(self, tmp_path):
         # Defense-in-depth: even though the 5.3.0 contract has the
         # coordinator clear the flag at startup, the executor itself

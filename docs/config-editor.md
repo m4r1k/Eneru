@@ -79,8 +79,10 @@ a tool the shutdown will find.
     `use_sudo: true` runs the **predefined actions**, **custom
     `pre_shutdown_commands`** and the **final shutdown command** through
     `sudo -n` (a command that already starts with `sudo` is left as written).
-    Only the first command of a pipeline or list is prefixed. The checker
-    notes when a custom command chains more commands under sudo.
+    Only the first command of a pipeline or list is prefixed. A step can
+    override it with its own `use_sudo: false` (or `true`). The checker notes
+    when a custom command chains more commands under sudo, and reports an
+    error for a shell builtin (`cd`, `export`, …) that would run under sudo.
 
 ### The power-loss preview
 
@@ -91,6 +93,30 @@ unmounts, remote servers by `shutdown_order` (parallel within a phase), the
 final sync and the host poweroff. Each phase shows its time budget, and the
 report ends with a worst-case total. This is the same plan the dashboard's
 shutdown view uses.
+
+### The shutdown order
+
+After the preview comes `== Shutdown order ==`: who waits for whom. Each UPS
+and redundancy group gets numbered phases. A phase starts only when the one
+before it finishes, and servers in the same phase shut down in parallel:
+
+```text
+UPS Lab (protects this host)
+  Phase 1: this host (always first)
+      stop VMs -> stop containers -> sync -> unmount /mnt/nas
+  Phase 2: 1 server (legacy parallel: false)  [waits for phase 1]
+    └─ NAS (admin@nas): stop_containers -> synoshutdown -s
+  Phase 3: 2 servers in parallel (shutdown_order 2)  [waits for phase 2]
+    ├─ App-1 (root@app1): shutdown -h now
+    └─ Switch (admin@switch): shutdown -h now
+  Phase 4: final sync, then this host powers off: shutdown -h now (always last)  [waits for phase 3]
+```
+
+Each server line lists its pre-shutdown steps, then its shutdown command. A
+host-loopback delegate brackets the other servers: its pre-actions run first
+and its poweroff runs last. Servers with the legacy `parallel` flag are
+grouped exactly as the daemon groups them. Disabled servers are listed as
+skipped.
 
 ## `eneru config` (the editor)
 
@@ -115,8 +141,13 @@ It opens a full-screen terminal UI (it needs an interactive terminal; use
 Press `M` at any time to switch modes.
 
 Each row shows the current value, marked `(default)` when the key isn't in
-your file. The panel below it explains what the selected option does and
-how it affects the system. Every stage lists its findings. A red marker in
+your file. A `*` before an option means its value differs from the default.
+In a multi-UPS file, the per-UPS sections (triggers, NUT login, battery
+health, self-test, energy) show the value that really applies to that UPS,
+tagged `(this UPS)`, `(global)` or `(default)`.
+The panel below it explains what the selected option does and how it affects
+the system; in advanced mode it also shows the default value. Every stage
+lists its findings. A red marker in
 the stage list means that stage has errors. Moving forward with `N` from a
 stage with errors is blocked once: fix them, or press `N` again to continue
 anyway.
@@ -129,14 +160,60 @@ anyway.
 | `N` / `P`, `Tab` / `Shift-Tab`, `1`-`9` | Next / previous stage, jump to a stage |
 | `T` | Test the UPS or remote server under the cursor (live, read-only); elsewhere runs every live check |
 | `A` | Add an item (UPS, remote server, pre-shutdown step, compose file, mount, list value) |
-| `D` | Delete the selected item, or reset an option to its default |
+| `D` | Delete the selected item or value, or reset an option to its default. On an item's own page (a server, a UPS, a step), `D` on any row that isn't an option deletes that item |
+| `/` | Search every option by key, label or help text, in every stage |
 | `<` / `>` | Move an item up or down (order matters for compose files, mounts and steps) |
+| `Left` / `Right` | On the **Shutdown order** page: move the server under the cursor to the previous or next phase |
 | `M` | Switch between basic and advanced mode |
 | `S` | Save |
 | `Q` | Quit (asks when there are unsaved changes) |
 
 The last stage runs every live check and shows the power-loss preview
 before you save.
+
+Details worth knowing:
+
+- **Adding and removing.** `A` on mount points or compose files asks for the
+  path right away; `Esc` adds nothing. The new entry is a plain string unless
+  every existing entry in that list is a mapping. Other items (a server, a
+  step, a UPS) open their own page. Leave that page without changing
+  anything and the item is discarded ("discarded empty remote server"). Every
+  item page ends with a **Delete this ...** row. The key bar shows what `D`
+  does on the selected row.
+- **Dry-run.** Turning `behavior.dry_run` off or on, whether by toggling it,
+  resetting it with `D` or any other way, asks first in a red box: off means
+  Eneru will really shut things down on power loss, on means it will only log.
+  Review & save lists a dry-run change first, in red. Saving a file whose
+  dry-run differs from the copy on disk asks once more.
+- **Search.** `/` takes a few words (`self test`, `dry run`) and lists
+  matches as `stage › section › key  value`. `Enter` jumps to the row, `Esc`
+  cancels. In basic mode, options that only advanced mode shows are listed
+  last, marked "advanced option"; picking one switches to advanced mode.
+- **Global vs per-UPS.** A UPS without its own `self_test:` (or `triggers:`,
+  `nut_control:`, `battery_health:`, `energy:`) uses the global block, key by
+  key, exactly as the daemon does. Its rows show the global value, tagged
+  `(global)`. Editing one writes an override for that UPS only, tagged
+  `(this UPS)` and marked `*`. `D` on an override removes it ("back to
+  global"), and **Remove all overrides for this UPS** clears the whole
+  section. The global pages are titled "defaults for all UPSes" and name the
+  UPSes that override each key ("APC overrides"). Redundancy groups inherit
+  `triggers:` the same way. A single-UPS file has one set of pages.
+- **Legacy `parallel`.** On open, `remote_servers[].parallel` is converted to
+  the `shutdown_order` numbers that give the same phases (the notice says
+  how many servers), and the `parallel` key is removed. Nothing is written
+  until you save; Review & save lists the conversion. If a server combines
+  `parallel` with `shutdown_order`, or `parallel` isn't true/false, it isn't
+  converted: the row is shown as `parallel (legacy)`. Setting
+  `shutdown_order` on that server removes it.
+- **Shutdown order.** The Remote servers stage ends with **Shutdown order
+  ▸**, the same phased tree as `eneru config check` (built from the same
+  plan code), per UPS and redundancy group. Lower phases shut down first;
+  servers in the same phase shut down in parallel. `Left`/`Right` moves the
+  server under the cursor one phase earlier or later (at either end it gets
+  a phase of its own). The phases are renumbered 1..N and only the servers
+  whose `shutdown_order` changes are written. `Enter` opens the server.
+  Host-loopback delegates and disabled servers are listed but stay where
+  they are.
 
 ### How the file is written
 

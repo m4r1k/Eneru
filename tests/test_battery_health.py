@@ -451,3 +451,99 @@ class TestHealthAlerts:
         mon._maybe_alert_health(bh, None)                # unknown score
         mon._maybe_alert_health(bh, 5)                   # tiers disabled
         assert mon.notifications == []
+
+
+# --------------------------------------------------------------------------
+# F-151 / F-154: depletion-rate safeguards and anomaly-detector boundaries
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def clocked(tmp_path, monkeypatch):
+    """A _Mon with a fake clock (both monotonic and wall) at t=1000, a
+    120 s depletion window and a 60 s poll -> min_samples = 2."""
+    import types
+    import eneru.health.battery as battery_mod
+    clock = [1000.0]
+    monkeypatch.setattr(battery_mod, "time", types.SimpleNamespace(
+        monotonic=lambda: clock[0], time=lambda: clock[0]))
+    mon = _Mon(_config(), None)
+    mon.config.ups.check_interval = 60
+    mon.config.triggers.depletion.window = 120
+    mon._battery_history_path = tmp_path / "battery-history"
+    return mon, clock
+
+
+class TestDepletionSafeguards:
+    @pytest.mark.unit
+    def test_zero_charge_is_a_real_sample(self, clocked):
+        # Only negatives are NUT's "unknown" sentinel; 0% must feed T3.
+        mon, _ = clocked
+        mon._calculate_depletion_rate("0")
+        assert list(mon.state.battery_history) == [(1000.0, 0.0)]
+
+    @pytest.mark.unit
+    def test_over_100_reading_is_clamped(self, clocked):
+        # A 150% firmware glitch must not look like a -50%/min "charge".
+        mon, _ = clocked
+        mon.state.battery_history.append((940.0, 100.0))
+        assert mon._calculate_depletion_rate("150") == 0.0
+        assert mon.state.battery_history[-1] == (1000.0, 100.0)
+
+    @pytest.mark.unit
+    def test_rate_computed_once_min_samples_reached(self, clocked):
+        # window // check_interval == 2 -> two samples are enough.
+        mon, _ = clocked
+        mon.state.battery_history.append((970.0, 100.0))
+        assert mon._calculate_depletion_rate("99") == 2.0   # 1% / 30 s
+
+    @pytest.mark.unit
+    def test_sample_exactly_at_window_edge_is_kept(self, clocked):
+        mon, _ = clocked
+        mon.state.battery_history.append((880.0, 100.0))     # now - window
+        assert mon._calculate_depletion_rate("99") == 0.5   # 1% / 120 s
+        mon.state.battery_history.clear()
+        mon.state.battery_history.append((879.0, 100.0))     # just outside
+        assert mon._calculate_depletion_rate("99") == 0.0   # pruned -> 1 sample
+
+
+class TestAnomalyBoundaries:
+    @staticmethod
+    def _poll(mon, clock, charge, dt=10.0):
+        clock[0] += dt
+        mon._check_battery_anomaly({"ups.status": "OL", "battery.charge": str(charge)})
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("charge,pending", [(80, 0), (79, 1)])
+    def test_drop_must_exceed_20(self, clocked, charge, pending):
+        mon, clock = clocked
+        self._poll(mon, clock, 100)
+        self._poll(mon, clock, charge)
+        assert mon.state.pending_anomaly_count == pending
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("dt,pending", [(120.0, 0), (119.0, 1)])
+    def test_drop_must_happen_within_120s(self, clocked, dt, pending):
+        mon, clock = clocked
+        self._poll(mon, clock, 100)
+        self._poll(mon, clock, 50, dt=dt)
+        assert mon.state.pending_anomaly_count == pending
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("charge,pending", [(70, 2), (71, 0)])
+    def test_recovery_needs_more_than_10_points(self, clocked, charge, pending):
+        mon, clock = clocked
+        self._poll(mon, clock, 100)
+        self._poll(mon, clock, 60)               # pending at 60
+        self._poll(mon, clock, charge)           # +10 is still "low"
+        assert mon.state.pending_anomaly_count == pending
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("final,fires", [(80, False), (79, True)])
+    def test_confirmation_revalidates_drop_over_20(self, clocked, final, fires):
+        mon, clock = clocked
+        self._poll(mon, clock, 100)
+        self._poll(mon, clock, 79)               # 21% drop -> pending
+        self._poll(mon, clock, 80)
+        self._poll(mon, clock, final)            # 3rd poll: drop 20 vs 21
+        assert (len(mon.notifications) == 1) is fires
+        assert mon.state.pending_anomaly_count == 0

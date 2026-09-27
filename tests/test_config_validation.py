@@ -141,6 +141,17 @@ class TestConfigValidation:
         assert any("extended_time.threshold" in m for m in errors)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("rate", [float("nan"), float("inf")])
+    def test_validate_rejects_non_finite_critical_rate(
+            self, minimal_config, rate):
+        """R2-04: `critical_rate: .nan` slipped past `rate <= 0` and
+        silently disabled T3 (nothing is ever > NaN)."""
+        minimal_config.triggers.depletion.critical_rate = rate
+        errors = [m for m in ConfigLoader.validate_config(minimal_config)
+                  if m.startswith("ERROR")]
+        assert any("depletion.critical_rate" in m for m in errors)
+
+    @pytest.mark.unit
     def test_validate_accepts_valid_trigger_numbers(self, minimal_config):
         """Defaults (incl. float critical_rate) produce no trigger-number ERROR."""
         messages = ConfigLoader.validate_config(minimal_config)

@@ -43,12 +43,18 @@ from eneru.config import (
     Config,
     ConfigLoader,
     ConfigSectionError,
+    NOT_LOCAL_SKIP,
     RemoteServerConfig,
     UPSGroupConfig,
     is_validation_error,
     resolve_energy_config,
+    single_ups_owns_host,
 )
-from eneru.utils import command_exists, format_seconds, is_numeric, run_command
+from eneru.mqtt import _redact_broker
+from eneru.utils import (
+    clean, command_exists, format_seconds, is_numeric, run_command,
+    runs_coordinator,
+)
 
 # Finding levels, most severe first.
 LEVEL_ERROR = "error"
@@ -102,6 +108,7 @@ class CheckReport:
     path: Optional[str] = None
     findings: List[Finding] = field(default_factory=list)
     plan: List[str] = field(default_factory=list)
+    order: List[str] = field(default_factory=list)
 
     def count(self, level: str) -> int:
         return sum(1 for f in self.findings if f.level == level)
@@ -147,19 +154,6 @@ def classify_message(message: str) -> str:
     return "file"
 
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
-
-
-def clean(text: Any) -> str:
-    """Strip terminal escapes/control characters from EXTERNAL output.
-
-    Remote stderr or a NUT banner is printed to the operator's terminal; a
-    compromised target must not be able to repaint it.
-    """
-    text = _ANSI.sub("", str(text))
-    return "".join(ch if (ch.isprintable() or ch == " ") else " " for ch in text)
-
-
 def _strip_level(message: str) -> str:
     for prefix in ("ERROR:", "WARNING:", "INFO:"):
         if message.startswith(prefix):
@@ -196,7 +190,58 @@ def load_raw(path: str) -> Tuple[Optional[dict], List[Finding]]:
             LEVEL_ERROR, "file", f"Config root in {path} must be a YAML mapping."))
         return None, findings
     findings.append(Finding(LEVEL_OK, "file", f"YAML parsed: {path}"))
+    for dotted, line in duplicate_yaml_keys(p):
+        findings.append(Finding(
+            LEVEL_WARN, "file",
+            f"Duplicate key `{dotted}` (line {line}): only the last one is "
+            "used, the earlier block is silently ignored.",
+            "Merge the two blocks into one (e.g. one `remote_servers:` list "
+            "holding every server)."))
     return data, findings
+
+
+def duplicate_yaml_keys(path: Path) -> List[Tuple[str, int]]:
+    """Return ``(dotted.path, line)`` for every repeated mapping key.
+
+    R2-03: PyYAML keeps the LAST of two identical keys without a word, so a
+    second `remote_servers:` pasted from the docs silently drops the first
+    block's servers. The daemon keeps accepting such files (a hard error
+    would stop a running setup at its next restart); `config check` warns.
+    Merge keys (``<<``) are YAML's own override mechanism and are skipped.
+    """
+    import yaml
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            root = yaml.compose(fh, Loader=yaml.SafeLoader)
+    except Exception:
+        return []
+    found: List[Tuple[str, int]] = []
+    visited = set()
+
+    def walk(node, prefix):
+        # An alias reuses its anchor's node (a recursive anchor even points
+        # back at an ancestor): walk each collection node once.
+        if id(node) in visited:
+            return
+        visited.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            seen = set()
+            for key_node, value_node in node.value:
+                key = getattr(key_node, "value", None)
+                if not isinstance(key_node, yaml.ScalarNode) or key == "<<":
+                    walk(value_node, prefix)
+                    continue
+                dotted = f"{prefix}.{key}" if prefix else str(key)
+                if key in seen:
+                    found.append((dotted, key_node.start_mark.line + 1))
+                seen.add(key)
+                walk(value_node, dotted)
+        elif isinstance(node, yaml.SequenceNode):
+            for idx, item in enumerate(node.value):
+                walk(item, f"{prefix}[{idx}]")
+
+    walk(root, "")
+    return found
 
 
 def build_config(data: dict, *, path: Optional[str] = None
@@ -305,15 +350,21 @@ def _dependency_findings(config: Config) -> List[Finding]:
     owner = _runtime_ctx._local_owner_group(config)
     delegating = _runtime_ctx._uses_loopback_delegate(config)
     implicit_local = not config.ups_groups and not config.redundancy_groups
-    if ((owner is not None or implicit_local) and config.local_shutdown.enabled
-            and not delegating):
+    # The only UPS (no coordinator) powers the host off unless it says an
+    # explicit is_local: false, even when is_local is omitted.
+    single_owner = bool(config.ups_groups) and not runs_coordinator(config) \
+        and single_ups_owns_host(config.ups_groups[0])
+    if ((owner is not None or implicit_local or single_owner)
+            and config.local_shutdown.enabled and not delegating):
         binary = poweroff_binary(config.local_shutdown.command)
         if binary and not command_exists(binary):
             out.append(Finding(
                 LEVEL_ERROR, "safety",
                 f"local_shutdown.command binary '{binary}' not found",
-                "The daemon treats a missing poweroff binary as FATAL at "
-                "startup. Fix local_shutdown.command or install the tool."))
+                ("The daemon treats a missing poweroff binary as FATAL at "
+                 "startup." if owner is not None or implicit_local else
+                 "The shutdown sequence could not power this host off.")
+                + " Fix local_shutdown.command or install the tool."))
     if delegating and not command_exists("ssh"):
         out.append(Finding(
             LEVEL_ERROR, "runtime",
@@ -327,9 +378,9 @@ def _dependency_findings(config: Config) -> List[Finding]:
 
     for group in _all_groups(config):
         label = _group_label(group)
-        local = bool(getattr(group, "is_local", False)) or (
-            group is (config.ups_groups[0] if config.ups_groups else None)
-            and not config.multi_ups)
+        # The drain phases run only for the group's own is_local (the runtime
+        # gates them on it even in single-UPS mode; F-178).
+        local = bool(getattr(group, "is_local", False))
         if local and not delegating:
             if group.virtual_machines.enabled and not command_exists("virsh"):
                 out.append(Finding(
@@ -421,7 +472,8 @@ def _feature_findings(config: Config) -> List[Finding]:
         if broker and "://" not in broker:
             out.append(Finding(
                 LEVEL_WARN, "features",
-                f"MQTT broker '{broker}' has no mqtt:// or mqtts:// scheme",
+                f"MQTT broker '{_redact_broker(broker)}' has no mqtt:// or "
+                "mqtts:// scheme",
                 "Host/port fall back to the raw string and TLS stays off. "
                 "Use mqtt://host:1883 or mqtts://host:8883."))
         elif broker.startswith("mqtt://") and "@" in broker.split("://", 1)[1]:
@@ -445,8 +497,15 @@ def _behavior_findings(config: Config) -> List[Finding]:
             "Dry-run is off: shutdown steps execute for real"))
 
     owner = _runtime_ctx._local_owner_group(config)
-    legacy_local = bool(config.ups_groups) and not config.multi_ups
+    legacy_local = (bool(config.ups_groups) and not config.multi_ups
+                    and single_ups_owns_host(config.ups_groups[0]))
     protects_host = owner is not None or legacy_local
+    if (config.ups_groups and not config.multi_ups and not legacy_local
+            and not config.redundancy_groups):
+        out.append(Finding(
+            LEVEL_INFO, "safety",
+            "is_local: false on the only UPS: this host never powers itself "
+            "off; a trigger only shuts down its remote servers"))
     if protects_host and not config.local_shutdown.enabled:
         out.append(Finding(
             LEVEL_WARN, "safety",
@@ -454,7 +513,21 @@ def _behavior_findings(config: Config) -> List[Finding]:
             "Eneru will drain VMs/containers/remotes, then leave this host "
             "running until the battery dies."))
     if config.multi_ups and owner is None:
-        if config.local_shutdown.enabled and config.local_shutdown.trigger_on == "any":
+        every_explicit_false = all(
+            g.is_local_explicit and not g.is_local for g in config.ups_groups)
+        if (config.local_shutdown.enabled
+                and config.local_shutdown.trigger_on == "any"
+                and every_explicit_false):
+            # Contradiction: each UPS says "not this host", yet trigger_on: any
+            # powers the host off when ANY of them goes critical.
+            out.append(Finding(
+                LEVEL_ERROR, "safety",
+                "Every UPS says is_local: false, yet local_shutdown.trigger_on: "
+                "any powers this host off when any of them goes critical",
+                "If this host has independent power, set "
+                "local_shutdown.trigger_on: none; otherwise mark the UPS that "
+                "feeds it with is_local: true."))
+        elif config.local_shutdown.enabled and config.local_shutdown.trigger_on == "any":
             out.append(Finding(
                 LEVEL_WARN, "safety",
                 "No UPS is marked is_local, yet any group's shutdown powers "
@@ -1040,6 +1113,13 @@ def action_checks(action: str, use_sudo: bool, *, path: str = "",
     return [RemoteCheck(f"unknown action '{action}'", "exit 2", "run")]
 
 
+# Shell builtins/keywords: `sudo -n <one of these>` can never work.
+_SHELL_BUILTINS = frozenset({
+    "cd", "export", "source", ".", "if", "for", "while", "until", "case",
+    "(", "{", "!", "set", "unset", "exec", "eval", "alias", "ulimit", "umask",
+})
+
+
 def command_checks(command: str, use_sudo: bool, *,
                    final: bool = False, user: str = "") -> Tuple[List[RemoteCheck], List[str]]:
     """Presence + sudo-permission checks for a command we must NOT run.
@@ -1053,14 +1133,26 @@ def command_checks(command: str, use_sudo: bool, *,
     unless they already start with sudo (only the first command of a
     pipeline/list is prefixed).
     """
+    from eneru.shutdown.remote import with_sudo
     notes: List[str] = []
-    effective = command
-    stripped = (command or "").lstrip()
-    if use_sudo and not stripped.startswith("sudo "):
-        effective = f"sudo -n {command}"
+    # The runtime's own prefix rule, so the check inspects exactly the
+    # command that will be sent (F-124).
+    effective = with_sudo(command or "", use_sudo)
     binary, via_sudo, args = command_binary(effective)
     if not binary:
         notes.append(f"could not parse '{command}'; nothing was checked")
+        return [], notes
+    if via_sudo and (binary in _SHELL_BUILTINS or binary.startswith(("(", "{"))):
+        # `sudo -n cd /opt && …` fails: sudo runs programs, not shell
+        # builtins, keywords or compounds (`(a; b)`, `{ a; }`, `if …`).
+        # Checking `command -v cd` would pass and send the operator to the
+        # wrong fix, so report the real cause instead.
+        notes.append(
+            f"'{command}' runs the shell "
+            f"{'builtin' if binary in _SHELL_BUILTINS else 'compound'} "
+            f"'{binary}' through sudo, "
+            "which cannot work (sudo only runs programs). Use "
+            "`sudo -n sh -c '…'`, or set `use_sudo: false` on this step.")
         return [], notes
     tokens, _ = first_command_tokens(effective)
     if via_sudo and tokens and any(
@@ -1131,6 +1223,10 @@ def remote_checks(config: Config, server: RemoteServerConfig
     checks: List[RemoteCheck] = []
     notes: List[str] = []
     for cmd in server.pre_shutdown_commands:
+        # The step's own override, else the server's use_sudo (F-098),
+        # exactly as RemoteShutdownMixin._step_use_sudo decides at runtime.
+        step_sudo = bool(server.use_sudo if getattr(cmd, "use_sudo", None) is None
+                         else cmd.use_sudo)
         if cmd.action:
             mounts = cmd.mounts
             if cmd.action == "unmount_filesystems" and server.is_host_loopback:
@@ -1139,9 +1235,9 @@ def remote_checks(config: Config, server: RemoteServerConfig
                 notes.append("unmount_filesystems has no `mounts` listed: the "
                              "step does nothing and is reported as failed")
             checks.extend(action_checks(
-                cmd.action, server.use_sudo, path=cmd.path or "", mounts=mounts))
+                cmd.action, step_sudo, path=cmd.path or "", mounts=mounts))
         elif cmd.command:
-            c, n = command_checks(cmd.command, server.use_sudo)
+            c, n = command_checks(cmd.command, step_sudo)
             checks.extend(c)
             notes.extend(n)
             notes.append(f"custom command '{cmd.command}': only its binary was "
@@ -1208,7 +1304,9 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     for note in notes:
         warn = ("most systems refuse" in note or "first command runs under sudo" in note
                 or "no `mounts` listed" in note or "environment variables" in note)
-        add(LEVEL_WARN if warn else LEVEL_INFO, note)
+        level = LEVEL_ERROR if "which cannot work" in note else (
+            LEVEL_WARN if warn else LEVEL_INFO)
+        add(level, note)
     if not checks:
         return out
     script = build_remote_script(checks)
@@ -1347,11 +1445,21 @@ def _group_config(config: Config, group: Any) -> Config:
                   local_shutdown=config.local_shutdown)
 
 
+def _protects_host(config: Config, group: Any) -> bool:
+    """Role label rule: the local group, or the only UPS unless it says an
+    explicit ``is_local: false`` (the single-UPS runtime rule)."""
+    return bool(group.is_local) or (
+        not config.multi_ups and single_ups_owns_host(group))
+
+
 def _plan_for_group(config: Config, group: Any) -> Dict[str, Any]:
     from eneru.shutdown.plan import build_shutdown_plan
     is_ups = isinstance(group, UPSGroupConfig)
-    multi = config.multi_ups or bool(config.redundancy_groups)
-    is_local = group.is_local or (is_ups and not config.multi_ups)
+    multi = runs_coordinator(config)
+    # F-178: the runtime gates the drain phases on the group's own is_local
+    # (even in single-UPS mode); the plan gates the single-UPS poweroff on
+    # local_shutdown alone, so no is_local override is needed here.
+    is_local = group.is_local
     delegated = _runtime_ctx._uses_loopback_delegate(config, group)
     handoff = None
     if multi and is_ups:
@@ -1385,7 +1493,7 @@ def power_loss_plan(config: Config) -> List[str]:
         is_ups = isinstance(group, UPSGroupConfig)
         if is_ups:
             label = group.ups.label
-            role = ("protects THIS host" if (group.is_local or not config.multi_ups)
+            role = ("protects THIS host" if _protects_host(config, group)
                     else "monitoring / remote-only")
             lines.append(f"UPS {label} ({role})")
             if group.ups.name in members:
@@ -1426,6 +1534,232 @@ def power_loss_plan(config: Config) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Shutdown order tree
+# ---------------------------------------------------------------------------
+#
+# ELI5: the power-loss preview above is the recipe card (every ingredient and
+# how long it takes). The order tree is the relay race: who runs which leg,
+# who runs side by side, and who must wait for the baton. Same kitchen (the
+# plan code), different card.
+
+_LOCAL_SHORT = {"vms": "stop VMs", "containers": "stop containers",
+                "filesystem-sync": "sync"}
+
+
+def _server_record(server: Any, index: int, order: Optional[int]) -> Dict[str, Any]:
+    from eneru.shutdown.plan import pre_shutdown_label
+    return {
+        "name": server.name or server.host,
+        "target": f"{server.user}@{server.host}" if server.user else server.host,
+        "index": index,
+        "order": order,
+        "shutdownOrder": server.shutdown_order,
+        "parallel": server.parallel,
+        "loopback": server.is_host_loopback is True,
+        "preShutdown": [pre_shutdown_label(c)
+                        for c in (server.pre_shutdown_commands or [])],
+        "shutdownCommand": server.shutdown_command or "shutdown",
+    }
+
+
+def _order_title(order: int, members: List[Any]) -> str:
+    if any(s.shutdown_order is not None for s in members):
+        return f"shutdown_order {order}"
+    if order < 0:
+        return "legacy parallel: false"
+    return "no shutdown_order, default batch"
+
+
+def _local_steps(plan: Dict[str, Any]) -> List[str]:
+    steps = []
+    for phase in plan["phases"]:
+        if not phase["enabled"]:
+            continue
+        if phase["id"] in _LOCAL_SHORT:
+            steps.append(_LOCAL_SHORT[phase["id"]])
+        elif phase["id"] == "filesystem-unmount" and phase["steps"]:
+            paths = [st["label"][len("Unmount "):] for st in phase["steps"]]
+            steps.append("unmount " + ", ".join(paths))
+    return steps
+
+
+def _coordinator_keeps_host_on(plan: Dict[str, Any], config: Config) -> bool:
+    """F-179: the group hands off, but the coordinator skips the poweroff
+    because ``local_shutdown.enabled`` is false (``multi_ups`` runtime)."""
+    final = next(p for p in plan["phases"] if p["id"] == "local-poweroff")
+    return bool(plan.get("coordinatorMode") and final["enabled"]
+                and not config.local_shutdown.enabled)
+
+
+def _final_title(plan: Dict[str, Any], config: Config) -> Optional[str]:
+    by_id = {p["id"]: p for p in plan["phases"]}
+    final = by_id["local-poweroff"]
+    sync = "final sync, then " if by_id["final-sync"]["enabled"] else ""
+    if _coordinator_keeps_host_on(plan, config):
+        return f"{sync}report done to the coordinator (this host stays on)"
+    if final["enabled"] and plan.get("coordinatorMode"):
+        return (f"{sync}report done to the coordinator, which powers off "
+                "this host")
+    if final["enabled"]:
+        return f"{sync}this host powers off: {final['steps'][0]['detail']}"
+    if sync:
+        return "final sync"
+    return None
+
+
+def _poweroff_skip(plan: Dict[str, Any]) -> Optional[str]:
+    """Why the terminal poweroff step is skipped (None when it runs)."""
+    return next(p["skipped"] for p in plan["phases"]
+                if p["id"] == "local-poweroff")
+
+
+def shutdown_order_tree(config: Config) -> List[Dict[str, Any]]:
+    """The shutdown order per group, as data (pure; the TUI order page reuses it).
+
+    Built from ``build_shutdown_plan`` (local steps, final sync, poweroff or
+    coordinator handoff) and ``remote_phase_groups`` (the executor's own
+    loopback bracket and ``compute_effective_order`` grouping). One record
+    per UPS group, then per redundancy group::
+
+        {"group": "Lab", "kind": "ups" | "redundancy",
+         "index": <position in config.ups_groups / config.redundancy_groups>,
+         "role": "protects this host" | "monitoring / remote-only"
+                 | "redundancy group",
+         "note": <plan note or None>,
+         "hostStaysOn": <True when local_shutdown.enabled is false, or the
+                         only UPS says an explicit is_local: false>,
+         "hostStaysOnReason": "is_local: false" | None,
+         "disabled": [<names of enabled: false servers>],
+         "phases": [{"number": 1..N, "waitsFor": None | number - 1,
+                     "kind": "local" | "loopback-pre" | "remote"
+                             | "loopback-poweroff" | "final",
+                     "title": str, "order": <effective order> | None,
+                     "parallel": bool, "steps": [str],
+                     "servers": [{"name", "target", "index", "order",
+                                  "shutdownOrder", "parallel", "loopback",
+                                  "preShutdown": [str],
+                                  "shutdownCommand"}]}]}
+
+    Phases run strictly one after another. Servers inside a "remote" phase
+    run in parallel (``parallel`` is True when there are several); loopback
+    phases run their servers one after another. A server's ``index`` is its
+    position in that group's ``remote_servers`` list. Pass the output of
+    ``build_config`` for a 1:1 match with the file; after the ``eneru run``
+    preparation (which ``check_mapping`` applies), a container may add a
+    synthesized loopback entry and its generated pre-shutdown steps.
+    """
+    from eneru.shutdown.plan import remote_phase_groups
+    tree: List[Dict[str, Any]] = []
+    counters = {"ups": 0, "redundancy": 0}
+    for group in _all_groups(config):
+        is_ups = isinstance(group, UPSGroupConfig)
+        kind = "ups" if is_ups else "redundancy"
+        plan = _plan_for_group(config, group)
+        index_of = {id(s): i for i, s in enumerate(group.remote_servers)}
+        phases: List[Dict[str, Any]] = []
+
+        def add(pkind, title, *, servers=(), steps=(), order=None,
+                parallel=False):
+            n = len(phases) + 1
+            phases.append({
+                "number": n, "waitsFor": n - 1 if n > 1 else None,
+                "kind": pkind, "title": title, "order": order,
+                "parallel": parallel, "steps": list(steps),
+                "servers": [_server_record(s, index_of[id(s)], order)
+                            for s in servers]})
+
+        local = _local_steps(plan)
+        if local:
+            add("local", "this host", steps=local)
+        rp = remote_phase_groups(group.remote_servers)
+        if rp["loopbackPre"]:
+            add("loopback-pre", "loopback pre-actions, before any other server",
+                servers=rp["loopbackPre"])
+        for order, members in rp["phases"]:
+            add("remote", _order_title(order, members), servers=members,
+                order=order, parallel=len(members) > 1)
+        if rp["loopbackPost"]:
+            add("loopback-poweroff", "this host powers off via the loopback "
+                "delegate", servers=rp["loopbackPost"])
+        final = _final_title(plan, config)
+        if final:
+            add("final", final)
+        if is_ups:
+            role = ("protects this host"
+                    if _protects_host(config, group)
+                    else "monitoring / remote-only")
+        else:
+            role = "redundancy group"
+        tree.append({
+            "group": group.ups.label if is_ups else (group.name or "(unnamed)"),
+            "kind": kind, "index": counters[kind], "role": role,
+            "note": plan.get("note"),
+            "hostStaysOnReason": ("is_local: false"
+                                  if _poweroff_skip(plan) == NOT_LOCAL_SKIP
+                                  else None),
+            "hostStaysOn": (_poweroff_skip(plan) in ("disabled", NOT_LOCAL_SKIP)
+                            or _coordinator_keeps_host_on(plan, config)),
+            "disabled": [s.name or s.host for s in group.remote_servers
+                         if not s.enabled],
+            "phases": phases})
+        counters[kind] += 1
+    return tree
+
+
+def _server_line(server: Dict[str, Any]) -> str:
+    chain = server["preShutdown"] + [server["shutdownCommand"]]
+    return f"{server['name']} ({server['target']}): {' -> '.join(chain)}"
+
+
+def format_order_tree(tree: List[Dict[str, Any]]) -> List[str]:
+    """Plain-text rendering of ``shutdown_order_tree`` (no colour needed)."""
+    lines = ["Phases run top to bottom; each waits for the one before it.",
+             "Servers in one phase shut down in parallel; each runs its "
+             "pre-shutdown steps (->) before its shutdown command."]
+    for group in tree:
+        head = "UPS" if group["kind"] == "ups" else "Redundancy group"
+        lines.append(f"{head} {group['group']} ({group['role']})")
+        if not group["phases"]:
+            lines.append("  Nothing to shut down: notify only.")
+        for phase in group["phases"]:
+            servers = phase["servers"]
+            title = phase["title"]
+            if phase["kind"] == "remote":
+                count = len(servers)
+                title = (f"{count} servers in parallel ({title})" if count > 1
+                         else f"1 server ({title})")
+            elif phase["kind"] == "local":
+                title = "this host (always first)"
+            elif phase["kind"] == "final":
+                title += " (always last)"
+            elif len(servers) > 1:
+                title += ", one after another"
+            wait = (f"  [waits for phase {phase['waitsFor']}]"
+                    if phase["waitsFor"] else "")
+            lines.append(f"  Phase {phase['number']}: {title}{wait}")
+            if phase["steps"]:
+                lines.append("      " + " -> ".join(phase["steps"]))
+            for i, server in enumerate(servers):
+                branch = "└─" if i == len(servers) - 1 else "├─"
+                if phase["kind"] == "loopback-pre":
+                    chain = " -> ".join(server["preShutdown"])
+                    text = f"{server['name']} ({server['target']}): {chain}"
+                elif phase["kind"] == "loopback-poweroff":
+                    text = (f"{server['name']} ({server['target']}): "
+                            f"{server['shutdownCommand']}")
+                else:
+                    text = _server_line(server)
+                lines.append(f"    {branch} {text}")
+        if group["hostStaysOn"]:
+            why = group.get("hostStaysOnReason") or "local_shutdown.enabled: false"
+            lines.append(f"  This host stays on ({why}).")
+        if group["disabled"]:
+            lines.append("  Skipped (enabled: false): "
+                         + ", ".join(group["disabled"]))
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
 
@@ -1441,6 +1775,7 @@ def check_mapping(data: dict, *, path: Optional[str] = None,
     if probes:
         report.findings.extend(probe_findings(config))
     report.plan = power_loss_plan(config)
+    report.order = format_order_tree(shutdown_order_tree(config))
     return report
 
 
@@ -1495,6 +1830,10 @@ def format_report(report: CheckReport, *, color: bool = False,
         lines.append(_paint("== What happens on power loss ==", "1", color))
         # The plan quotes config commands verbatim: strip terminal escapes.
         lines.extend(f"  {clean(line)}" for line in report.plan)
+    if report.order:
+        lines.append("")
+        lines.append(_paint("== Shutdown order ==", "1", color))
+        lines.extend(f"  {clean(line)}" for line in report.order)
     lines.append("")
     errors = report.count(LEVEL_ERROR)
     warns = report.count(LEVEL_WARN)

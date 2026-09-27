@@ -72,13 +72,19 @@ body {
   margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   background: var(--bg); color: var(--text); line-height: 1.4;
 }
+/* L1 (v6.2): every full-width strip (header, tab bar, fleet strip, banner,
+   error) lines its content up with the <main> column: --edge is the gutter on a
+   narrow screen and grows to centre a 1240px column on a wide one. */
+:root { --col: 1240px; --gutter: 1.5rem;
+  --edge: max(var(--gutter), calc((100% - var(--col)) / 2 + var(--gutter))); }
+@media (max-width: 640px) { :root { --gutter: 1rem; } }
 header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0.75rem 1.25rem; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 0.75rem var(--edge); background: var(--panel); border-bottom: 1px solid var(--line);
 }
 header h1 { font-size: 1.25rem; margin: 0; display: flex; align-items: center; gap: 0.45rem; }
 header h1 .brand-bolt { width: 22px; height: 22px; color: var(--accent); }
-main { padding: 1.75rem 1.5rem; max-width: 1240px; margin: 0 auto; }
+main { padding: 1.75rem var(--gutter); max-width: var(--col); margin: 0 auto; }
 section { margin-bottom: 1.75rem; }
 h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
      letter-spacing: 0.06em; font-weight: 600; border-bottom: none;
@@ -192,6 +198,7 @@ h2 { font-size: 0.8125rem; color: var(--muted); text-transform: uppercase;
   min-width: 0; flex-wrap: wrap; }
 .fleet-overview-name strong { min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+.fleet-overview-status { justify-self: start; }
 .fleet-overview-value { color: var(--text-2); font-size: 0.9rem;
   font-variant-numeric: tabular-nums; white-space: nowrap; }
 
@@ -316,7 +323,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .authbox { display: flex; align-items: center; gap: 0.6rem; }
 .who { color: var(--muted); font-size: 0.9rem; }
 .error { background: rgba(255,92,92,0.12); color: var(--crit); border: 1px solid var(--crit);
-         border-radius: 6px; padding: 0.6rem 0.9rem; margin: 0 1.25rem 1rem; }
+         border-radius: 6px; padding: 0.6rem 0.9rem; margin: 0.5rem var(--edge) 0; }
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex;
          align-items: center; justify-content: center; }
 .modal-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
@@ -331,7 +338,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .var-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; align-items: end; }
 .var-form label { display: grid; gap: 0.25rem; color: var(--muted); font-size: 0.9rem; min-width: 0; }
 .var-form input { width: 100%; min-width: 0; }
-footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
+footer { padding: 0.6rem var(--edge); color: var(--muted); font-size: 0.85rem;
          border-top: 1px solid var(--line); }
 
 /* Theme picker in the header */
@@ -339,8 +346,15 @@ footer { padding: 0.6rem 1.25rem; color: var(--muted); font-size: 0.85rem;
               align-items: center; gap: 0.35rem; }
 
 /* On-battery / shutdown banner */
-.banner { margin: 0 1.25rem 1rem; padding: 0.6rem 0.9rem; border-radius: 6px;
-          font-weight: 600; border: 1px solid transparent; }
+.banner { margin: 0.75rem var(--edge) 0; padding: 0.6rem 0.9rem; border-radius: 6px;
+          font-weight: 600; border: 1px solid transparent;
+          display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 0.6rem; }
+.banner .ic { flex: none; }
+.banner-text { flex: 1 1 16rem; min-width: 0; }
+/* M2: "View shutdown progress →" — a text link styled button. */
+.banner-link { background: transparent; color: inherit; border: 1px solid currentColor;
+  padding: 0.2rem 0.6rem; font-size: 0.85rem; }
+.banner-link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .banner.warn { background: rgba(231,161,58,0.14); color: var(--warn);
                border-color: var(--warn); }
 .banner.crit { background: rgba(239,91,91,0.14); color: var(--crit);
@@ -401,9 +415,9 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 /* ----- Tabbed SPA (v6.1) ------------------------------------------------- */
 .tabs {
   display: flex; gap: 0.25rem; flex-wrap: wrap;
-  padding: 0 1.25rem; background: var(--panel);
+  /* The first tab's label (not its padded button box) lines up with main. */
+  padding: 0 calc(var(--edge) - 0.9rem); background: var(--panel);
   border-bottom: 1px solid var(--line);
-  max-width: 1100px; margin: 0 auto; box-sizing: content-box;
 }
 .tab {
   background: transparent; color: var(--muted); border: 0;
@@ -444,8 +458,7 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 }
 /* Persistent fleet-status strip: chips, one per UPS, on every tab. */
 .fleet-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
-  padding: 0.5rem 1.25rem; max-width: 1100px; margin: 0 auto;
-  box-sizing: content-box; }
+  padding: 0.5rem var(--edge); }
 .fleet-chip { display: inline-flex; align-items: center; gap: 0.45rem;
   background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
   padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; color: var(--text); }
@@ -476,6 +489,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
   padding-top: 1rem; }
 .sd-plan-title { margin: 0.25rem 0 0.75rem; }
 .panel > h2:first-child { margin-top: 0; }
+/* L1: a section label that follows cards/charts gets air above it, so
+   "REMOTE SERVERS" / "HISTORY" / "LOAD & POWER" don't sit on the row above. */
+.panel > h2:not(:first-child), #groups-section > h2, #remote-section > h2 {
+  margin-top: 2rem; }
 
 /* Widget cards with a title + status badge (Battery / Energy tabs). The base
    .card-head / .card-head h3 rules are defined once above (icon chip + title +
@@ -659,16 +676,25 @@ button.sd-progress-badge:focus-visible { outline: 2px solid var(--accent, curren
   .var-form { grid-template-columns: 1fr; }
   header { flex-wrap: wrap; gap: 0.5rem; }
   .authbox { flex-wrap: wrap; }
-  .tabs { padding: 0 0.5rem; }
+  .tabs { padding: 0 calc(var(--edge) - 0.6rem); }
   .tab { padding: 0.5rem 0.6rem; }
   .fleet-overview-head { align-items: flex-start; }
   .fleet-overview-columns { display: none; }
-  .fleet-overview-row { grid-template-columns: minmax(0, 1fr) auto;
+  .fleet-overview-row { grid-template-columns: minmax(5.5rem, 1fr) auto;
     gap: 0.5rem 1rem; padding: 0.8rem 1rem; }
+  /* H2: a long status could squeeze the name to zero; the badge wraps instead. */
+  .fleet-overview-status { white-space: normal; text-align: right;
+    max-width: 11rem; justify-self: end; }
   .fleet-overview-value { display: flex; justify-content: space-between;
     grid-column: 1 / -1; }
   .fleet-overview-value::before { content: attr(data-label); color: var(--muted);
     font-size: 0.78rem; font-weight: 600; }
+  /* No sideways page scroll on a phone: the events table's badges wrap. */
+  .events { font-size: 0.8rem; }
+  .events th, .events td { padding: 0.35rem 0.3rem; }
+  .ev-badge { white-space: normal; }
+  /* Phase head: title + routing tag + live progress badge wrap, not overflow. */
+  .sd-head { flex-wrap: wrap; }
 }
 /* Narrow phones: scroll the tab bar horizontally instead of wrapping the 7 tabs
    into a ragged block; keep the divider from collapsing. (a11y #13) */
@@ -680,6 +706,119 @@ button.sd-progress-badge:focus-visible { outline: 2px solid var(--accent, curren
   .fleet-strip { overflow-x: auto; flex-wrap: nowrap; }
   .fleet-chip { flex: 0 0 auto; }
 }
+/* L6: compact phone header. Brand, theme and sign-in on one row, the
+   dashboard View selector full width under it (was ~140px of chrome). */
+@media (max-width: 640px) {
+  header { display: grid; grid-template-columns: 1fr auto auto; gap: 0.5rem;
+    padding-top: 0.55rem; padding-bottom: 0.55rem; }
+  header h1 { font-size: 1.1rem; }
+  .authbox { display: contents; }
+  .theme-pick { grid-column: 2; grid-row: 1; font-size: 0; gap: 0; }
+  .theme-pick select { font-size: 0.85rem; }
+  #loginBtn, #logoutBtn { grid-column: 3; grid-row: 1; padding: 0.3rem 0.7rem; }
+  .who { display: none; }
+  .ups-scope { grid-column: 1 / -1; grid-row: 2; justify-content: space-between; }
+  .ups-scope select { min-width: 0; flex: 1; }
+}
+/* L6: the phone tab bar scrolls sideways; fade the edge that has more tabs. */
+@media (max-width: 500px) {
+  .tabs.more-right { -webkit-mask-image: linear-gradient(to right, #000 82%, transparent);
+    mask-image: linear-gradient(to right, #000 82%, transparent); }
+  .tabs.more-left { -webkit-mask-image: linear-gradient(to left, #000 82%, transparent);
+    mask-image: linear-gradient(to left, #000 82%, transparent); }
+  .tabs.more-left.more-right {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 12%, #000 82%, transparent);
+    mask-image: linear-gradient(to right, transparent, #000 12%, #000 82%, transparent); }
+}
+
+/* ----- v6.2 UX round: status vocabulary, next trigger, freshness --------- */
+/* M1: only the two "host is going down" states pulse (shutting down, shutdown
+   triggered). On battery is amber and still. */
+@keyframes eneru-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.badge.pulse { animation: eneru-pulse 1.2s ease-in-out infinite; }
+/* M4: role tags. "Powers this host" is outlined (informative, not a status). */
+.role-badge { font-size: 0.72rem; font-weight: 600; white-space: nowrap; }
+.badge.role-local { background: transparent; color: var(--text-2);
+  border: 1px solid var(--line-strong); }
+/* H4: freshness. */
+.hero-detail { margin: 0; color: var(--muted); font-size: 0.85rem;
+  display: flex; flex-wrap: wrap; gap: 0.2rem 0.75rem; }
+.fresh { font-variant-numeric: tabular-nums; }
+.fresh.stale { color: var(--warn); font-weight: 700; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+#status-line.stale { color: var(--warn); font-weight: 600; }
+.stale-mark { margin: 0.75rem var(--edge) 0; padding: 0.35rem 0.8rem; border-radius: 6px;
+  background: var(--warn-weak); color: var(--warn); border: 1px dashed var(--warn);
+  font-weight: 700; letter-spacing: 0.04em; font-size: 0.8rem; }
+/* Data older than 3 polls: grey it out so a frozen daemon never looks live. */
+body.data-stale main, body.data-stale .fleet-strip {
+  opacity: 0.55; filter: grayscale(0.7); }
+/* H3: "what happens next" on the hero. */
+.hero-outlook { margin-top: 0.6rem; padding: 0.65rem 0.85rem; border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong); border-left: 3px solid var(--muted);
+  background: var(--panel); text-align: left; }
+.hero-outlook.s-warn { border-left-color: var(--warn); }
+.hero-outlook.s-crit { border-left-color: var(--crit); }
+.hero-outlook p { margin: 0; }
+.ho-head { font-weight: 700; }
+.hero-outlook.s-warn .ho-head { color: var(--warn); }
+.hero-outlook.s-crit .ho-head { color: var(--crit); }
+.ho-action { color: var(--text-2); font-size: 0.88rem; margin-top: 0.1rem !important; }
+.ho-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; gap: 0.2rem; }
+.ho-list li { display: grid; grid-template-columns: minmax(7rem, auto) 1fr auto;
+  gap: 0.75rem; font-size: 0.85rem; color: var(--muted);
+  font-variant-numeric: tabular-nums; }
+.ho-label { color: var(--text-2); font-weight: 600; }
+.ho-eta { text-align: right; white-space: nowrap; }
+.ho-list li.ho-fired, .ho-list li.ho-fired .ho-label { color: var(--crit); }
+.ho-list li.ho-held .ho-eta { color: var(--warn); }
+.ho-list li.ho-arming .ho-text, .ho-list li.ho-arming .ho-eta { color: var(--warn); }
+.hero-title { flex-wrap: wrap; }
+.hero-title .badge { white-space: nowrap; }
+@media (max-width: 560px) {
+  .hero-title { justify-content: center; }
+  .ho-list { gap: 0.45rem; }
+  .ho-list li { grid-template-columns: 1fr auto; gap: 0 0.75rem; }
+  .ho-text { grid-column: 1 / -1; grid-row: 2; }
+}
+/* H3: fleet-row second line (time on battery, next trigger, staleness). */
+.fleet-overview-sub { grid-column: 1 / -1; font-size: 0.83rem; color: var(--muted);
+  margin-top: -0.2rem; }
+.fleet-overview-sub.s-warn { color: var(--warn); }
+.fleet-overview-sub.s-crit { color: var(--crit); }
+/* M9: redundancy cards say who is down and what happens next. */
+.group-card .card-head { flex-wrap: wrap; }
+.group-card .card-head h3 { flex: 1 1 auto; min-width: 5rem; }
+.group-outlook { margin: 0 0 0.35rem; font-weight: 700; }
+.group-outlook.s-ok { color: var(--ok); }
+.group-outlook.s-warn { color: var(--warn); }
+.group-outlook.s-crit { color: var(--crit); }
+.group-action { margin: 0 0 0.5rem; color: var(--muted); font-size: 0.85rem; }
+.group-members { list-style: none; margin: 0.35rem 0 0.5rem; padding: 0;
+  display: grid; gap: 0.3rem; }
+.group-members li { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 0.2rem 0.5rem; font-size: 0.9rem; }
+.gm-name { font-weight: 600; }
+.group-members .badge { margin-left: auto; }
+.gm-next { flex-basis: 100%; color: var(--muted); font-size: 0.8rem; }
+/* H3c: shutdown tab trigger list. */
+.sd-trigger-body { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; flex: 1; }
+.sd-conditions { margin: 0.1rem 0 0; padding-left: 1.1rem; }
+.sd-trigger-action { font-weight: 600; }
+.sd-trigger-note { color: var(--muted); font-size: 0.82rem; }
+.sd-trigger { flex-wrap: wrap; }
+.sd-trigger-body { flex: 1 1 14rem; }
+.sd-trigger .sd-trigger-live { align-self: flex-start; white-space: normal; max-width: 100%; }
+/* H6: replacement marker tone — neutral when more than a year away. */
+.graph .bh-eta.neutral { stroke: var(--muted); }
+.graph .bh-eta.warn { stroke: var(--warn); }
+.graph .bh-eta-lbl.neutral { fill: var(--muted); }
+.graph .bh-eta-lbl.warn { fill: var(--warn); }
+/* L5: right-hand Load % axis on the energy chart. */
+.graph .lbl-load { fill: var(--accent); }
+.event-actions-end { margin-top: 0.75rem; justify-content: center; }
+
 /* Respect reduced-motion: drop card lifts, ring sweeps, and other transitions
    for users who ask for it. (a11y #6) */
 @media (prefers-reduced-motion: reduce) {

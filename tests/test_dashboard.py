@@ -221,8 +221,10 @@ def test_dashboard_formats_runtime_for_humans(minimal_config):
     assert "function formatRuntimeSeconds" in js
     assert 'return Math.floor(seconds / 3600) + "h "' in js
     assert 'return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s"' in js
-    assert 'vital("Runtime", formatRuntimeSeconds(u.runtime))' in js
-    assert 'detailRow("Runtime", formatRuntimeSeconds(u.runtime))' in js
+    # v6.2 (M3): the daemon's runtimeText wins, formatRuntimeSeconds is the fallback.
+    assert "return durationText(u && u.runtimeText, u && u.runtime)" in js
+    assert 'vital("Runtime", runtimeText(u))' in js
+    assert 'detailRow("Runtime", runtimeText(u))' in js
     assert 'metric === "runtime"' in js
 
 
@@ -362,7 +364,7 @@ def test_dashboard_humanizes_nut_status_and_event_labels(minimal_config):
         js.index("function nutStatusTokens"):
         js.index("// ----- theme (light / dark / system)")
     ]
-    status = js[js.index("function statusClass"):js.index("// ----- rendering -----")]
+    status = js[js.index("// v6.2 shared status vocabulary"):js.index("// ----- rendering -----")]
     health = js[js.index("function upsHealthy"):js.index("function groupHealthyCount")]
     filters = js[
         js.index("function eventTypeFilterLabels"):
@@ -448,8 +450,10 @@ def test_dashboard_humanizes_nut_status_and_event_labels(minimal_config):
         "customTokenSafety": {
             "className": "warn",
             "healthy": False,
-            "alarmClass": "crit",
-            "waitingClass": "warn",
+            # v6.2 shared vocabulary (eneru.utils.status_summary): ALARM on
+            # mains is amber, and OL outranks WAIT.
+            "alarmClass": "warn",
+            "waitingClass": "ok",
             "offHealthy": False,
             "waitingHealthy": False,
         },
@@ -479,7 +483,7 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
         js.index("function nutStatusTokens"):
         js.index("// ----- theme (light / dark / system)")
     ]
-    status = js[js.index("function statusClass"):js.index("// ----- rendering -----")]
+    status = js[js.index("// v6.2 shared status vocabulary"):js.index("// ----- rendering -----")]
     health = js[js.index("function upsHealthy"):js.index("function groupHealthyCount")]
     start = js.index("function fleetSnapshot")
     snapshot = js[start:js.index("function fleetOverview", start)]
@@ -518,6 +522,17 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
           disconnectedForcedShutdown: fleetOverallClass([
             {name: "rack", status: "FSD", connectionState: "DISCONNECTED"},
           ]),
+          failsafeOnBattery: fleetOverallClass([
+            {name: "rack", status: "OB", connectionState: "FAILED"},
+          ]),
+          onBattery: fleetOverallClass([
+            {name: "rack", status: "OB DISCHRG", connectionState: "OK"},
+          ]),
+          daemonSummaryWins: fleetOverallClass([
+            {name: "rack", status: "OL", connectionState: "OK",
+             statusSummary: {state: "trigger_active", label: "Shutdown triggered",
+                             severity: "crit", blink: true}},
+          ]),
         };
         const quorumHealth = {
           boost: upsHealthy({status: "OL BOOST", connectionState: "OK"}),
@@ -535,17 +550,25 @@ def test_dashboard_fleet_overview_summarizes_every_ups(minimal_config):
             "healthy": 1,
             "attention": 3,
             "onBattery": 1,
+            "shuttingDown": 0,
+            "triggered": 0,
         },
         "severity": {
             "healthy": "ok",
             "disconnected": "warn",
             "lowBattery": "crit",
             "forcedShutdown": "crit",
-            "boost": "warn",
-            "trim": "warn",
+            # M1: one 3-level scale shared with the daemon. AVR boost/trim
+            # on mains is normal (green); on battery is amber; red is
+            # reserved for low battery / trigger / FSD / failsafe.
+            "boost": "ok",
+            "trim": "ok",
             "bypass": "warn",
-            "disconnectedOnBattery": "crit",
+            "disconnectedOnBattery": "warn",
             "disconnectedForcedShutdown": "crit",
+            "failsafeOnBattery": "crit",
+            "onBattery": "warn",
+            "daemonSummaryWins": "crit",
         },
         "quorumHealth": {
             "boost": True,

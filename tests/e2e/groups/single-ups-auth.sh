@@ -33,7 +33,7 @@ echo ""
 echo ">>> Running: Test 52: API authentication login + tiered config + write gating"
 
 AUTH_DB="$(mktemp -d)/auth.db"
-printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+printf 's3cret-pw-long' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
   || { echo "FAIL: could not create auth user"; exit 1; }
 
 cat > /tmp/config-e2e-auth.yaml <<YAML
@@ -87,7 +87,7 @@ fi
 
 # login -> bearer token
 curl -fsS -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"operator","password":"s3cret-pw"}' \
+  -d '{"username":"operator","password":"s3cret-pw-long"}' \
   http://127.0.0.1:9100/api/v1/auth/login > /tmp/test52-login.json \
   || { echo "FAIL: login request failed"; cat /tmp/test52-daemon.log; exit 1; }
 TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/test52-login.json'))['token'])")
@@ -153,7 +153,7 @@ echo "PASS: nut_control without auth is rejected at startup"
 # With auth + nut_control enabled, the allowlist is enforced server-side.
 AUTH_DB="$(mktemp -d)/auth.db"
 RUNTIME_DIR="$(mktemp -d)"
-printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
+printf 's3cret-pw-long' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
 
 cat > /tmp/config-e2e-control.yaml <<YAML
 ups:
@@ -197,7 +197,7 @@ for _ in $(seq 1 20); do
 done
 
 TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"operator","password":"s3cret-pw"}' \
+  -d '{"username":"operator","password":"s3cret-pw-long"}' \
   http://127.0.0.1:9100/api/v1/auth/login \
   | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
 [ -n "$TOKEN" ] || { echo "FAIL: no token"; cat /tmp/test53-daemon.log; exit 1; }
@@ -264,7 +264,7 @@ echo ""
 echo ">>> Running: Test 54: Config hot-reload via SIGHUP and API"
 
 AUTH_DB="$(mktemp -d)/auth.db"
-printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
+printf 's3cret-pw-long' | eneru user create operator --password-stdin --auth-db "$AUTH_DB"
 CFG=/tmp/config-e2e-reload.yaml
 
 write_cfg() {  # $1 = low_battery_threshold
@@ -314,12 +314,15 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 [ -n "$RELOADED" ] || { echo "FAIL: SIGHUP reload not logged"; cat /tmp/test54-daemon.log; exit 1; }
-grep -q "triggers" /tmp/test54-daemon.log || { echo "FAIL: triggers not applied"; cat /tmp/test54-daemon.log; exit 1; }
+# reload.py names a per-UPS trigger change "triggers:<ups name>" in the
+# "applied live" list; a bare "triggers" grep matched any line.
+grep -Eq "Config reloaded; applied live: .*triggers:TestUPS@localhost:3493" /tmp/test54-daemon.log \
+  || { echo "FAIL: triggers not applied"; cat /tmp/test54-daemon.log; exit 1; }
 echo "PASS: SIGHUP applied the threshold change live"
 
 # API reload endpoint (authenticated) returns a report.
 TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"operator","password":"s3cret-pw"}' \
+  -d '{"username":"operator","password":"s3cret-pw-long"}' \
   http://127.0.0.1:9100/api/v1/auth/login \
   | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
 write_cfg 60
@@ -398,8 +401,10 @@ const helpers = source.slice(
   source.indexOf("function nutStatusTokens"),
   source.indexOf("// ----- theme (light / dark / system)"),
 );
+// v6.2: statusClass() delegates to localStatusSummary() and its
+// STATUS_STATES table, so take the whole shared-vocabulary block.
 const statusClass = source.slice(
-  source.indexOf("function statusClass"),
+  source.indexOf("// v6.2 shared status vocabulary"),
   source.indexOf("// ----- rendering -----"),
 );
 const badge = source.slice(
@@ -430,8 +435,10 @@ const expected = {
   custom: "Utility power · Custom state: ECO",
   event: "Power failure",
   eventBadge: "Power failure",
-  alarmClass: "crit",
-  waitingClass: "warn",
+  // v6.2 shared vocabulary (eneru.utils.status_summary): ALARM on mains is
+  // amber, and OL outranks WAIT.
+  alarmClass: "warn",
+  waitingClass: "ok",
   customClass: "warn",
 };
 if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -439,12 +446,17 @@ if (JSON.stringify(actual) !== JSON.stringify(expected)) {
   process.exit(1);
 }
 NODE
-grep -q 'text: humanNutStatus(u.status)' /tmp/test55-app.js \
+# v6.2: badges render the shared-vocabulary label with the humanized NUT
+# flags as the detail (statusInfo -> statusBadge).
+grep -q 'text: info.label, title: info.detail' /tmp/test55-app.js \
   || { echo "FAIL: dashboard status formatter is not used for rendered labels"; exit 1; }
-API_STATUS=$(curl -fsS http://127.0.0.1:9100/api/v1/ups \
-  | python3 -c 'import json, sys; print(json.load(sys.stdin)["ups"][0]["status"])')
+curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test55-ups.json
+API_STATUS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["ups"][0]["status"])' /tmp/test55-ups.json)
 [ "$API_STATUS" = "OL CHRG" ] \
   || { echo "FAIL: API status changed from raw NUT value: '$API_STATUS'"; exit 1; }
+API_SUMMARY=$(python3 -c 'import json, sys; s = json.load(open(sys.argv[1]))["ups"][0]["statusSummary"]; print(s["label"] + "|" + s["detail"])' /tmp/test55-ups.json || true)
+[ "$API_SUMMARY" = "On mains|Utility power · Battery charging" ] \
+  || { echo "FAIL: API statusSummary not in the shared vocabulary: '$API_SUMMARY'"; exit 1; }
 echo "PASS (55a): dashboard labels are readable while API status stays raw"
 
 # Content-Type + CSP on the HTML response.
@@ -485,7 +497,7 @@ echo ""
 echo ">>> Running: Test 56: event management — wide-range query + auth-gated delete"
 
 AUTH_DB="$(mktemp -d)/auth.db"
-printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+printf 's3cret-pw-long' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
   || { echo "FAIL: could not create auth user"; exit 1; }
 
 cat > /tmp/config-e2e-events.yaml <<YAML
@@ -546,7 +558,7 @@ ANON=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H 'Content-Type: appli
 
 # Login + authenticated delete -> 200 with deleted >= 1.
 TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"operator","password":"s3cret-pw"}' \
+  -d '{"username":"operator","password":"s3cret-pw-long"}' \
   http://127.0.0.1:9100/api/v1/auth/login | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
 [ -n "$TOKEN" ] || { echo "FAIL: no token"; cat /tmp/test56-daemon.log; exit 1; }
 
@@ -587,7 +599,7 @@ ST_ROOT="$(mktemp -d)"
 ST_AUTH_DB="$ST_ROOT/auth.db"
 ST_STATS_DIR="$ST_ROOT/stats"
 mkdir -p "$ST_STATS_DIR"
-printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$ST_AUTH_DB" \
+printf 's3cret-pw-long' | eneru user create operator --password-stdin --auth-db "$ST_AUTH_DB" \
   || { echo "FAIL: could not create auth user"; exit 1; }
 
 # --- (A) validate: self_test on + nut_control OFF + auth via DB user -> OK ---
@@ -632,9 +644,9 @@ local_shutdown:
   enabled: false
 YAML
 
-if ! eneru validate --config /tmp/config-e2e-selftest-soft.yaml >/tmp/test57-val.log 2>&1; then
+if ! eneru validate --config /tmp/config-e2e-selftest-soft.yaml >/tmp/test62-val.log 2>&1; then
   echo "FAIL: self_test + auth-via-DB-user + nut_control off should validate"
-  cat /tmp/test57-val.log; exit 1
+  cat /tmp/test62-val.log; exit 1
 fi
 echo "PASS: self_test validates without nut_control.enabled (auth via DB user)"
 
@@ -649,17 +661,22 @@ self_test:
   enabled: true
   command: test.battery.start
 YAML
-if eneru validate --config /tmp/config-e2e-selftest-noauth.yaml >/tmp/test57-noauth.log 2>&1; then
+if eneru validate --config /tmp/config-e2e-selftest-noauth.yaml >/tmp/test62-noauth.log 2>&1; then
   echo "FAIL: self_test without any auth must be rejected at validation"
-  cat /tmp/test57-noauth.log; exit 1
+  cat /tmp/test62-noauth.log; exit 1
 fi
-grep -q "requires API authentication" /tmp/test57-noauth.log \
-  || { echo "FAIL: expected 'requires API authentication' error"; cat /tmp/test57-noauth.log; exit 1; }
+grep -q "requires API authentication" /tmp/test62-noauth.log \
+  || { echo "FAIL: expected 'requires API authentication' error"; cat /tmp/test62-noauth.log; exit 1; }
 echo "PASS: self_test without auth is rejected at validation"
 
 # --- (B) passive observation: the UPS reports its own last self-test ---
-apply_scenario self-test-passed
-timeout 180s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test57-daemon.log 2>&1 &
+# Start on a UPS that reports no test result yet: the first poll on a fresh
+# stats DB only records a baseline (F-096), so the result must appear AFTER
+# Eneru is watching to count as a new observation.
+apply_scenario online-charging
+# 300s: the poll phases below budget ~180s of worst-case sleep on their own;
+# the daemon is killed as soon as the test finishes.
+timeout 300s eneru run --config /tmp/config-e2e-selftest-soft.yaml > /tmp/test62-daemon.log 2>&1 &
 DAEMON_PID=$!
 trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
 
@@ -667,30 +684,42 @@ for _ in $(seq 1 30); do
   curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
   sleep 0.5
 done
+BASELINE=""
+for _ in $(seq 1 40); do
+  ST_DB=$(find "$ST_STATS_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
+  if [ -n "$ST_DB" ]; then
+    BASELINE=$(sqlite3 "$ST_DB" "SELECT value FROM meta WHERE key='self_test_observed_key';" 2>/dev/null || true)
+    [ -n "$BASELINE" ] && break
+  fi
+  sleep 0.5
+done
+[ "$BASELINE" = "|<none>" ] \
+  || { echo "FAIL: expected the empty self-test baseline, got '$BASELINE'"; cat /tmp/test62-daemon.log; exit 1; }
+apply_scenario self-test-passed
 
 # Poll the anonymous /api/v1/ups read until the observer has recorded the
 # device result into the selfTest block (record commits immediately).
 RESULT=""; SOURCE=""; DATE=""
 for _ in $(seq 1 40); do
-  if curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test57-ups.json 2>/dev/null; then
-    RESULT=$(python3 -c "import json;d=json.load(open('/tmp/test57-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('result') or '-')")
+  if curl -fsS http://127.0.0.1:9100/api/v1/ups > /tmp/test62-ups.json 2>/dev/null; then
+    RESULT=$(python3 -c "import json;d=json.load(open('/tmp/test62-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('result') or '-')")
     if [ "$RESULT" = "passed" ]; then
-      SOURCE=$(python3 -c "import json;d=json.load(open('/tmp/test57-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('source') or '-')")
-      DATE=$(python3 -c "import json;d=json.load(open('/tmp/test57-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('date') or '-')")
+      SOURCE=$(python3 -c "import json;d=json.load(open('/tmp/test62-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('source') or '-')")
+      DATE=$(python3 -c "import json;d=json.load(open('/tmp/test62-ups.json'));st=(d.get('ups') or [{}])[0].get('selfTest') or {};print(st.get('date') or '-')")
       break
     fi
   fi
   sleep 0.5
 done
 
-[ "$RESULT" = "passed" ]     || { echo "FAIL: selfTest.result was '$RESULT', expected passed"; cat /tmp/test57-daemon.log; exit 1; }
-[ "$SOURCE" = "device" ]     || { echo "FAIL: selfTest.source was '$SOURCE', expected device"; cat /tmp/test57-daemon.log; exit 1; }
-[ "$DATE" = "2026-06-02" ]   || { echo "FAIL: selfTest.date was '$DATE', expected 2026-06-02"; cat /tmp/test57-daemon.log; exit 1; }
-grep -q "Observed UPS self-test: passed" /tmp/test57-daemon.log \
-  || { echo "FAIL: daemon did not log the passive observation"; cat /tmp/test57-daemon.log; exit 1; }
+[ "$RESULT" = "passed" ]     || { echo "FAIL: selfTest.result was '$RESULT', expected passed"; cat /tmp/test62-daemon.log; exit 1; }
+[ "$SOURCE" = "device" ]     || { echo "FAIL: selfTest.source was '$SOURCE', expected device"; cat /tmp/test62-daemon.log; exit 1; }
+[ "$DATE" = "2026-06-02" ]   || { echo "FAIL: selfTest.date was '$DATE', expected 2026-06-02"; cat /tmp/test62-daemon.log; exit 1; }
+grep -q "Observed UPS self-test: passed" /tmp/test62-daemon.log \
+  || { echo "FAIL: daemon did not log the passive observation"; cat /tmp/test62-daemon.log; exit 1; }
 
 ST_DB=$(find "$ST_STATS_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)
-[ -n "$ST_DB" ] || { echo "FAIL: self-test stats DB not found"; cat /tmp/test57-daemon.log; exit 1; }
+[ -n "$ST_DB" ] || { echo "FAIL: self-test stats DB not found"; cat /tmp/test62-daemon.log; exit 1; }
 passed_notice=$(sqlite3 "$ST_DB" \
   "SELECT COUNT(*) FROM notifications WHERE category='self_test' \
    AND notify_type='success' AND body LIKE '%UPS Self-Test Passed%';")
@@ -709,7 +738,7 @@ for _ in $(seq 1 30); do
   sleep 0.5
 done
 [ "${seen:-0}" = "1" ] \
-  || { echo "FAIL: device test OB was not attributed"; cat /tmp/test57-daemon.log; exit 1; }
+  || { echo "FAIL: device test OB was not attributed"; cat /tmp/test62-daemon.log; exit 1; }
 
 apply_scenario self-test-failed-online
 for _ in $(seq 1 40); do
@@ -719,7 +748,30 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [ -n "${latch:-}" ] \
-  || { echo "FAIL: hard self-test failure did not persist its latch"; cat /tmp/test57-daemon.log; exit 1; }
+  || { echo "FAIL: hard self-test failure did not persist its latch"; cat /tmp/test62-daemon.log; exit 1; }
+
+# F-189: the outlook shows the latch live. On mains the T5 row is armed
+# (enabled) but idle; eneru.outlook evaluate_triggers "selfTestFailure".
+# t5_row <json-out> prints "enabled state nextTrigger threshold" for it.
+t5_row() {
+  curl -fsS http://127.0.0.1:9100/api/v1/ups > "$1" 2>/dev/null || return 1
+  python3 - "$1" <<'PY'
+import json
+import sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))["ups"][0]
+t5 = [t for t in row["triggerOutlook"]["triggers"] if t["id"] == "selfTestFailure"][0]
+nxt = (row.get("nextTrigger") or {}).get("id") or "-"
+print(str(t5["enabled"]).lower(), t5["state"], nxt, t5["threshold"])
+PY
+}
+T5_IDLE=""
+for _ in $(seq 1 20); do
+  T5_IDLE=$(t5_row /tmp/test62-t5-idle.json || true)
+  [ "${T5_IDLE%% *}" = "true" ] && break
+  sleep 0.5
+done
+[ "$T5_IDLE" = "true idle - 3" ] \
+  || { echo "FAIL: armed T5 row on mains was '$T5_IDLE'"; cat /tmp/test62-t5-idle.json 2>/dev/null; exit 1; }
 
 test_ob=$(sqlite3 "$ST_DB" \
   "SELECT COUNT(*) FROM events WHERE id > $BASE_EVENT_ID \
@@ -757,7 +809,7 @@ for _ in $(seq 1 30); do
   sleep 0.5
 done
 [ "${continuing_test_ob:-0}" = "1" ] \
-  || { echo "FAIL: continuing-OB test was not attributed"; cat /tmp/test57-daemon.log; exit 1; }
+  || { echo "FAIL: continuing-OB test was not attributed"; cat /tmp/test62-daemon.log; exit 1; }
 
 apply_scenario self-test-failed-on-battery
 for _ in $(seq 1 40); do
@@ -772,7 +824,7 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [ "${continuing_outage:-0}" = "1" ] && [ "${continuing_shutdown:-0}" = "1" ] \
-  || { echo "FAIL: failed test did not reclassify continuing OB and trigger shutdown"; cat /tmp/test57-daemon.log; exit 1; }
+  || { echo "FAIL: failed test did not reclassify continuing OB and trigger shutdown"; cat /tmp/test62-daemon.log; exit 1; }
 
 # A successful neutral status can hide an OL transition between polls. The next
 # genuine OB must still re-arm T5 and fire after the configured three-second
@@ -780,12 +832,12 @@ done
 apply_scenario unknown-status
 for _ in $(seq 1 30); do
   unknown_seen=$(grep -c "UPS status 'UNKNOWN' is neither on-line nor on-battery" \
-    /tmp/test57-daemon.log || true)
+    /tmp/test62-daemon.log || true)
   [ "$unknown_seen" -ge 1 ] && break
   sleep 0.5
 done
 [ "${unknown_seen:-0}" -ge 1 ] \
-  || { echo "FAIL: daemon did not observe the unknown-status interval"; cat /tmp/test57-daemon.log; exit 1; }
+  || { echo "FAIL: daemon did not observe the unknown-status interval"; cat /tmp/test62-daemon.log; exit 1; }
 OUTAGE_BASE=$(sqlite3 "$ST_DB" "SELECT COALESCE(MAX(id),0) FROM events;")
 apply_scenario on-battery
 for _ in $(seq 1 40); do
@@ -797,7 +849,17 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [ "${shutdowns:-0}" = "1" ] \
-  || { echo "FAIL: failed-test latch did not trigger later outage shutdown"; cat /tmp/test57-daemon.log; exit 1; }
+  || { echo "FAIL: failed-test latch did not trigger later outage shutdown"; cat /tmp/test62-daemon.log; exit 1; }
+# The dry-run daemon keeps polling the continuing outage, so the row the
+# dashboard and TUI read must now show T5 fired as the next trigger.
+T5_FIRED=""
+for _ in $(seq 1 20); do
+  T5_FIRED=$(t5_row /tmp/test62-t5-fired.json || true)
+  [ "$T5_FIRED" = "true fired selfTestFailure 3" ] && break
+  sleep 0.5
+done
+[ "$T5_FIRED" = "true fired selfTestFailure 3" ] \
+  || { echo "FAIL: T5 outlook row during the outage was '$T5_FIRED'"; cat /tmp/test62-t5-fired.json 2>/dev/null; exit 1; }
 trigger_delay=$(sqlite3 "$ST_DB" \
   "SELECT shutdown.ts - outage.ts FROM events outage JOIN events shutdown \
     WHERE outage.id > $OUTAGE_BASE AND outage.event_type='ON_BATTERY' \
@@ -825,7 +887,7 @@ echo ""
 echo ">>> Running: Test 64: authenticated remote shutdown response and exit code"
 
 AUTH_DB="$(mktemp -d)/auth.db"
-printf 's3cret-pw' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
+printf 's3cret-pw-long' | eneru user create operator --password-stdin --auth-db "$AUTH_DB" \
   || { echo "FAIL: could not create auth user"; exit 1; }
 RUN_DIR="$(mktemp -d)"
 
@@ -902,7 +964,7 @@ if [ "$HEALTHY" != true ]; then
 fi
 
 curl -fsS -X POST -H 'Content-Type: application/json' \
-  -d '{"username":"operator","password":"s3cret-pw"}' \
+  -d '{"username":"operator","password":"s3cret-pw-long"}' \
   http://127.0.0.1:9100/api/v1/auth/login > /tmp/test64-login.json \
   || { echo "FAIL: login failed"; cat /tmp/test64-daemon.log; exit 1; }
 TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/test64-login.json'))['token'])")

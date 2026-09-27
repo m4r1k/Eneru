@@ -32,8 +32,12 @@ RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
 RUN touch /var/run/server-alive
 
 # Create a fake shutdown command that just creates a marker file
-# instead of actually shutting down
+# instead of actually shutting down. /var/run and /var/log are root-only,
+# so a non-sudo invocation as testuser would fail those writes silently;
+# /tmp/shutdown-invoked is world-writable and records ANY invocation
+# (Test 65 asserts `config check` never creates it).
 RUN echo '#!/bin/bash' > /usr/local/bin/fake-shutdown && \
+    echo 'touch /tmp/shutdown-invoked 2>/dev/null' >> /usr/local/bin/fake-shutdown && \
     echo 'echo "$(date): Shutdown command received: $@" >> /var/log/shutdown.log' >> /usr/local/bin/fake-shutdown && \
     echo 'touch /var/run/shutdown-triggered' >> /usr/local/bin/fake-shutdown && \
     echo 'rm -f /var/run/server-alive' >> /usr/local/bin/fake-shutdown && \

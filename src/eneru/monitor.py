@@ -12,10 +12,13 @@ import signal
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Tuple, List
+from typing import Any, Optional, Dict, Tuple, List
 
 from eneru.version import __version__
-from eneru.config import Config, RemoteServerConfig, resolve_energy_config
+from eneru.config import (
+    Config, NOT_LOCAL_SKIP, RemoteServerConfig, SINGLE_UPS_IS_LOCAL_UNSET_WARNING,
+    resolve_energy_config, single_ups_is_local_unset, single_ups_owns_host,
+)
 from eneru.state import MonitorState
 from eneru.logger import UPSLogger
 from eneru.notifications import NotificationWorker, APPRISE_AVAILABLE
@@ -60,7 +63,7 @@ from eneru.shutdown.remote import (
     loopback_poweroff_sent,
     select_loopback_results,
 )
-from eneru.shutdown.progress import ShutdownProgress
+from eneru.shutdown.progress import ShutdownProgress, progress_sidecar_path
 from eneru.health.voltage import VoltageMonitorMixin
 from eneru.health.battery import BatteryMonitorMixin
 # ISS-017: single source of truth for the connection-retry cadence. The poll
@@ -78,6 +81,11 @@ SLOW_NUT_NOTIFY_CONSECUTIVE_POLLS = 3
 # on every poll tick.
 SELF_TEST_ISSUE_RETRY_SECONDS = 300.0
 SELF_TEST_ATTRIBUTION_SECONDS = 30
+# Observed-self-test baseline for a UPS that reports no ups.test.result yet.
+_NO_TEST_RESULT_KEY = "|<none>"
+# F-119: how long a poll waits for a running NUT control command before
+# polling without the per-UPS lock.
+UPSC_LOCK_WAIT_SECONDS = 1.0
 # ISS-022: minimum interval between `upsc -l` ups.name diagnostics -- the
 # probe blocks the poll thread for up to ~10s, so a flapping NUT server is
 # probed at most once per window.
@@ -227,6 +235,10 @@ class UPSGroupMonitor(
         self._last_ob_status_log_mono = None
         self._last_name_diagnostic_mono = None
         self._last_unknown_status_log_mono = None
+        # R2-12: per-reading throttle for the on-battery "invalid battery
+        # charge/runtime" warning (a UPS without those variables would
+        # otherwise log one line per poll for the whole outage).
+        self._invalid_reading_log_mono: Dict[str, float] = {}
         # ISS-055: last distinct state-file persist error, so a recurring disk
         # failure is logged once per cause instead of silently swallowed.
         self._last_state_save_error: Optional[str] = None
@@ -236,6 +248,12 @@ class UPSGroupMonitor(
         self._battery_history_path = Path(config.logging.battery_history_file + sfx)
         self._state_file_path = Path(config.logging.state_file + sfx)
         self._remote_health_path = remote_health_sidecar_path(self._state_file_path)
+        # UX item 7: mirror shutdown progress next to the state file so the
+        # out-of-process TUI can follow it. The idle snapshot is written on the
+        # first successful poll (see _save_state), never at construction.
+        self._shutdown_progress.sidecar_path = progress_sidecar_path(
+            self._state_file_path)
+        self._progress_sidecar_seeded = False
 
         self._container_runtime: Optional[str] = None
         self._compose_available: bool = False
@@ -273,6 +291,12 @@ class UPSGroupMonitor(
         self._self_test_pending_id: Optional[int] = None
         self._self_test_poll_due_mono: Optional[float] = None
         self._self_test_outage_attributed = False
+        # A ticket that may no longer claim an on-battery interval: its
+        # attributed interval already ended, or an OB began before it
+        # could be attributed (that OB was alerted as a real outage).
+        self._self_test_no_attribution_id: Optional[int] = None
+        # F-119: one log line per episode of polling past a busy control lock.
+        self._upsc_lock_bypassed = False
         self._self_test_repair_done = False
         self._self_test_monitor_only_alerted = False
         self._self_test_failure_triggered = False
@@ -467,6 +491,7 @@ class UPSGroupMonitor(
         if self.config.behavior.dry_run:
             self._log_message("🧪  *** RUNNING IN DRY-RUN MODE - NO ACTUAL SHUTDOWN WILL OCCUR ***")
 
+        self._log_host_ownership()
         self._log_enabled_features()
         self._wait_for_initial_connection()
         self._initialize_voltage_thresholds()
@@ -706,7 +731,7 @@ class UPSGroupMonitor(
                 self._stats_store.log_event(
                     "POWER_RESTORED",
                     f"Power restored after outage-triggered shutdown "
-                    f"(downtime {downtime}s)",
+                    f"(downtime {format_seconds(downtime)})",
                 )
             except Exception:
                 pass  # never mask a startup notification on a stats hiccup
@@ -819,7 +844,9 @@ class UPSGroupMonitor(
                 the notification row.
         """
         del blocking  # see docstring
-        if not self._notification_worker:
+        # F-122: read once -- a reload may null the attribute concurrently.
+        worker = self._notification_worker
+        if not worker:
             return None
 
         # Prefix notification body with UPS name in multi-UPS mode.
@@ -828,7 +855,7 @@ class UPSGroupMonitor(
         # Escape @ symbols to prevent Discord mentions (e.g., UPS@192.168.1.1)
         escaped_body = prefixed_body.replace("@", "@\u200B")  # Zero-width space after @
 
-        return self._notification_worker.send(
+        return worker.send(
             body=escaped_body,
             notify_type=notify_type,
             category=category,
@@ -1132,13 +1159,32 @@ class UPSGroupMonitor(
 
     def _run_upsc(self, args: List[str], *, full_poll: bool) -> Tuple[int, str, str]:
         cmd = ["upsc", self._poll_target, *args]
-        with nutctl.command_lock(self.config.ups.name):
+        # Polls share the per-UPS control lock so a read doesn't interleave
+        # with an INSTCMD/SET or a self-test issue (ee96ed9: "serialize NUT
+        # reads with control commands"). But a control command can hold that
+        # lock for up to nut_control.timeout, and back-to-back API commands
+        # almost continuously: power-event detection must never queue behind
+        # them (F-119). So wait briefly, then poll without the lock -- a rare
+        # slightly racy read beats a late OB/LB.
+        lock = nutctl.command_lock(self.config.ups.name)
+        acquired = lock.acquire(timeout=UPSC_LOCK_WAIT_SECONDS)
+        if not acquired and not self._upsc_lock_bypassed:
+            self._upsc_lock_bypassed = True
+            self._log_message(
+                "⏱️  A NUT control command is still running on "
+                f"{self.config.ups.label}; polling without waiting for it.")
+        elif acquired:
+            self._upsc_lock_bypassed = False
+        try:
             started = time.monotonic()
             # NUT's NSS-backed libupsclient can emit "Init SSL without certificate
             # database" on stderr even for plain read-only polling. Suppress that
             # upstream noise so real connection/UPS-name errors stay visible.
             result = run_command(
                 cmd, env_overrides={"NUT_QUIET_INIT_SSL": "true"})
+        finally:
+            if acquired:
+                lock.release()
         elapsed = time.monotonic() - started
         self._record_upsc_latency(elapsed, cmd, full_poll=full_poll)
         return result
@@ -1390,6 +1436,43 @@ class UPSGroupMonitor(
             f"within {max_wait}s. Proceeding, but voltage thresholds may default."
         )
 
+    def _state_file_freshness_lines(self) -> str:
+        """H4/H5 freshness + outlook keys appended to the state file.
+
+        TIMESTAMP stays the naive daemon-local string for old readers; EPOCH is
+        the zone-free truth a reader uses to render local time and "updated Ns
+        ago" / STALE. The remaining keys let the TUI compute the same
+        next-trigger outlook the API serves. Display-only: built defensively so
+        a surprise here can never cost the poll loop its state file.
+        """
+        try:
+            if self.state.on_battery_start_mono > 0:
+                time_on_battery = int(
+                    time.monotonic() - self.state.on_battery_start_mono)
+            elif self.state.on_battery_start_time > 0:
+                time_on_battery = (
+                    int(time.time()) - self.state.on_battery_start_time)
+            else:
+                time_on_battery = 0
+            now_epoch = time.time()
+            iso = datetime.fromtimestamp(now_epoch).astimezone().isoformat(
+                timespec="seconds")
+            reason = " ".join(str(self.state.trigger_reason or "").split())
+            attributed = getattr(self, "_self_test_outage_attributed", False)
+            return (
+                f"EPOCH={now_epoch:.3f}\n"
+                f"TIMESTAMP_ISO={iso}\n"
+                f"CHECK_INTERVAL={self.config.ups.check_interval}\n"
+                f"TIME_ON_BATTERY={max(0, time_on_battery)}\n"
+                f"ON_BATTERY_SINCE={int(self.state.on_battery_start_time or 0)}\n"
+                f"DEPLETION_RATE={float(self.state.latest_depletion_rate or 0.0)}\n"
+                f"TRIGGER_ACTIVE={1 if self.state.trigger_active else 0}\n"
+                f"TRIGGER_REASON={reason}\n"
+                f"SELF_TEST_ATTRIBUTED={1 if attributed else 0}\n"
+            )
+        except Exception:
+            return ""
+
     def _save_state(self, ups_data: Dict[str, str]):
         """Save current UPS state to file + buffer one stats sample."""
         state_content = (
@@ -1400,7 +1483,12 @@ class UPSGroupMonitor(
             f"INPUT_VOLTAGE={ups_data.get('input.voltage', '')}\n"
             f"OUTPUT_VOLTAGE={ups_data.get('output.voltage', '')}\n"
             f"TIMESTAMP={datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        )
+        ) + self._state_file_freshness_lines()
+        if not getattr(self, "_progress_sidecar_seeded", True):
+            # First good poll after start: publish the idle progress snapshot
+            # so the TUI never shows a previous run's "running" as live.
+            self._progress_sidecar_seeded = True
+            self._shutdown_progress.persist()
         try:
             # with_name(name + '.tmp') appends '.tmp' to the full filename;
             # with_suffix('.tmp') would replace the per-UPS suffix
@@ -1689,7 +1777,12 @@ class UPSGroupMonitor(
             except Exception:
                 pass
 
-        if self.config.local_shutdown.enabled and not delegated:
+        # 6.2: a lone list-form UPS with an explicit `is_local: false` is
+        # someone else's house: run its remotes, never flip OUR main switch.
+        host_poweroff = (self.config.local_shutdown.enabled
+                         and self._powers_this_host())
+
+        if host_poweroff and not delegated:
             progress.phase_start("local-poweroff")
             if self.config.behavior.dry_run:
                 record_sequence_complete()
@@ -1745,8 +1838,11 @@ class UPSGroupMonitor(
                 # rather than always waiting the full 5s. Whatever doesn't
                 # drain stays in SQLite as 'pending' and ships on the
                 # next start (the lossless guarantee).
-                if self._notification_worker:
-                    self._notification_worker.flush(timeout=5)
+                # F-122: read once; a SIGHUP reload that disables
+                # notifications can null the attribute between check and use.
+                worker = self._notification_worker
+                if worker:
+                    worker.flush(timeout=5)
 
                 # Slice 3: tag this shutdown as power-loss-triggered so
                 # the next start can emit "📊  Recovered" and (with Slice
@@ -1813,7 +1909,7 @@ class UPSGroupMonitor(
                 else:
                     progress.phase_finish("local-poweroff")
                     progress.finish("failed" if phase_failed else "succeeded")
-        elif self.config.local_shutdown.enabled and delegated:
+        elif host_poweroff and delegated:
             # v5.5: the loopback's shutdown_command (already executed during
             # _shutdown_remote_servers) is what actually powers off the host.
             # The container dies with it. Notify + flush + marker, then exit.
@@ -1897,8 +1993,11 @@ class UPSGroupMonitor(
                     self.config.NOTIFY_FAILURE,
                     category="shutdown_summary",
                 )
-                if self._notification_worker:
-                    self._notification_worker.flush(timeout=5)
+                # F-122: read once; a SIGHUP reload that disables
+                # notifications can null the attribute between check and use.
+                worker = self._notification_worker
+                if worker:
+                    worker.flush(timeout=5)
                 from pathlib import Path
                 write_shutdown_marker(
                     Path(self.config.statistics.db_directory),
@@ -1906,6 +2005,22 @@ class UPSGroupMonitor(
                     reason=REASON_SEQUENCE_COMPLETE,
                 )
                 progress.finish("failed" if phase_failed else "succeeded")
+        elif self.config.local_shutdown.enabled:
+            # Explicit `is_local: false` on the only UPS: this host stays up.
+            progress.phase_skip("local-poweroff", NOT_LOCAL_SKIP)
+            record_sequence_complete()
+            self._log_message(
+                "✅  SHUTDOWN SEQUENCE COMPLETE (is_local: false -- this host "
+                "stays up)")
+            self._send_notification(
+                f"✅  **Shutdown Sequence Complete** (took {elapsed}s)\n"
+                f"This UPS does not power this host (is_local: false) — "
+                f"system stays up.",
+                self.config.NOTIFY_INFO,
+                category="shutdown_summary",
+            )
+            self._clear_shutdown_in_progress()
+            progress.finish("failed" if phase_failed else "succeeded")
         else:
             progress.phase_skip("local-poweroff", "local shutdown disabled")
             record_sequence_complete()
@@ -2137,11 +2252,12 @@ class UPSGroupMonitor(
             self._api_server.stop()
 
         if self._shutdown_guard_active():
-            if self._notification_worker:
+            worker = self._notification_worker
+            if worker:
                 # Mid-shutdown signal: still try to drain any in-flight
                 # rows; whatever's left persists for the next start.
-                self._notification_worker.flush(timeout=5)
-                self._notification_worker.stop()
+                worker.flush(timeout=5)
+                worker.stop()
             self._stop_stats()
             sys.exit(0)
 
@@ -2188,9 +2304,10 @@ class UPSGroupMonitor(
         # `_send_notification` still writes the row to SQLite (the
         # enqueue is a synchronous DB insert; only delivery requires the
         # worker thread).
-        if self._notification_worker:
-            self._notification_worker.flush(timeout=5)
-            self._notification_worker.stop()
+        worker = self._notification_worker
+        if worker:
+            worker.flush(timeout=5)
+            worker.stop()
 
         notif_id = None
         if not upgrade_in_progress:
@@ -2217,10 +2334,10 @@ class UPSGroupMonitor(
                     config_path=getattr(self.config, "config_path", None),
                     body=body,
                     notify_type=notify_type,
-                    worker=self._notification_worker,
+                    worker=worker,
                     log_fn=self._log_message,
                 )
-            elif self._notification_worker is not None:
+            elif worker is not None:
                 # CodeRabbit P1: stats DB open() failed (per the warning
                 # logged in _initialize_notifications), so notif_id is
                 # None and the row never landed in SQLite. Without this
@@ -2230,7 +2347,7 @@ class UPSGroupMonitor(
                 # coalescing in this degraded case, but the alternative
                 # is no notification at all).
                 try:
-                    self._notification_worker._send_via_apprise_bounded(
+                    worker._send_via_apprise_bounded(
                         body, notify_type,
                     )
                 except Exception:
@@ -2258,6 +2375,22 @@ class UPSGroupMonitor(
     # STATUS CHECKS
     # ==========================================================================
 
+    def _on_battery_trigger_hint(self) -> str:
+        """One notification line: the configured triggers + what firing does.
+
+        Display-only (UX H3/M3): built from config, never consulted by the
+        trigger logic below, and any error just drops the line.
+        """
+        try:
+            from eneru.outlook import (
+                describe_trigger_conditions, monitor_role, trigger_action)
+            conditions = describe_trigger_conditions(self.config.triggers)
+            action = trigger_action(monitor_role(self))["label"]
+            return ("Shutdown triggers: " + " · ".join(conditions)
+                    + f" → {action}")
+        except Exception:
+            return ""
+
     def _handle_on_battery(self, ups_data: Dict[str, str]):
         """Handle the On Battery state."""
         ups_status = ups_data.get('ups.status', '')
@@ -2279,12 +2412,18 @@ class UPSGroupMonitor(
 
             event = ("SELF_TEST_ON_BATTERY"
                      if self._self_test_outage_attributed else "ON_BATTERY")
+            details = (
+                f"Battery: {battery_charge}%, Runtime: "
+                f"{format_seconds(battery_runtime)}, Load: {ups_load}%"
+                + ("; attributed to active UPS self-test"
+                   if self._self_test_outage_attributed else ""))
+            hint = self._on_battery_trigger_hint()
             self._log_power_event(
                 event,
-                f"Battery: {battery_charge}%, Runtime: {battery_runtime} seconds, Load: {ups_load}%"
-                + ("; attributed to active UPS self-test"
-                   if self._self_test_outage_attributed else ""),
+                details,
                 suppress_notification=self._self_test_outage_attributed,
+                notification_details=(
+                    details + ("\n" + hint if hint else "")),
             )
             if not self._self_test_outage_attributed and self._should_fire_wall():
                 run_command([
@@ -2334,12 +2473,14 @@ class UPSGroupMonitor(
                         f"{self.config.triggers.low_battery_threshold}%"
                     )
         elif not is_numeric(battery_charge):
-            self._log_message(
+            self._log_invalid_reading(
+                "battery.charge",
                 f"⚠️  WARNING: Received non-numeric battery charge value: "
                 f"'{battery_charge}'"
             )
         else:
-            self._log_message(
+            self._log_invalid_reading(
+                "battery.charge",
                 f"⚠️  WARNING: Received invalid battery charge value: "
                 f"'{battery_charge}'"
             )
@@ -2362,7 +2503,8 @@ class UPSGroupMonitor(
                         f"{format_seconds(self.config.triggers.critical_runtime_threshold)}"
                     )
         elif not shutdown_reason:
-            self._log_message(
+            self._log_invalid_reading(
+                "battery.runtime",
                 f"⚠️  WARNING: Received invalid battery runtime value: "
                 f"'{battery_runtime}'"
             )
@@ -2606,6 +2748,7 @@ class UPSGroupMonitor(
             with self.state._lock:
                 self.state.connection_state = "GRACE_PERIOD"
                 self.state.connection_lost_time = time.time()
+                self.state.connection_lost_mono = time.monotonic()
             if "Data stale" in error_msg:
                 self._log_message(
                     f"⚠️  Connection to UPS {self.config.ups.name} lost "
@@ -2619,7 +2762,7 @@ class UPSGroupMonitor(
                 )
 
         elif self.state.connection_state == "GRACE_PERIOD":
-            elapsed = time.time() - self.state.connection_lost_time
+            elapsed = self._connection_grace_elapsed()
             if elapsed >= grace_cfg.duration:
                 # Grace period expired: fire full notification
                 if "Data stale" in error_msg:
@@ -2640,8 +2783,28 @@ class UPSGroupMonitor(
                 with self.state._lock:
                     self.state.connection_state = "FAILED"
                     self.state.connection_lost_time = 0.0
+                    self.state.connection_lost_mono = 0.0
 
         # If connection_state == "FAILED": already notified, nothing to do
+
+    def _log_invalid_reading(self, key: str, message: str) -> None:
+        """Log an invalid on-battery reading at most once per interval."""
+        now = time.monotonic()
+        last = self._invalid_reading_log_mono.get(key)
+        if last is not None and now - last < NEUTRAL_STATUS_LOG_INTERVAL_SECONDS:
+            return
+        self._invalid_reading_log_mono[key] = now
+        self._log_message(message)
+
+    def _connection_grace_elapsed(self) -> float:
+        """Seconds spent in connection grace, on the monotonic clock (R2-01).
+
+        Falls back to the wall-clock stamp only when the monotonic anchor is
+        unset, so an NTP step can't expire (or extend) the grace window.
+        """
+        if self.state.connection_lost_mono > 0:
+            return time.monotonic() - self.state.connection_lost_mono
+        return time.time() - self.state.connection_lost_time
 
     def _check_nominal_power_override(self, ups_data: Dict[str, str]) -> None:
         """Warn once when configured nominal_power exceeds the UPS's own rating.
@@ -2769,18 +2932,37 @@ class UPSGroupMonitor(
         if store is None or not getattr(store, "is_open", False):
             return
         raw = (ups_data or {}).get("ups.test.result")
+        # Fingerprint of the last result Eneru already accounted for — via this
+        # observer OR its own scheduled finalise (which stamps the same key).
+        stored = store.get_meta("self_test_observed_key")
         if not raw:
-            return  # this UPS doesn't report a test result
+            # Some drivers expose ups.test.result only after a test has run.
+            # Seed an empty baseline on the first good poll so the first
+            # result that appears later counts as news (R2 regression of
+            # F-096: it was otherwise adopted as the baseline and dropped).
+            # Only a complete poll (it carries ups.status) may seed it: a
+            # partial read that merely lacks the variable must not.
+            if ups_data and "ups.status" in ups_data and not stored:
+                store.set_meta("self_test_observed_key", _NO_TEST_RESULT_KEY)
+            return  # this UPS doesn't report a test result (yet)
+        date = (ups_data or {}).get("ups.test.date") or ""
+        key = f"{date}|{raw}"
+        if stored == key:
+            return
+        if not stored:
+            # F-096: first sight on this stats DB (new install, fresh container
+            # volume, DB reset). Whatever the UPS's logbook says was written
+            # BEFORE Eneru was watching -- possibly months ago, before a
+            # battery swap. Adopt it as the baseline instead of replaying it as
+            # news: an old "Done and error" must not arm the failed-test
+            # shutdown latch for every future outage. Only a CHANGE after this
+            # is a new observation.
+            store.set_meta("self_test_observed_key", key)
+            return
         enum = selftest.normalize_result(raw)
         # Only persist a SETTLED, meaningful result. running/unknown churn while a
         # test is in flight or was never run; unsupported is one-time noise.
         if enum not in ("passed", "warning", "failed", "aborted"):
-            return
-        date = (ups_data or {}).get("ups.test.date") or ""
-        key = f"{date}|{raw}"
-        # Fingerprint of the last result Eneru already accounted for — via this
-        # observer OR its own scheduled finalise (which stamps the same key).
-        if store.get_meta("self_test_observed_key") == key:
             return
         # Never race the scheduled path: it owns the row for a test it issued.
         if self._self_test_pending_id is not None:
@@ -2941,19 +3123,91 @@ class UPSGroupMonitor(
             # clear failed so completion can safely retry it.
             self._self_test_outage_attributed = already_attributed
             return
+        if self._self_test_issue_in_flight(store, pending_id, row):
+            # R2-02 (round 2): the API persisted this ticket but its upscmd
+            # has not returned yet (this poll bypassed the per-UPS lock). The
+            # command may still fail, so neither announce the test nor pin an
+            # OB on it until the issued marker appears.
+            self._self_test_outage_attributed = already_attributed
+            if not already_attributed and status_has_token(
+                    ups_data.get("ups.status", ""), "OB"):
+                # This OB is handled (and alerted) as a real outage; do not
+                # relabel the rest of the interval once the marker lands.
+                self._self_test_no_attribution_id = pending_id
+            return
         self._notify_self_test_start(pending_id, row.get("command", ""))
+        on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
+        if already_attributed and not on_battery:
+            # F-097: the attributed battery interval just ended. This poll's
+            # OB->OL transition still belongs to the test (it is reported as the
+            # test's own return to line power), but the attribution must not
+            # outlive that interval: a test whose row never reaches a terminal
+            # result would otherwise relabel a real outage hours later as
+            # SELF_TEST_ON_BATTERY and silence its alerts and the T5 trigger.
+            self._self_test_outage_attributed = True
+            store.set_meta("self_test_attributed_id", "")
+            # One battery interval per test: a new OB inside the 30 s window
+            # is a real outage.
+            self._self_test_no_attribution_id = pending_id
+            return
         recent_issue = (
             time.time() - row["started_ts"] <= SELF_TEST_ATTRIBUTION_SECONDS)
-        on_battery = status_has_token(ups_data.get("ups.status", ""), "OB")
-        self._self_test_outage_attributed = (
-            already_attributed or (on_battery and recent_issue))
+        self._self_test_outage_attributed = already_attributed or (
+            on_battery and recent_issue
+            and self._self_test_no_attribution_id != pending_id)
         if self._self_test_outage_attributed:
             store.set_meta("self_test_attributed_id", str(pending_id))
+
+    def _self_test_issue_in_flight(self, store, test_id: int,
+                                   row: Dict[str, Any]) -> bool:
+        """True while an Eneru-issued ticket's upscmd has not succeeded yet.
+
+        Device-observed tests have no command to wait for. The window is
+        bounded by the NUT command timeout (plus slack) so a ticket left by a
+        crash mid-issue, or by a version without the issued marker, is not
+        held back forever.
+        """
+        if row.get("source") == "device":
+            return False
+        if store.get_meta(selftest.ISSUED_ID_META) == str(test_id):
+            return False
+        try:
+            bound = int(self._resolve_nut_control_config().timeout) + 5
+        except (TypeError, ValueError, AttributeError):
+            bound = 35
+        started = row.get("started_ts") or 0
+        return time.time() - float(started) <= bound
+
+    def _powers_this_host(self) -> bool:
+        """Does this monitor's own shutdown sequence power the host off?
+
+        Single-UPS runtime only (the coordinator owns the poweroff in multi-UPS
+        mode): a lone list-form UPS with an explicit ``is_local: false`` never
+        powers the host off; everything else keeps the pre-6.2 behaviour.
+        """
+        group = self.config.ups_groups[0] if self.config.ups_groups else None
+        return single_ups_owns_host(group)
+
+    def _log_host_ownership(self) -> None:
+        """Startup notice: does this lone UPS power the host off? (6.2)"""
+        if self._coordinator_mode:
+            return
+        if single_ups_is_local_unset(self.config):
+            self._log_message(f"⚠️  WARNING: {SINGLE_UPS_IS_LOCAL_UNSET_WARNING}")
+        elif self.config.local_shutdown.enabled and not self._powers_this_host():
+            self._log_message(
+                "ℹ️  is_local: false -- this host is never powered off by this "
+                "UPS; a shutdown trigger only runs its remote servers.")
 
     def _is_monitor_only_group(self) -> bool:
         """Return whether this UPS owns no shutdown-capable resources."""
         group = self.config.ups_groups[0] if self.config.ups_groups else None
         if group is None or group.is_local or self._in_redundancy_group:
+            return False
+        # Single-UPS: a list entry that omits is_local still powers the host
+        # off on T1-T4, so its T5 must too (the outlook says so).
+        if (not self._coordinator_mode and self.config.local_shutdown.enabled
+                and self._powers_this_host()):
             return False
         return not any(server.enabled for server in group.remote_servers)
 
@@ -3308,6 +3562,7 @@ class UPSGroupMonitor(
                     with self.state._lock:
                         self.state.connection_state = "FAILED"
                         self.state.connection_lost_time = 0.0
+                        self.state.connection_lost_mono = 0.0
                     # ``stale_data_count`` is intentionally NOT reset here:
                     # once connection_state == "FAILED", health_model short-
                     # circuits to UNKNOWN regardless of the count, and the
@@ -3390,7 +3645,7 @@ class UPSGroupMonitor(
 
             if self.state.connection_state == "GRACE_PERIOD":
                 # Recovered during grace period: quiet recovery, no notification
-                elapsed = time.time() - self.state.connection_lost_time
+                elapsed = self._connection_grace_elapsed()
                 self._log_message(
                     f"✅  Connection to UPS {self.config.ups.name} recovered during "
                     f"grace period ({elapsed:.0f}s elapsed). No notification sent."
@@ -3398,6 +3653,7 @@ class UPSGroupMonitor(
                 with self.state._lock:
                     self.state.connection_state = "OK"
                     self.state.connection_lost_time = 0.0
+                    self.state.connection_lost_mono = 0.0
 
                 # Flap detection with 24h TTL
                 now = time.time()
@@ -3434,6 +3690,7 @@ class UPSGroupMonitor(
                 with self.state._lock:
                     self.state.connection_state = "OK"
                     self.state.connection_lost_time = 0.0
+                    self.state.connection_lost_mono = 0.0
                 self.state.connection_flap_count = 0
                 self.state.connection_first_flap_time = 0.0
                 if self._in_redundancy_group:
@@ -3584,6 +3841,7 @@ class UPSGroupMonitor(
                 else:
                     self.state.latest_time_on_battery = 0
                 self.state.latest_update_time = time.time()
+                self.state.latest_update_mono = time.monotonic()
                 self.state.previous_status = ups_status
 
             self._check_nominal_power_override(ups_data)

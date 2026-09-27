@@ -380,7 +380,14 @@ class BatteryMonitorMixin:
                 ts=int(now))
         # Prediction feeds both the published block and the (deduped) warning.
         pred = self._maybe_predict_replacement(cfg, now)
-        health["replacementDaysRemaining"] = pred.get("days_remaining")
+        # H6: cap the trend at the calendar estimate (and 10 years) so a
+        # nearly-flat score never publishes "replace in 204288 days".
+        bounded = prediction.bounded_replacement(
+            pred.get("days_remaining"), age_years=health.get("ageYears"),
+            expected_life_years=cfg.expected_life_years)
+        health["replacementDaysRemaining"] = (
+            bounded["days"] if pred.get("days_remaining") is not None else None)
+        health["replacement"] = bounded
         health["replacementDue"] = bool(pred.get("due"))
         # Escalating absolute-score alerts (separate from the trend prediction).
         self._maybe_alert_health(cfg, health.get("score"))

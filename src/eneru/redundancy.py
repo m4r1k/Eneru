@@ -38,7 +38,7 @@ from eneru.shutdown.remote import (
     loopback_poweroff_sent,
     select_loopback_results,
 )
-from eneru.shutdown.progress import ShutdownProgress
+from eneru.shutdown.progress import ShutdownProgress, progress_sidecar_path
 from eneru.shutdown.vms import VMShutdownMixin
 from eneru.state import MonitorState
 from eneru.utils import sanitize_name
@@ -155,6 +155,10 @@ class RedundancyGroupExecutor(
         self._state_file_path = Path(
             base_config.logging.state_file + f".redundancy-{sanitized}"
         )
+        # UX item 7: the TUI follows group shutdown progress via this sidecar
+        # (seeded idle when the evaluator thread starts).
+        self._shutdown_progress.sidecar_path = progress_sidecar_path(
+            self._state_file_path)
 
         # Container-runtime detection (only relevant when is_local + containers
         # are enabled -- container shutdown is otherwise skipped).
@@ -206,7 +210,8 @@ class RedundancyGroupExecutor(
         # the redundancy executor doesn't own one — the worker falls
         # back to the first registered store, which in coordinator mode
         # is the first per-UPS monitor's DB.
-        if not self._notification_worker:
+        worker = self._notification_worker  # F-122: read once
+        if not worker:
             return
         prefixed = f"{self._log_prefix}{body}" if self._log_prefix else body
         # Match the monitor's @-escape so notifications can carry UPS@host
@@ -214,7 +219,7 @@ class RedundancyGroupExecutor(
         escaped = prefixed.replace("@", "@\u200B")
         # Redundancy-group shutdowns are always "during shutdown" by definition,
         # so notifications are non-blocking to avoid network-stall delays.
-        self._notification_worker.send(
+        worker.send(
             body=escaped, notify_type=notify_type, category=category,
             blocking=False,
         )
@@ -884,6 +889,11 @@ class RedundancyGroupEvaluator(threading.Thread):
             f"min_healthy={self._group.min_healthy}, "
             f"startup_grace={self._startup_grace:.0f}s)"
         )
+        # Publish the idle progress snapshot so the TUI never reads a
+        # previous run's "running" as live (best-effort, never raises).
+        progress = getattr(self._executor, "_shutdown_progress", None)
+        if progress is not None:
+            progress.persist()
         # Startup grace: hold off the first evaluation so the per-UPS
         # monitor threads have time to publish their initial snapshots.
         if self._startup_grace > 0:

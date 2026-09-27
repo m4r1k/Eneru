@@ -539,6 +539,48 @@ def test_monitor_reload_notification_worker_warns_when_apprise_missing(monkeypat
 
 
 @pytest.mark.unit
+def test_monitor_reload_hands_buffered_rows_to_real_new_worker(monkeypatch):
+    """F-135: with REAL workers, a reload bounce carries the old worker's
+    memory-buffered rows (no SQLite backing) into the replacement before the
+    old one stops, and leaves the old thread dead."""
+    from unittest.mock import patch
+    import eneru.monitor as monitormod
+    from eneru.config import NotificationsConfig
+
+    mon = object.__new__(UPSGroupMonitor)
+    mon.config = Config()
+    mon.config.notifications = NotificationsConfig(
+        enabled=True, urls=["json://localhost"])
+    mon._stats_store = None  # no store: rows stay in the memory buffer
+    mon._log_message = MagicMock()
+    mon.logger = None
+    monkeypatch.setattr(monitormod, "APPRISE_AVAILABLE", True)
+    entry = ("buffered before reload", "warning", "power_event", 1, None)
+
+    with patch("eneru.notifications.APPRISE_AVAILABLE", True), \
+         patch("eneru.notifications.apprise") as mock_apprise:
+        instance = mock_apprise.Apprise.return_value
+        instance.add.return_value = True
+        instance.__len__ = lambda self: 1
+        old = monitormod.NotificationWorker(mon.config)
+        assert old.start()
+        old._warn = lambda *_a: None
+        with old._stores_lock:
+            old._memory_buffer = [entry]
+        mon._notification_worker = old
+        try:
+            mon._reload_notification_worker()
+            new = mon._notification_worker
+            assert new is not old
+            assert entry in new._memory_buffer
+            assert old._memory_buffer == []
+            assert not old._worker_thread.is_alive()
+        finally:
+            mon._notification_worker.stop()
+            old.stop()
+
+
+@pytest.mark.unit
 def test_monitor_reload_start_failure_keeps_old_worker(monkeypatch):
     import eneru.monitor as monitormod
 

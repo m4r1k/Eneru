@@ -29,6 +29,7 @@ mixin pattern**, so a session can navigate without loading whole files first.
 | `config_catalog.py` | Option catalog for the editor: every key's kind, help text and basic/advanced tier. Defaults come from the `config.py` dataclasses; `tests/test_config_catalog.py` fails when a dataclass field has no entry, so **a new config option needs a catalog entry too**. |
 | `config_doc.py` | `ConfigDocument`: ruamel.yaml round-trip editing (comments/indentation preserved, trailing section-heading comments moved when keys are appended, atomic 0600 saves with `.bak`). |
 | `config_tui.py` | `eneru config` curses editor: `EditorModel` + pure `handle_key` (testable without a terminal) and `draw`. |
+| `outlook.py` | Read-only "what happens next" model: every configured trigger's state, margin and ETA, the closest one, and what firing would do for this UPS (role). Feeds the API, dashboard, `eneru monitor` and the ON_BATTERY notification; never makes a shutdown decision (`tests/test_outlook.py` pins parity with `_handle_on_battery`). |
 
 ## The mixin pattern (where to add a new shutdown phase)
 

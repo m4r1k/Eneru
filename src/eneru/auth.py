@@ -115,6 +115,11 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+# F-111: floor for operator-chosen passwords (`eneru user create/passwd`).
+# Existing hashes still verify; only new passwords are checked.
+MIN_PASSWORD_LENGTH = 12
+
+
 def generate_password(length_bytes: int = 18) -> str:
     """Return a strong random password suitable for ``--generate``."""
     return secrets.token_urlsafe(length_bytes)

@@ -19,6 +19,7 @@ from eneru import nut_control as nutctl
 from eneru.scheduler import Schedule
 
 __all__ = [
+    "ISSUED_ID_META",
     "PENDING_DUE_TS_META",
     "PENDING_ID_META",
     "RESULT_ENUMS",
@@ -52,6 +53,11 @@ RESULT_ENUMS = (
 )
 PENDING_ID_META = "self_test_pending_id"
 PENDING_DUE_TS_META = "self_test_pending_due_ts"
+# R2-02 (round 2): set once ``upscmd`` for a ticket SUCCEEDED. A poll that
+# bypasses the per-UPS lock (F-119) can read a ticket whose command is still
+# in flight; it must not announce "Self-Test Started" (or attribute an OB to
+# it) until this marker names the ticket, because the command may yet fail.
+ISSUED_ID_META = "self_test_issued_id"
 RESULT_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
@@ -253,6 +259,8 @@ def issue_self_test(ups_name: str, command: str, nut_control, store, *,
                 test_id, result_raw=err, result_enum="aborted")
             clear_pending_self_test(store, clear_attribution=True)
         return {"ok": False, "test_id": test_id, "error": err}
+    if store is not None and test_id is not None:
+        store.set_meta(ISSUED_ID_META, str(test_id))
     return {"ok": True, "test_id": test_id, "error": ""}
 
 

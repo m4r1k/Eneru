@@ -632,3 +632,101 @@ def test_config_reload_unsupported_source_503(minimal_config):
     h.path = "/api/v1/config/reload"
     h.rfile = BytesIO(b"")
     assert h._route_post()[0] == 503
+
+
+# ----- F-147: every mutating route is gated by _authorize(write=True) -----
+
+# (method router, path, JSON body). Each route is wired below so that, if its
+# auth gate were missing, it would run to a 200 and call the fake NUT/store
+# backend -- so "raises before touching the backend" really proves the gate.
+_MUTATING_ROUTES = [
+    ("_route", "/api/v1/ups/UPS@h/commands", None),
+    ("_route", "/api/v1/ups/UPS@h/variables", None),
+    ("_route_post", "/api/v1/ups/UPS@h/command", {"command": "beeper.toggle"}),
+    ("_route_put", "/api/v1/ups/UPS@h/variables/input.transfer.low",
+     {"value": "200"}),
+    ("_route_post", "/api/v1/ups/UPS@h/self-test", {}),
+    ("_route_delete", "/api/v1/ups/UPS@h/events",
+     {"items": [{"id": 5, "ts": 1000, "eventType": "ON_BATTERY"}]}),
+]
+
+
+def _wire_mutating_backends(minimal_config, monkeypatch):
+    """Enable every control feature and replace each backend with a recorder
+    that succeeds. Returns (calls, source)."""
+    _enable(minimal_config)
+    minimal_config.nut_control.allowed_commands = [
+        "beeper.toggle", "test.battery.start"]
+    calls = []
+
+    def rec(name, result):
+        def _f(*a, **k):
+            calls.append(name)
+            return result
+        return _f
+
+    monkeypatch.setattr(apimod.nutctl, "list_commands",
+                        rec("list_commands", (True, ["beeper.toggle"], "")))
+    monkeypatch.setattr(apimod.nutctl, "list_variables", rec(
+        "list_variables",
+        (True, [{"name": "input.transfer.low", "type": "STRING",
+                 "value": "196"}], "")))
+    monkeypatch.setattr(apimod.nutctl, "run_instant_command",
+                        rec("run_instant_command", (True, "ok", "")))
+    monkeypatch.setattr(apimod.nutctl, "set_variable",
+                        rec("set_variable", (True, "", "")))
+    monkeypatch.setattr(apimod.selftest, "list_supported_commands",
+                        lambda *a, **k: ["test.battery.start"])
+    monkeypatch.setattr(apimod.selftest, "issue_self_test", rec(
+        "issue_self_test", {"ok": True, "test_id": 1, "error": ""}))
+    source = _src_with_store("UPS@h", store=_open_store_stub())
+    source.delete_events = rec("delete_events", 1)
+    source.record_control_event = lambda *a, **k: None
+    return calls, source
+
+
+def _mutating_handler(minimal_config, source, path, body):
+    raw = json.dumps(body).encode() if body is not None else b""
+    h = _control_handler(minimal_config, path=path, method_body=raw)
+    h.api_source = source
+    return h
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("router,path,body", _MUTATING_ROUTES)
+def test_mutating_route_requires_credential_when_auth_on(
+        minimal_config, monkeypatch, router, path, body):
+    """F-147: auth on + no token -> 401 before any NUT/store side effect."""
+    from eneru.api import APIUnauthorized
+    calls, source = _wire_mutating_backends(minimal_config, monkeypatch)
+    h = _mutating_handler(minimal_config, source, path, body)
+    with pytest.raises(APIUnauthorized):
+        getattr(h, router)()
+    assert calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("router,path,body", _MUTATING_ROUTES)
+def test_mutating_route_forbidden_when_auth_off(
+        minimal_config, monkeypatch, router, path, body):
+    """F-147: auth off never means control open -> 403, no side effect."""
+    calls, source = _wire_mutating_backends(minimal_config, monkeypatch)
+    minimal_config.api.auth.enabled = False
+    h = _mutating_handler(minimal_config, source, path, body)
+    with pytest.raises(APIForbidden):
+        getattr(h, router)()
+    assert calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("router,path,body", _MUTATING_ROUTES)
+def test_mutating_route_succeeds_with_credential(
+        minimal_config, monkeypatch, router, path, body):
+    """Control arm for F-147: the same wiring with a valid session reaches the
+    backend and returns 200, so the 401/403 above come from the auth gate and
+    not from some unrelated failure."""
+    calls, source = _wire_mutating_backends(minimal_config, monkeypatch)
+    h = _mutating_handler(minimal_config, source, path, body)
+    h.headers["Authorization"] = f"Bearer {_token(h)}"
+    assert getattr(h, router)()[0] == 200
+    assert len(calls) == 1

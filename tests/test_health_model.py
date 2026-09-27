@@ -534,3 +534,139 @@ class TestUPSHealthEnum:
     def test_membership_is_complete(self):
         members = {h.value for h in UPSHealth}
         assert members == {"healthy", "degraded", "critical", "unknown"}
+
+
+class TestStalenessWindowEdges:
+    """F-154: each visibility window is inclusive at its exact edge."""
+
+    @pytest.mark.unit
+    def test_exactly_stale_threshold_is_still_healthy(self):
+        snap = _snap(last_update_time=NOW - 5)            # 5 * check_interval
+        assert assess_health(snap, None, 1, now=NOW) == UPSHealth.HEALTHY
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("age,expected", [
+        (65, UPSHealth.DEGRADED),                        # 5 s stale + 60 s grace
+        (66, UPSHealth.UNKNOWN),
+    ])
+    def test_in_flight_grace_ends_at_threshold_plus_grace(self, age, expected):
+        snap = _snap(last_update_time=NOW - age)
+        assert assess_health(
+            snap, None, 1, connection_grace_enabled=True,
+            connection_grace_duration=60, now=NOW,
+        ) == expected
+
+    @pytest.mark.unit
+    def test_pre_grace_stale_retry_window_is_inclusive(self):
+        from eneru.health_model import RETRY_WAIT_SECONDS
+        window = 3 * RETRY_WAIT_SECONDS + 1              # tolerance 3, interval 1
+        assert window > 5                                # past the stale threshold
+        inside = _snap(last_update_time=NOW - window, stale_data_count=1)
+        past = _snap(last_update_time=NOW - window - 1, stale_data_count=1)
+        kw = dict(max_stale_data_tolerance=3, now=NOW)
+        assert assess_health(inside, None, 1, **kw) == UPSHealth.DEGRADED
+        assert assess_health(past, None, 1, **kw) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_exactly_stale_threshold_with_grace_on_is_healthy(self):
+        """F-154: at age == stale threshold the in-flight grace must not kick
+        in yet (``age > stale_threshold`` is strict), so the member stays
+        HEALTHY rather than DEGRADED."""
+        snap = _snap(last_update_time=NOW - 5)
+        assert assess_health(
+            snap, None, 1, connection_grace_enabled=True,
+            connection_grace_duration=60, now=NOW,
+        ) == UPSHealth.HEALTHY
+
+
+MONO = 5_000.0
+
+
+class TestWallClockStepImmunity:
+    """R2-01: data age comes from the monotonic stamps, so an NTP step of the
+    wall clock (either direction) changes nothing, while genuine staleness on
+    the monotonic clock is still caught."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("step", [3600.0, -3600.0])
+    def test_wall_step_keeps_fresh_member_healthy(self, step, monkeypatch):
+        import eneru.health_model as hm
+        snap = _snap(last_update_time=NOW, last_update_mono=MONO - 1)
+        monkeypatch.setattr(hm.time, "time", lambda: NOW + step)
+        monkeypatch.setattr(hm.time, "monotonic", lambda: MONO)
+        assert assess_health(snap, None, 1) == UPSHealth.HEALTHY
+
+    @pytest.mark.unit
+    def test_monotonic_staleness_still_detected(self, monkeypatch):
+        import eneru.health_model as hm
+        # Wall clock says "just now", monotonic says 10 minutes old.
+        snap = _snap(last_update_time=NOW, last_update_mono=MONO - 600)
+        monkeypatch.setattr(hm.time, "time", lambda: NOW)
+        monkeypatch.setattr(hm.time, "monotonic", lambda: MONO)
+        assert assess_health(snap, None, 1) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_grace_age_uses_monotonic_lost_stamp(self):
+        snap = _snap(
+            last_update_time=NOW - 3600, last_update_mono=MONO - 20,
+            connection_state="GRACE_PERIOD",
+            connection_lost_time=NOW - 3600, connection_lost_mono=MONO - 10,
+        )
+        kw = dict(connection_grace_enabled=True, connection_grace_duration=60)
+        assert assess_health(
+            snap, None, 1, now=NOW, now_mono=MONO, **kw
+        ) == UPSHealth.DEGRADED
+        assert assess_health(
+            snap, None, 1, now=NOW, now_mono=MONO + 60, **kw
+        ) == UPSHealth.UNKNOWN
+
+    @pytest.mark.unit
+    def test_grace_without_mono_lost_stamp_uses_age_fallback(self):
+        snap = _snap(
+            last_update_mono=MONO - 20, connection_state="GRACE_PERIOD",
+        )
+        kw = dict(connection_grace_enabled=True, connection_grace_duration=60)
+        assert assess_health(
+            snap, None, 1, now_mono=MONO, **kw
+        ) == UPSHealth.DEGRADED
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("step", [3600.0, -3600.0])
+    def test_redundancy_group_survives_wall_step(self, step, monkeypatch):
+        """End to end: two healthy members, clock stepped +-1 h -> quorum
+        holds and the executor never fires."""
+        import threading
+        from types import SimpleNamespace
+        import eneru.health_model as hm
+        from eneru.config import RedundancyGroupConfig, UPSConfig
+        from eneru.redundancy import RedundancyGroupEvaluator
+        from eneru.state import MonitorState
+
+        mons = {}
+        for name in ("ups1@h", "ups2@h"):
+            st = MonitorState()
+            st.latest_status = "OL"
+            st.latest_update_time = time.time()
+            st.latest_update_mono = time.monotonic()
+            mons[name] = SimpleNamespace(
+                state=st, config=SimpleNamespace(ups=UPSConfig(name=name)))
+        group = RedundancyGroupConfig(
+            name="rack", ups_sources=list(mons), min_healthy=1)
+        fired = []
+        executor = SimpleNamespace(
+            shutdown=lambda reason: fired.append(reason) or True,
+            clear_shutdown_state=lambda: None,
+        )
+        ev = RedundancyGroupEvaluator(
+            group, mons, executor, stop_event=threading.Event(),
+            startup_grace_seconds=0,
+        )
+        ev.evaluate_once()
+        real = time.time()
+        monkeypatch.setattr(hm.time, "time", lambda: real + step)
+        ev.evaluate_once()
+        assert fired == []
+        assert all(
+            hm.assess_health(m.state.snapshot(), None, 1) == UPSHealth.HEALTHY
+            for m in mons.values()
+        )

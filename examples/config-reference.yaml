@@ -72,6 +72,13 @@ ups:
 #     energy:
 #       nominal_power: 2700       # rated watts, not VA
 #       cost_per_kwh: null        # disable cost for this UPS
+#
+# A list with ONE entry runs the single-UPS path (6.2):
+#   is_local: true   -> this host powers off on a trigger (same as the mapping form)
+#   is_local omitted -> this host still powers off, and Eneru logs a warning
+#                       asking you to set is_local explicitly
+#   is_local: false  -> this host is NEVER powered off by that UPS; a trigger
+#                       only shuts down its remote_servers and notifies
 
 # ==============================================================================
 # SHUTDOWN TRIGGERS
@@ -637,6 +644,12 @@ remote_servers:
   #       timeout: 60
   #     - command: "systemctl stop my-critical-service"  # Custom command
   #       timeout: 30
+  #       # use_sudo on a step overrides the server's use_sudo for that step
+  #       # only (unset = inherit). With use_sudo: true on the server, set
+  #       # false for commands that must run as the SSH user, such as
+  #       # `systemctl --user ...` or `cd /opt/app && ...` (sudo can't run a
+  #       # shell builtin).
+  #       # use_sudo: false
   #     - action: "sync"
   #   shutdown_command: "shutdown -h now"
 

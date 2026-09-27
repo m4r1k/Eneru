@@ -314,6 +314,32 @@ class TestIssue:
             result["test_id"])
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("with_meta", [True, False])
+    def test_running_row_exactly_at_timeout_no_longer_blocks(
+        self, store, monkeypatch, with_meta,
+    ):
+        """F-153: a `running` row aged exactly RESULT_TIMEOUT_SECONDS is stale,
+        with or without a pending ticket in meta -- otherwise a row whose
+        ticket metadata was lost could block every future self-test."""
+        now = 2_000_000_000
+        from types import SimpleNamespace
+        monkeypatch.setattr(self_test, "time",
+                            SimpleNamespace(time=lambda: float(now)))
+        old_id = store.record_self_test(
+            "test.battery.start", "cli",
+            started_ts=now - self_test.RESULT_TIMEOUT_SECONDS)
+        if with_meta:
+            store.set_meta(self_test.PENDING_ID_META, str(old_id))
+        monkeypatch.setattr(self_test.nutctl, "run_instant_command",
+                            lambda *a, **k: (True, "started", ""))
+
+        result = self_test.issue_self_test(
+            "U@h", "test.battery.start", _nc(), store, source="cli")
+
+        assert result["ok"] is True, result["error"]
+        assert store.get_self_test(old_id)["result_enum"] == "unknown"
+
+    @pytest.mark.unit
     def test_issue_failure_clears_attribution_marker(self, store, monkeypatch):
         monkeypatch.setattr(self_test.nutctl, "run_instant_command",
                             lambda *a, **k: (False, "", "rejected"))

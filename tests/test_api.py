@@ -566,7 +566,10 @@ def test_api_rejects_invalid_numeric_query_params(minimal_config, path, message)
     handler.api_config = minimal_config
     handler.api_source = MagicMock()
 
-    with pytest.raises(Exception) as exc_info:
+    # F-154: a bare `Exception` also matched AttributeError/TypeError crashes
+    # (which _dispatch maps to 500); a bad query param must be a 400.
+    from eneru.api import APIBadRequest
+    with pytest.raises(APIBadRequest) as exc_info:
         handler._route()
 
     assert message in str(exc_info.value)
@@ -2712,6 +2715,24 @@ def test_state_file_path_for_group_single_ups_uses_unsuffixed_path():
 
 
 @pytest.mark.unit
+def test_status_paths_follow_the_coordinator_for_single_ups_redundancy():
+    """One UPS plus a redundancy group runs the coordinator, which writes
+    suffixed state + per-UPS stats files; the API readers must agree."""
+    from eneru.status import state_file_path_for_group, stats_db_path_for_group
+    from eneru import Config, UPSConfig, UPSGroupConfig, LoggingConfig
+    from eneru.config import RedundancyGroupConfig
+    config = Config(
+        ups_groups=[UPSGroupConfig(ups=UPSConfig(name="UPS@host"))],
+        redundancy_groups=[RedundancyGroupConfig(
+            name="rack", ups_sources=["UPS@host"])],
+        logging=LoggingConfig(state_file="/tmp/eneru-state"),
+    )
+    group = config.ups_groups[0]
+    assert str(state_file_path_for_group(config, group)) == "/tmp/eneru-state.UPS-host"
+    assert stats_db_path_for_group(config, group).name == "UPS-host.db"
+
+
+@pytest.mark.unit
 def test_redundancy_group_statuses_returns_empty_when_config_is_none():
     from eneru.status import redundancy_group_statuses
     assert redundancy_group_statuses(MagicMock(), None) == []
@@ -2981,3 +3002,180 @@ def test_redact_broker_at_before_scheme_returns_raw():
     the post-scheme remainder has no '@' to redact."""
     from eneru.mqtt import _redact_broker
     assert _redact_broker("weird@host://path") == "weird@host://path"
+
+
+# --- F-100: slowloris header deadline + loopback-reserved slots ------------
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_dripping_headers_are_cut_off_by_the_wall_clock_deadline(minimal_config):
+    """A client that sends one header byte at a time, faster than the per-read
+    timeout but never finishing, used to hold its connection forever."""
+    import socket as _socket
+    import time as _time
+    from eneru import api as api_mod
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    with patch.object(api_mod, "REQUEST_HEADER_DEADLINE_SECONDS", 1.0):
+        server.start()
+        try:
+            host, port = server._httpd.server_address[:2]
+            sock = _socket.create_connection((host, port), timeout=5)
+            sock.sendall(b"GET /health HTTP/1.1\r\n")
+            start = _time.monotonic()
+            closed = False
+            while _time.monotonic() - start < 8:
+                try:
+                    sock.sendall(b"X")  # drip: well inside the 10 s per-read timeout
+                except OSError:
+                    closed = True
+                    break
+                sock.settimeout(0.3)
+                try:
+                    data = sock.recv(4096)
+                    if data == b"" or data.startswith(b"HTTP/1.1 4"):
+                        closed = True
+                        break
+                except _socket.timeout:
+                    pass
+            elapsed = _time.monotonic() - start
+            sock.close()
+            assert closed and elapsed < 6, elapsed
+        finally:
+            server.stop()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_normal_requests_are_unaffected_by_the_header_deadline(minimal_config):
+    import http.client as _http
+    from eneru import api as api_mod
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    with patch.object(api_mod, "REQUEST_HEADER_DEADLINE_SECONDS", 1.0):
+        server.start()
+        try:
+            host, port = server._httpd.server_address[:2]
+            conn = _http.HTTPConnection(host, port, timeout=5)
+            for _ in range(3):  # keep-alive: several requests on one connection
+                conn.request("GET", "/health")
+                resp = conn.getresponse()
+                resp.read()
+                assert resp.status == 200
+            conn.close()
+        finally:
+            server.stop()
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+def test_request_cut_off_mid_headers_is_never_dispatched(minimal_config):
+    """After the deadline shuts the read side, the stdlib parses the
+    truncated header block as complete. That half request must not reach
+    the handler: the client gets no response, only a closed connection."""
+    import socket as _socket
+    import time as _time
+    from eneru import api as api_mod
+    from eneru.api import EneruAPIServer
+
+    minimal_config.api.enabled = True
+    minimal_config.api.bind = "127.0.0.1"
+    minimal_config.api.port = 0
+    server = EneruAPIServer(MagicMock(), minimal_config)
+    with patch.object(api_mod, "REQUEST_HEADER_DEADLINE_SECONDS", 0.5):
+        server.start()
+        try:
+            host, port = server._httpd.server_address[:2]
+            sock = _socket.create_connection((host, port), timeout=5)
+            sock.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n")  # no blank line
+            _time.sleep(1.5)
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            sock.close()
+            assert data == b"", data[:80]
+        finally:
+            server.stop()
+
+
+@pytest.mark.unit
+def test_abort_slow_headers_tolerates_a_closed_socket():
+    from eneru.api import EneruAPIHandler
+    h = object.__new__(EneruAPIHandler)
+    h.connection = MagicMock()
+    h.connection.shutdown.side_effect = OSError("already closed")
+    h._abort_slow_headers()
+    assert h.close_connection is True
+
+
+@pytest.mark.unit
+def test_loopback_peers_keep_reserved_connection_slots():
+    """F-100: a remote flood exhausts only the public slots; loopback peers
+    (container HEALTHCHECK, local probes) still get a connection."""
+    import threading as _t
+    from http.server import ThreadingHTTPServer as _Base
+    from eneru.api import _BoundedThreadingHTTPServer
+
+    srv = object.__new__(_BoundedThreadingHTTPServer)
+    srv._connection_slots = _t.BoundedSemaphore(3)
+    srv._public_slots = _t.BoundedSemaphore(1)
+    closed = []
+    srv.shutdown_request = closed.append
+    with patch.object(_Base, "process_request", return_value=None):
+        srv.process_request("r1", ("192.0.2.1", 1))       # uses the public slot
+        srv.process_request("r2", ("192.0.2.2", 2))       # public exhausted
+        srv.process_request("r3", ("127.0.0.1", 3))       # loopback: reserved
+        srv.process_request("r4", ("::1", 4))             # loopback: reserved
+        srv.process_request("r5", ("127.0.0.1", 5))       # total cap reached
+    assert closed == ["r2", "r5"]
+    with patch.object(_Base, "process_request_thread", return_value=None):
+        srv.process_request_thread("r1", ("192.0.2.1", 1))  # returns both slots
+    assert srv._public_slots.acquire(blocking=False)
+    srv._public_slots.release()
+    # A malformed peer address counts as public.
+    assert not _BoundedThreadingHTTPServer._is_loopback_peer(("not-an-ip", 0))
+    assert not _BoundedThreadingHTTPServer._is_loopback_peer(())
+
+
+@pytest.mark.unit
+def test_public_slot_released_when_thread_spawn_fails():
+    import threading as _t
+    from http.server import ThreadingHTTPServer as _Base
+    from eneru.api import _BoundedThreadingHTTPServer
+
+    srv = object.__new__(_BoundedThreadingHTTPServer)
+    srv._connection_slots = _t.BoundedSemaphore(1)
+    srv._public_slots = _t.BoundedSemaphore(1)
+    with patch.object(_Base, "process_request",
+                      side_effect=RuntimeError("thread spawn failed")):
+        with pytest.raises(RuntimeError):
+            srv.process_request("sock", ("192.0.2.1", 2))
+    assert srv._public_slots.acquire(blocking=False)
+    assert srv._connection_slots.acquire(blocking=False)
+
+
+@pytest.mark.unit
+def test_real_server_builds_the_public_gate(minimal_config):
+    from eneru.api import (
+        _BoundedThreadingHTTPServer, LOOPBACK_RESERVED_CONNECTIONS,
+        MAX_CONCURRENT_CONNECTIONS, EneruAPIHandler,
+    )
+    srv = _BoundedThreadingHTTPServer(("127.0.0.1", 0), EneruAPIHandler)
+    try:
+        taken = 0
+        while srv._public_slots.acquire(blocking=False):
+            taken += 1
+        assert taken == MAX_CONCURRENT_CONNECTIONS - LOOPBACK_RESERVED_CONNECTIONS
+    finally:
+        srv.server_close()

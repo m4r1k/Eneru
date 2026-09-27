@@ -414,6 +414,10 @@ class RemoteCommandConfig:
     # Loopback delegates ignore this field and derive mounts from the local
     # filesystems.unmount config so operators declare local mounts once.
     mounts: List[Dict[str, str]] = field(default_factory=list)
+    # Per-step sudo override (F-098). None = inherit the server's use_sudo;
+    # true/false forces it for this step only (e.g. `systemctl --user` or a
+    # `cd … &&` command that must run as the SSH user itself).
+    use_sudo: Optional[bool] = None
 
 
 @dataclass
@@ -527,6 +531,10 @@ class UPSGroupConfig:
     containers: ContainersConfig = field(default_factory=ContainersConfig)
     filesystems: FilesystemsConfig = field(default_factory=FilesystemsConfig)
     is_local: bool = False  # Does this UPS power the Eneru host?
+    # 6.2: True when the YAML entry spelled `is_local` out (true OR false).
+    # A lone list-form UPS with an EXPLICIT `is_local: false` must never power
+    # the host off; an omitted key keeps the old (host powers off) behaviour.
+    is_local_explicit: bool = False
     # v6.0: optional per-group UPS-control override (creds/allowlists) for
     # deployments where this UPS lives on a different upsd. None => use global.
     nut_control: Optional[NutControlConfig] = None
@@ -658,6 +666,66 @@ class Config:
         if self.ups_groups:
             return self.ups_groups[0].filesystems
         return FilesystemsConfig()
+
+
+SINGLE_UPS_IS_LOCAL_UNSET_WARNING = (
+    "ups[0] has no is_local; as the only UPS it powers off this host on a "
+    "shutdown trigger. Set is_local: true to confirm, or is_local: false to "
+    "only monitor it / shut down its remote servers."
+)
+
+
+# Skip reason shared by the runtime progress sidecar and the shutdown plan.
+NOT_LOCAL_SKIP = "this host is not on this UPS (is_local: false)"
+
+
+def single_ups_owns_host(group: Any) -> bool:
+    """Single-UPS runtime rule: does this (only) group's shutdown power the host off?
+
+    ELI5: one UPS, one house. If you never said whose house it is, we assume
+    it is ours (the pre-6.2 behaviour). Only an explicit "not my house"
+    (``is_local: false`` written in the YAML) keeps the lights on here.
+    The legacy mapping form is always ``is_local=True``. Multi-UPS/coordinator
+    configs never ask this: the coordinator has its own is_local/trigger_on rule.
+    """
+    if group is None:
+        return True
+    return (bool(getattr(group, "is_local", False))
+            or not getattr(group, "is_local_explicit", False))
+
+
+def host_poweroff_possible(config: Config) -> bool:
+    """Can any shutdown path power this host off? (root / readiness checks)
+
+    Mirrors the runtime: a local owner, the implicit no-groups mode, or
+    ``trigger_on: any``. 6.2: the single-UPS runtime (no coordinator) ignores
+    ``trigger_on``: it powers the host off unless the lone list entry says
+    ``is_local: false`` explicitly.
+    """
+    if not config.local_shutdown.enabled:
+        return False
+    groups = config.ups_groups
+    coordinated = config.multi_ups or bool(config.redundancy_groups)
+    if groups and not coordinated:
+        return single_ups_owns_host(groups[0])
+    has_local = (any(g.is_local for g in groups)
+                 or any(g.is_local for g in config.redundancy_groups))
+    return bool(has_local or not groups
+                or config.local_shutdown.trigger_on == "any")
+
+
+def single_ups_is_local_unset(config: Config) -> bool:
+    """True for a one-entry ``ups:`` LIST whose entry omits ``is_local`` while
+    local_shutdown can power the host off (the case that deserves a warning)."""
+    if len(config.ups_groups) != 1 or config.redundancy_groups:
+        return False
+    group = config.ups_groups[0]
+    return bool(
+        group.is_multi_ups  # list form (the legacy mapping is always local)
+        and not group.is_local
+        and not group.is_local_explicit
+        and config.local_shutdown.enabled
+    )
 
 
 def resolve_energy_config(config: Config) -> EnergyConfig:
@@ -1343,6 +1411,7 @@ class ConfigLoader:
                         timeout=cmd_data.get('timeout'),
                         path=cmd_data.get('path'),
                         mounts=mounts,
+                        use_sudo=cmd_data.get('use_sudo'),
                     ))
             is_loopback_explicit = 'is_host_loopback' in server_data
             is_loopback = (
@@ -1929,6 +1998,7 @@ class ConfigLoader:
                 triggers = copy.deepcopy(global_triggers)
 
             is_local = entry.get('is_local', False)
+            is_local_explicit = 'is_local' in entry
 
             # Remote servers (allowed for all groups)
             remote_servers = []
@@ -1991,6 +2061,7 @@ class ConfigLoader:
                 containers=containers_config,
                 filesystems=fs_config,
                 is_local=is_local,
+                is_local_explicit=is_local_explicit,
                 nut_control=nut_control,
                 battery_health=battery_health,
                 self_test=self_test,
@@ -2096,7 +2167,8 @@ class ConfigLoader:
                 "is_host_loopback", "host_identity_command",
                 "expected_host_identity",
             }
-            pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts"}
+            pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts",
+                                 "use_sudo"}
             depletion_keys = {"window", "critical_rate", "grace_period"}
             extended_time_keys = {"enabled", "threshold"}
             messages.extend(cls._unknown_key_errors(
@@ -2693,7 +2765,9 @@ class ConfigLoader:
                     f">= 1, got {t.depletion.window!r}."
                 )
             rate = t.depletion.critical_rate
-            if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+            # R2-04: `.nan` passes `rate <= 0` (every NaN comparison is
+            # False) and would silently disable T3; reject non-finite too.
+            if (not cls._is_number_nonbool_in_range(rate)
                     or rate <= 0):
                 messages.append(
                     f"ERROR: {label}.triggers.depletion.critical_rate must be a "
@@ -2868,6 +2942,12 @@ class ConfigLoader:
                 "is_local, or set local_shutdown.trigger_on: none, to confirm "
                 "this is intended."
             )
+
+        # 6.2: a one-entry `ups:` list that omits is_local still powers this
+        # host off (single-UPS runtime, unchanged since 5.0); ask the operator
+        # to say so explicitly. `is_local: false` now keeps the host up.
+        if single_ups_is_local_unset(config):
+            messages.append("WARNING: " + SINGLE_UPS_IS_LOCAL_UNSET_WARNING)
 
         # ups.name uniqueness. The name keys the per-group stats DB path, the
         # state-file suffix, the monitors-by-name routing dict, and redundancy
@@ -3206,6 +3286,32 @@ class ConfigLoader:
                         f"ERROR: Remote server '{display}': use_sudo must be "
                         f"a boolean, got {server.use_sudo!r}"
                     )
+
+                for cmd_idx, cmd in enumerate(server.pre_shutdown_commands):
+                    if cmd.use_sudo is not None and not isinstance(cmd.use_sudo, bool):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': "
+                            f"pre_shutdown_commands[{cmd_idx}].use_sudo must be "
+                            f"true, false or unset, got {cmd.use_sudo!r}"
+                        )
+
+                # F-104: ssh reads a destination that starts with "-" as an
+                # option (`user: "-oProxyCommand=…"` runs a local command as
+                # root). Whitespace/control characters are never valid there
+                # either. The ssh builder also puts `--` before the
+                # destination; this catches the mistake at validation time.
+                for field_name, value in (("user", server.user),
+                                          ("host", server.host)):
+                    if not isinstance(value, str) or not value:
+                        continue
+                    if value.startswith("-") or any(
+                            ch.isspace() or ord(ch) < 32 or ord(ch) == 127
+                            for ch in value):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': {field_name} "
+                            f"{value!r} must not start with '-' or contain "
+                            "whitespace/control characters."
+                        )
 
                 if not isinstance(server.is_host_loopback, bool):
                     messages.append(
