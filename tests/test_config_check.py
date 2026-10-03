@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -1906,6 +1907,19 @@ class TestGroupIReviewFixes:
             cc.RemoteCheck("a", "true", "run"), cc.RemoteCheck("b", "false", "run")])
         assert f'T="timeout {cc.REMOTE_CHECK_TIMEOUT}"' in script
         assert script.count("out=$($T sh -c ") == 2
+
+    def test_probe_script_is_wrapped_for_any_login_shell(self):
+        """Issue #128: zsh doesn't word-split ``$T`` and tcsh can't parse
+        ``$(...)``, so the POSIX body must run under an explicit sh."""
+        script = cc.build_remote_script([cc.RemoteCheck("a", "true", "run")])
+        assert script.startswith("sh -c '")
+        for login_shell in ("zsh", "tcsh", "bash"):
+            path = shutil.which(login_shell)
+            if not path:
+                continue
+            out = subprocess.run([path, "-c", script], capture_output=True,
+                                 text=True, timeout=30)
+            assert cc.parse_remote_output(out.stdout) == {0: (0, "")}, out.stderr
 
     def test_parse_remote_output_ignores_unmarked_lines(self):
         text = (f"junk 0 0 ok\n7 1 fake\n{cc._REMOTE_MARKER} 1 0 real\n")

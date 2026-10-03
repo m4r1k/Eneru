@@ -6,6 +6,7 @@ followed by the final shutdown command.
 """
 
 import os
+import shlex
 import threading
 import time
 from dataclasses import dataclass, field
@@ -43,6 +44,22 @@ REMOTE_PATH_PREFIX = (
     'export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:'
     '/sbin:/bin:/usr/syno/sbin:/usr/syno/bin"; '
 )
+
+
+def remote_shell_command(command: str) -> str:
+    """Wrap ``command`` so the PATH prefix works under any login shell.
+
+    ELI5: the note on the door is written in English, but some houses only
+    read French. ssh hands our string to the remote user's *login* shell;
+    tcsh (pfSense/FreeBSD default) reads ``"$PATH:/usr..."`` as a broken
+    ``:`` modifier and drops the whole line, so from 6.1.7 on a
+    tcsh target never shut down (issue #128). POSIX ``sh`` now sets PATH,
+    then execs the user's own ``$SHELL -c`` with the command untouched, so
+    bash/zsh/csh syntax in ``shutdown_command`` keeps working as before.
+    Single quotes are literal in sh, bash, zsh and csh alike.
+    """
+    script = REMOTE_PATH_PREFIX + 'exec "${SHELL:-/bin/sh}" -c "$1"'
+    return f"sh -c {shlex.quote(script)} sh {shlex.quote(command)}"
 
 # ELI5: you phone a warehouse and shout "SHIP IT!" — mid-sentence the line goes
 # dead. Did they hear you? On a small box (BusyBox/Alpine/dropbear/sysvinit) the
@@ -737,11 +754,11 @@ class RemoteShutdownMixin:
         # and every pre_shutdown_commands entry (custom commands AND the
         # REMOTE_ACTIONS templates), across the normal remote path AND the
         # loopback-to-127.0.0.1 path, funnel through here before ssh. The PATH
-        # augmentation is prepended to the ONE argv element that carries the
-        # remote command string, so argv stays `ssh <opts> -- user@host "<cmd>"`.
+        # augmentation wraps the ONE argv element that carries the remote
+        # command string (remote_shell_command), so argv stays `ssh <opts> -- user@host "<cmd>"`.
         # The LOCAL, non-SSH execution paths never reach _run_remote_command.
         try:
-            ssh_cmd = build_ssh_probe_command(server, REMOTE_PATH_PREFIX + command)
+            ssh_cmd = build_ssh_probe_command(server, remote_shell_command(command))
         except ValueError as exc:
             # A dangling option (e.g. a trailing "-i") is a config error for
             # this server only: fail the step, never crash the sequence.
