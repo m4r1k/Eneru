@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.1] - 2026-10-03
+
+### Fixed
+
+- **Remote shutdown works again when the SSH user's login shell is tcsh or
+  csh.** That is the default on pfSense and FreeBSD. Since 6.1.8 Eneru has put
+  `export PATH="$PATH:/usr/sbin:..."` in front of every remote command. tcsh
+  reads `$PATH:/` as a broken variable modifier and rejects the whole line, so
+  these remotes never ran their pre-shutdown steps or the shutdown command.
+  Eneru now sets `PATH` in POSIX `sh` and then runs the command in the user's
+  own login shell, so commands written for bash, zsh or csh still work. (#128)
+- **`eneru config check` works with zsh and tcsh login shells.** The remote
+  check script assumed `sh` or `bash`. Under zsh (TrueNAS) every binary check
+  failed with `command not found: timeout 20`. Under tcsh none of the checks
+  ran. The script now runs under `sh -c`. (#128)
+
 ## [6.2.0] - 2026-09-27
 
 A guided config editor, a read-only pre-flight check, and displays that say what

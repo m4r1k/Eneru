@@ -788,5 +788,92 @@ docker exec eneru-e2e-ssh rm -f /tmp/eneru-split-opts /tmp/eneru-split-opts-fina
 echo "PASS: split ssh_options work identically for shutdown and config check"
 )
 
+# ======================================================================
+# Test 70: zsh and tcsh login shells (issue #128)
+# ======================================================================
+# ssh hands Eneru's string to the remote user's LOGIN shell. Like posting a
+# French letter to an English address: zsh (TrueNAS) didn't split `$T` in
+# `config check`, and tcsh (pfSense) rejected the `$PATH:/...` prefix on the
+# REAL shutdown too. Both now go through POSIX sh; prove config check passes
+# and a real shutdown (PATH-augmented bare name included) lands for each.
+(
+echo ""
+echo ">>> Running: Test 70: zsh and tcsh login shells (issue #128)"
+
+docker exec eneru-e2e-ssh sh -c '
+  for u in zshuser:/bin/zsh tcshuser:/bin/tcsh; do
+    name=${u%%:*}; shell=${u#*:}
+    id "$name" >/dev/null 2>&1 || adduser -D -s "$shell" "$name"
+    echo "$name:$(head -c 12 /dev/urandom | od -An -tx1 | tr -d " \n")" | chpasswd >/dev/null
+    mkdir -p "/home/$name/.ssh"
+    cp /home/testuser/.ssh/authorized_keys "/home/$name/.ssh/authorized_keys"
+    chown -R "$name:$name" "/home/$name/.ssh"
+    chmod 700 "/home/$name/.ssh"; chmod 600 "/home/$name/.ssh/authorized_keys"
+    grep -q "^$name " /etc/sudoers || echo "$name ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+  done
+  rm -f /tmp/eneru-shell-zshuser /tmp/eneru-shell-tcshuser /tmp/eneru-path-augmented
+'
+
+for u in zshuser tcshuser; do
+cat >/tmp/config-e2e-shell-$u.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Shell $u"
+    enabled: true
+    host: "localhost"
+    user: "$u"
+    use_sudo: true
+    shutdown_command: "shutdown -h now"
+    ssh_options: ["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]
+    pre_shutdown_commands:
+      - command: "touch /tmp/eneru-shell-$u"
+        use_sudo: false
+      - command: "eneru-path-probe"
+        use_sudo: false
+YAML
+
+  set +e
+  eneru config check --config /tmp/config-e2e-shell-$u.yaml >/tmp/test70-$u-check.log 2>&1
+  set -e
+  cat /tmp/test70-$u-check.log
+  for line in "Shell $u: SSH as $u@localhost works" \
+              "Shell $u: 'shutdown' is installed" \
+              "Shell $u: sudo allows 'shutdown -h now' without a password" \
+              "Shell $u: 'eneru-path-probe' is installed"; do
+    grep -qF -- "$line" /tmp/test70-$u-check.log || {
+      echo "FAIL: config check under $u's login shell is missing: $line"; exit 1; }
+  done
+  if grep -qF "the command checks did not run" /tmp/test70-$u-check.log; then
+    echo "FAIL: config check script did not parse under $u's login shell"; exit 1
+  fi
+
+  docker exec eneru-e2e-ssh rm -f /var/run/shutdown-triggered /tmp/eneru-path-augmented
+  set +e
+  timeout 60s eneru shutdown remote --config /tmp/config-e2e-shell-$u.yaml \
+    --server "Shell $u" --i-really-want-to-proceed-with-remote-shutdown \
+    >/tmp/test70-$u-shutdown.log 2>&1
+  rc=$?
+  set -e
+  cat /tmp/test70-$u-shutdown.log
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: remote shutdown for $u exited $rc"; exit 1
+  fi
+  docker exec eneru-e2e-ssh test -e /tmp/eneru-shell-$u || {
+    echo "FAIL: pre-shutdown command did not run under $u's login shell"; exit 1; }
+  docker exec eneru-e2e-ssh test -e /tmp/eneru-path-augmented || {
+    echo "FAIL: PATH augmentation lost under $u's login shell"; exit 1; }
+  docker exec eneru-e2e-ssh test -e /var/run/shutdown-triggered || {
+    echo "FAIL: sudo shutdown did not run under $u's login shell"; exit 1; }
+done
+docker exec eneru-e2e-ssh rm -f /var/run/shutdown-triggered /tmp/shutdown-invoked \
+  /tmp/eneru-path-augmented /tmp/eneru-shell-zshuser /tmp/eneru-shell-tcshuser
+echo "PASS: config check and remote shutdown work under zsh and tcsh login shells"
+)
+
 echo ""
 echo "=== Group 'cli' completed successfully ==="

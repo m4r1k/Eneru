@@ -6,7 +6,9 @@ FROM alpine:3.19
 RUN apk add --no-cache \
     openssh-server \
     sudo \
-    bash
+    bash \
+    zsh \
+    tcsh
 
 # Create test user with sudo access
 RUN adduser -D -s /bin/bash testuser && \

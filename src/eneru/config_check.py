@@ -1180,7 +1180,13 @@ def command_checks(command: str, use_sudo: bool, *,
 
 
 def build_remote_script(checks: List[RemoteCheck]) -> str:
-    """One shell script that runs every check and reports rc + first line."""
+    """One shell script that runs every check and reports rc + first line.
+
+    ssh hands the script to the remote user's *login* shell, which may be
+    zsh (TrueNAS: no word splitting of ``$T``) or tcsh (pfSense: no
+    ``$(...)``, ``$PATH:/x`` read as a modifier), so the POSIX body is
+    wrapped in ``sh -c '...'`` (issue #128).
+    """
     from eneru.shutdown.remote import REMOTE_PATH_PREFIX
     parts = [REMOTE_PATH_PREFIX,
              'T=""; command -v timeout >/dev/null 2>&1 && '
@@ -1191,7 +1197,7 @@ def build_remote_script(checks: List[RemoteCheck]) -> str:
             f"printf '%s %s %s %s\\n' {_REMOTE_MARKER} {idx} \"$rc\" "
             "\"$(printf '%s' \"$out\" | head -n 1 | cut -c1-200)\"; ")
     parts.append("exit 0")
-    return "".join(parts)
+    return "sh -c " + _q("".join(parts))
 
 
 def parse_remote_output(text: str) -> Dict[int, Tuple[int, str]]:

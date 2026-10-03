@@ -19,6 +19,7 @@ from eneru import (
 from eneru import utils as eneru_utils
 from eneru.shutdown.remote import (
     REMOTE_PATH_PREFIX,
+    remote_shell_command,
     RemoteShutdownMixin,
     RemoteShutdownResult,
     loopback_poweroff_sent,
@@ -863,10 +864,10 @@ class TestRemotePreShutdownExecution:
             result = remote_monitor._shutdown_remote_server(server, deadline=100.0)
 
         # Pre-phase: capped at the 40s left before the reserve, then stopped.
-        assert sent[0] == (REMOTE_PATH_PREFIX + "sleep 999", 40)
+        assert sent[0] == (remote_shell_command("sleep 999"), 40)
         assert result.pre_commands.timed_out is True
         # The poweroff still ran, with the full reserved slice.
-        assert sent[-1] == (REMOTE_PATH_PREFIX + "sudo shutdown -h now", 60)
+        assert sent[-1] == (remote_shell_command("sudo shutdown -h now"), 60)
         assert len(sent) == 2
         assert result.timed_out is False
 
@@ -1639,10 +1640,10 @@ class TestRunRemoteCommand:
             assert "BatchMode=yes" in call_str
             assert "admin@192.168.1.50" in call_args
             # The remote command is the final single argv element, now carrying
-            # the PATH augmentation prefix (see REMOTE_PATH_PREFIX). The
+            # the PATH augmentation wrapper (see remote_shell_command). The
             # original command must still be present intact.
-            assert call_args[-1] == REMOTE_PATH_PREFIX + "echo test"
-            assert call_args[-1].endswith("echo test")
+            assert call_args[-1] == remote_shell_command("echo test")
+            assert call_args[-1].endswith("'echo test'")
             assert "/usr/syno/sbin" in call_args[-1]
 
     @pytest.mark.unit
@@ -1672,11 +1673,9 @@ class TestRunRemoteCommand:
             sent_command = mock_run.call_args[0][0][-1]
             # PATH prefix present, /usr/syno/sbin on PATH, sudo -n applied,
             # and the original bare command preserved at the tail.
-            assert sent_command == (
-                REMOTE_PATH_PREFIX + "sudo -n synoshutdown -s"
-            )
+            assert sent_command == remote_shell_command("sudo -n synoshutdown -s")
             assert "/usr/syno/sbin" in sent_command
-            assert sent_command.endswith("sudo -n synoshutdown -s")
+            assert sent_command.endswith("'sudo -n synoshutdown -s'")
 
     @pytest.mark.unit
     def test_remote_path_is_always_augmented(self, ssh_monitor):
@@ -1686,7 +1685,47 @@ class TestRunRemoteCommand:
         with patch("eneru.shutdown.remote.run_command") as mock_run:
             mock_run.return_value = (0, "", "")
             ssh_monitor._run_remote_command(server, "echo hi", 30, "test")
-            assert mock_run.call_args[0][0][-1] == REMOTE_PATH_PREFIX + "echo hi"
+            assert mock_run.call_args[0][0][-1] == remote_shell_command("echo hi")
+
+    @pytest.mark.unit
+    def test_remote_shell_command_runs_in_login_shell_with_path(self):
+        """Issue #128: PATH is set by POSIX sh (tcsh rejects ``$PATH:/``),
+        then the command runs in the user's own $SHELL, so a bash-ism in
+        shutdown_command keeps working exactly as before the wrapper."""
+        import os
+        import shutil
+        import subprocess
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("bash not installed")
+        wrapped = remote_shell_command(
+            "[[ 1 == 1 ]] && printf '%s|%s' \"$0\" \"$PATH\"")
+        assert wrapped.startswith("sh -c '")
+        assert REMOTE_PATH_PREFIX in wrapped
+        out = subprocess.run(
+            ["sh", "-c", wrapped], capture_output=True, text=True, timeout=10,
+            env={**os.environ, "SHELL": bash, "PATH": "/usr/bin:/bin"})
+        assert out.returncode == 0, out.stderr
+        shell, path = out.stdout.split("|", 1)
+        assert shell == bash
+        assert path.startswith("/usr/bin:/bin:") and "/usr/syno/sbin" in path
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("login_shell", ["zsh", "tcsh", "csh"])
+    def test_remote_shell_command_survives_exotic_login_shells(self, login_shell):
+        """The wrapped string is parsed by the remote LOGIN shell first."""
+        import os
+        import shutil
+        import subprocess
+        sh_path = shutil.which(login_shell)
+        if not sh_path:
+            pytest.skip(f"{login_shell} not installed")
+        out = subprocess.run(
+            [sh_path, "-c", remote_shell_command("echo ok-$0")],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "SHELL": sh_path})
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == f"ok-{sh_path}"
 
     @pytest.mark.unit
     def test_final_shutdown_ssh_teardown_255_is_sent_unconfirmed(self, ssh_monitor):
@@ -2196,7 +2235,7 @@ class TestGroupAReleaseReview:
         shutdown = self._shutdown_argv(remote_monitor, server, "poweroff")
         probe = build_ssh_probe_command(server, "PROBE")
         assert shutdown[:-1] == probe[:-1]
-        assert shutdown[-1] == REMOTE_PATH_PREFIX + "poweroff"
+        assert shutdown[-1] == remote_shell_command("poweroff")
         # The option's value stays glued to its flag.
         for flag in ("-i", "-p", "-J"):
             if flag in opts:
