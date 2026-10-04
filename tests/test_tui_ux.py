@@ -791,13 +791,16 @@ class TestEventLines:
         store.log_event("SLOW_NUT_RESPONSE", "slow", ts=now - 100)
         store.log_event("DAEMON_UPGRADED", "📦 up", ts=now - 50)
         store.close()
-        flat = tui.query_events_for_display(config, max_events=30, verbosity=2)
+        # Freeze the clock: a slow runner crossing a second boundary between
+        # seeding and rendering printed "51s ago" and failed the check below.
+        with patch.object(tui.time, "time", return_value=now):
+            flat = tui.query_events_for_display(config, max_events=30, verbosity=2)
+            grouped = tui.query_events_for_display(config, max_events=10,
+                                                   verbosity=2, grouped=True)
         assert len(flat) == 30
         assert any("Slow NUT response" in line or "Slow nut response" in line
                    for line in flat)
         assert any("Daemon upgraded: up" in line for line in flat)
-        grouped = tui.query_events_for_display(config, max_events=10,
-                                               verbosity=2, grouped=True)
         assert len(grouped) <= 10
         assert {"Power Events", "Diagnostics", "Lifecycle"} <= set(grouped)
         assert any("50s ago" in line for line in grouped)
