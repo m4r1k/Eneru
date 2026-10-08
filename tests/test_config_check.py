@@ -662,6 +662,16 @@ def server(**kw):
     return RemoteServerConfig(**base)
 
 
+class TestProbeRemoteUnsafeProbe:
+    def test_unsafe_per_server_probe_is_a_config_error_not_ssh(self, env):
+        srv = server(probe_command="reboot")
+        out, rp = TestProbeRemote().run_probe(env, srv)
+        text = " ".join(f.message + " " + f.hint for f in out)
+        assert "probe_command 'reboot': unsafe probe_command rejected" in text
+        assert "SSH to" not in text and "Nothing was sent" in text
+        rp.assert_not_called()
+
+
 class TestProbeRemote:
     def run_probe(self, env, srv, *, reach=(True, "", 12), script_out=None,
                   identity=(True, "", 1), config=None):
@@ -1662,6 +1672,15 @@ class TestCubicRound:
 
 
 class TestQuoteAwareCommands:
+    def test_quoted_redirect_is_an_argument(self):
+        # A quoted or escaped `>` is data: sudoers rules may pin it.
+        assert cc.command_binary("sudo tool '>' file") == \
+            ("tool", True, [">", "file"])
+        assert cc.command_binary("sudo tool \\> file") == \
+            ("tool", True, [">", "file"])
+        assert cc.command_binary("sudo tool \"a|b\" > out") == \
+            ("tool", True, ["a|b"])
+
     def test_quoted_operators_stay_in_the_argument(self):
         assert cc.command_binary("sudo -n sh -c 'a; b'") == ("sh", True, ["-c", "a; b"])
         checks, notes = cc.command_checks("sudo -n sh -c 'systemctl stop a; systemctl stop b'", True)
@@ -2020,6 +2039,9 @@ class TestIssue128Backgrounding:
         ("sudo /sbin/shutdown -h +3 1>/dev/null 2>&1 &", False),
         ("sudo /sbin/shutdown -h +3 >/dev/null 2>/dev/null &", False),
         ("sudo /sbin/shutdown -h +3 &>/dev/null &", False),
+        # `>&-` closes stdout only; stderr still holds the session.
+        ("sudo /sbin/shutdown -h +3 >&- &", True),
+        ("sudo /sbin/shutdown -h +3 >&- 2>&- &", False),
         ("sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &", False),
         ("sudo shutdown -h +3 </dev/null >/dev/null 2>&1 &", False),
         ("&", False),

@@ -148,6 +148,7 @@ def build_ssh_probe_command(server: RemoteServerConfig,
 
 
 PROBE_EXPECT_MISSING = "probe output did not contain"
+PROBE_UNSAFE = "unsafe probe_command rejected"
 
 
 def run_remote_probe(server: RemoteServerConfig, probe_command: str,
@@ -296,7 +297,7 @@ def run_server_probe(server: RemoteServerConfig,
         # Validation already rejects an unsafe value; config check probes
         # even an invalid config, so refuse it here as well.
         if not is_safe_probe_command(server.probe_command):
-            return False, "unsafe probe_command rejected", 0
+            return False, PROBE_UNSAFE, 0
         return run_remote_probe(server, server.probe_command,
                                 server.probe_expect)
     auto = server.posix_shell is None and server.is_host_loopback is not True

@@ -884,9 +884,50 @@ _POWER_BINARIES = {"shutdown", "poweroff", "halt", "reboot", "synoshutdown",
                    "systemctl", "init"}
 
 
+_SHELL_OPS = ";&|<>"
+# Private-use stand-ins for operator characters that are quoted or escaped.
+_OP_STANDIN = {c: chr(0xE000 + i) for i, c in enumerate(_SHELL_OPS)}
+_OP_RESTORE = str.maketrans({v: k for k, v in _OP_STANDIN.items()})
+
+
+def _protect_quoted_ops(command: str) -> str:
+    """Swap quoted/escaped `;&|<>` for stand-ins before lexing.
+
+    ELI5: a ">" written on a sign is not a door. shlex drops the quotes, so
+    after lexing `'>'` and `>` look identical; hiding the quoted one first
+    keeps it a word (sudoers rules may pin it as an argument).
+    """
+    out: List[str] = []
+    quote = None
+    escaped = False
+    for ch in command:
+        if escaped:
+            out.append(_OP_STANDIN.get(ch, ch))
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            out.append(ch)
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = None
+                out.append(ch)
+            else:
+                out.append(_OP_STANDIN.get(ch, ch))
+        else:
+            if ch in "'\"":
+                quote = ch
+            out.append(ch)
+    return "".join(out)
+
+
 def _shell_tokens(command: str) -> Optional[List[str]]:
-    """Quote-aware words plus operator runs (`;`, `&&`, `>&`, `2`, `>` ...)."""
-    lex = shlex.shlex(command or "", posix=True, punctuation_chars=";&|<>")
+    """Quote-aware words plus operator runs (`;`, `&&`, `>&`, `2`, `>` ...).
+
+    Quoted operator characters stay as stand-ins so they never read as
+    operators; ``_split_redirects`` restores them in the words it returns.
+    """
+    lex = shlex.shlex(_protect_quoted_ops(command or ""), posix=True,
+                      punctuation_chars=_SHELL_OPS)
     lex.whitespace_split = True
     try:
         return [t for t in lex if t]
@@ -918,10 +959,10 @@ def _split_redirects(tokens: List[str], raw: str = ""
                     r"(?<![^\s;&|])" + re.escape(words[-1] + tok), raw)):
                 fd = words.pop()
             target = tokens[i + 1] if i + 1 < len(tokens) else ""
-            redirects.append((fd, tok, target))
+            redirects.append((fd, tok, target.translate(_OP_RESTORE)))
             i += 2
             continue
-        words.append(tok)
+        words.append(tok.translate(_OP_RESTORE))
         i += 1
     return words, redirects
 
@@ -979,8 +1020,11 @@ def _holds_output(segment: List[str], raw: str) -> bool:
     for fd, op, target in redirects:
         if "<" in op:
             continue
-        if op == "&>" or (op == ">&" and not fd and not target.isdigit()):
+        if op == "&>" or (op == ">&" and not fd and target != "-"
+                          and not target.isdigit()):
             where["1"] = where["2"] = "file"
+        elif op == ">&" and target == "-":
+            where[fd or "1"] = "closed"
         elif op == ">&" and target.isdigit():
             where[fd or "1"] = where.get(target, "ssh")
         else:
@@ -1363,6 +1407,7 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     """SSH reachability + harmless per-command checks for one remote."""
     from eneru.remote_health import (
         PROBE_EXPECT_MISSING,
+        PROBE_UNSAFE,
         build_ssh_probe_command,
         is_safe_probe_command,
         posix_mode_label,
@@ -1391,6 +1436,11 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
         ok, err, latency = run_server_probe(server, probe)
     except ValueError as exc:
         add(LEVEL_ERROR, str(exc))
+        return out
+    if not ok and err == PROBE_UNSAFE:
+        add(LEVEL_ERROR, f"probe_command {server.probe_command!r}: {err}",
+            "Nothing was sent. Use a single harmless command (no shell "
+            "operators), or remove the per-server probe_command.")
         return out
     if not ok and err.startswith(PROBE_EXPECT_MISSING):
         add(LEVEL_ERROR, f"probe_command {server.probe_command!r}: {err}",
