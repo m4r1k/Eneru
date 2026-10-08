@@ -433,7 +433,13 @@ REMOTE_SERVER_SECTION = Section(
                "remote_health.probe_command. Use the device's own no-op on a "
                "router CLI. Empty = the global probe (shell-less devices: "
                "\"does it answer over SSH\").",
-               _d(_RS, "probe_command"), nullable=True, example=":put ok"),
+               _d(_RS, "probe_command"), nullable=True, example=":put eneru-ok"),
+        Option("probe_expect", "str",
+               "Only with probe_command, and only for a device whose CLI can "
+               "report a failed command as success (RouterOS does): text the "
+               "probe's standard output must contain, so a typo'd probe reads as "
+               "failed instead of flapping. Empty = exit 0 is enough.",
+               _d(_RS, "probe_expect"), nullable=True, example="eneru-ok"),
         Option("connect_timeout", "int",
                "Seconds to wait for the SSH connection.",
                _d(_RS, "connect_timeout"), minimum=1),

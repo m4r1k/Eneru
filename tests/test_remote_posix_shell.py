@@ -131,7 +131,7 @@ class TestServerProbe:
                    return_value=(True, "", 4)) as rp, \
                 patch("eneru.remote_health._posix_probe") as probe:
             assert rh.run_server_probe(server, "true") == (True, "", 4)
-        rp.assert_called_once_with(server, ":put ok")
+        rp.assert_called_once_with(server, ":put ok", None)
         probe.assert_not_called()
 
     def test_shell_less_device_answering_is_healthy(self):
@@ -569,3 +569,85 @@ def test_falsy_probe_command_is_validated_not_dropped(tmp_path, value):
 def test_non_string_shutdown_command_is_an_error_not_a_crash(tmp_path):
     _, messages = load(tmp_path, {"posix_shell": False, "shutdown_command": 5})
     assert any("needs an explicit shutdown_command" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# probe_expect: a CLI whose exit code can't be trusted (RouterOS)
+# ---------------------------------------------------------------------------
+
+class TestProbeExpect:
+    @pytest.mark.parametrize("rc,stdout,expect,result", [
+        (0, "eneru-ok\n", "eneru-ok", (True, "")),
+        (0, "eneru-ok\n", None, (True, "")),
+        # RouterOS: a typo'd probe exits 0 with an error on stdout.
+        (0, "bad command name putt (line 1 column 2)\n", "eneru-ok",
+         (False, "probe output did not contain 'eneru-ok' "
+                 "(got: bad command name putt (line 1 column 2))")),
+        (0, "", "eneru-ok",
+         (False, "probe output did not contain 'eneru-ok' (got: no output)")),
+        # RouterOS also exits 1 for the same typo at random: same verdict.
+        (1, "bad command name putt (line 1 column 2)\n", "eneru-ok",
+         (False, "probe output did not contain 'eneru-ok' "
+                 "(got: bad command name putt (line 1 column 2))")),
+        (1, "eneru-ok", "eneru-ok", (False, "exit code 1")),
+        (255, "", "eneru-ok", (False, "exit code 255")),
+        # A local exec error (run_command's catch-all) is no probe output.
+        (1, "", "eneru-ok", (False, "exit code 1")),
+    ])
+    def test_run_remote_probe(self, rc, stdout, expect, result):
+        with patch("eneru.remote_health.run_command", return_value=(rc, stdout, "")):
+            ok, err, _ = rh.run_remote_probe(srv(), ":put eneru-ok", expect)
+        assert (ok, err) == result
+
+    def test_server_probe_passes_probe_expect(self):
+        server = srv(probe_command=":put eneru-ok", probe_expect="eneru-ok")
+        with patch("eneru.remote_health.run_remote_probe",
+                   return_value=(True, "", 2)) as rp:
+            rh.run_server_probe(server, "true")
+        rp.assert_called_once_with(server, ":put eneru-ok", "eneru-ok")
+
+    def test_config_check_blames_the_probe_not_ssh(self):
+        from eneru import config_check as cc
+        server = srv(posix_shell=False, probe_command=":putt eneru-ok",
+                     probe_expect="eneru-ok")
+        with patch("eneru.remote_health.run_command",
+                   return_value=(0, "bad command name putt", "")), \
+                patch.object(cc, "command_exists", return_value=True):
+            out = cc.probe_remote(Config(), server)
+        assert len(out) == 1 and out[0].level == cc.LEVEL_ERROR
+        assert out[0].message == (
+            "Switch: probe_command ':putt eneru-ok': probe output did not "
+            "contain 'eneru-ok' (got: bad command name putt)")
+        assert "typos" in out[0].hint and "BatchMode" not in out[0].hint
+
+    def test_config(self, tmp_path):
+        config, messages = load(tmp_path, {"probe_command": ":put eneru-ok",
+                                           "probe_expect": "eneru-ok"})
+        assert config.remote_servers[0].probe_expect == "eneru-ok"
+        assert not [m for m in messages if "probe_expect" in m]
+        for blank in ("", "   "):
+            config, messages = load(tmp_path, {"probe_expect": blank})
+            assert config.remote_servers[0].probe_expect is None
+            assert not [m for m in messages if "probe_expect" in m]
+
+    @pytest.mark.parametrize("entry,needle", [
+        ({"probe_expect": "eneru-ok"}, "needs a probe_command"),
+        ({"probe_command": ":put x", "probe_expect": 5}, "must be non-empty text"),
+    ])
+    def test_invalid(self, tmp_path, entry, needle):
+        _, messages = load(tmp_path, entry)
+        assert any(m.startswith("ERROR") and needle in m for m in messages)
+
+    def test_catalog(self):
+        keys = {o.key: o for o in cat.REMOTE_SERVER_SECTION.children
+                if hasattr(o, "kind")}
+        assert keys["probe_expect"].kind == "str"
+        assert keys["probe_expect"].nullable
+
+
+def test_probe_expect_is_trimmed_and_non_text_never_crashes(tmp_path):
+    config, _ = load(tmp_path, {"probe_command": ":put eneru-ok",
+                                "probe_expect": "  eneru-ok "})
+    assert config.remote_servers[0].probe_expect == "eneru-ok"
+    with patch("eneru.remote_health.run_command", return_value=(0, "x", "")):
+        assert rh.run_remote_probe(srv(), ":put x", 5)[0] is True

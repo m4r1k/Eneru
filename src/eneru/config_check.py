@@ -1358,6 +1358,7 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
                  owner: str = "") -> List[Finding]:
     """SSH reachability + harmless per-command checks for one remote."""
     from eneru.remote_health import (
+        PROBE_EXPECT_MISSING,
         build_ssh_probe_command,
         is_safe_probe_command,
         posix_mode_label,
@@ -1386,6 +1387,11 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
         ok, err, latency = run_server_probe(server, probe)
     except ValueError as exc:
         add(LEVEL_ERROR, str(exc))
+        return out
+    if not ok and err.startswith(PROBE_EXPECT_MISSING):
+        add(LEVEL_ERROR, f"probe_command {server.probe_command!r}: {err}",
+            "SSH works, but the probe's output lacks probe_expect: check the "
+            "command for typos on the device itself.")
         return out
     if not ok:
         add(LEVEL_ERROR, f"SSH to {server.user}@{server.host} failed: {err}",

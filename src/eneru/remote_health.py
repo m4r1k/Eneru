@@ -147,18 +147,35 @@ def build_ssh_probe_command(server: RemoteServerConfig,
     return ssh_cmd
 
 
-def run_remote_probe(server: RemoteServerConfig,
-                     probe_command: str) -> Tuple[bool, str, int]:
+PROBE_EXPECT_MISSING = "probe output did not contain"
+
+
+def run_remote_probe(server: RemoteServerConfig, probe_command: str,
+                     expect: Optional[str] = None) -> Tuple[bool, str, int]:
     """Run one harmless remote health probe.
 
-    Returns ``(success, error, latency_ms)``.
+    Returns ``(success, error, latency_ms)``. With ``expect``, exit 0 is not
+    enough: the output must also contain that text (``probe_expect``, for a
+    CLI such as RouterOS that can exit 0 on a failed command). Whenever the
+    device itself answered (not ssh's 255, a timeout or a missing client),
+    a missing ``expect`` is reported as a probe problem, not an SSH one.
     """
     start = time.monotonic()
-    exit_code, _, stderr = run_command(
+    exit_code, stdout, stderr = run_command(
         build_ssh_probe_command(server, probe_command),
         timeout=server.connect_timeout + 10,
     )
     latency_ms = int((time.monotonic() - start) * 1000)
+    # Exit 0, or a non-zero exit that printed on stdout, came from the
+    # device; a non-zero exit with nothing on stdout stays an SSH/local error.
+    answered = exit_code == 0 or bool((stdout or "").strip())
+    if (isinstance(expect, str) and expect and answered
+            and exit_code not in (124, 127, 255)
+            and expect not in (stdout or "")):
+        got = next((line.strip() for line in f"{stdout or ''}\n{stderr or ''}"
+                    .splitlines() if line.strip()), "no output")
+        return False, (f"{PROBE_EXPECT_MISSING} {expect!r} "
+                       f"(got: {got[:120]})"), latency_ms
     if exit_code == 0:
         return True, "", latency_ms
     if exit_code == 124:
@@ -280,7 +297,8 @@ def run_server_probe(server: RemoteServerConfig,
         # even an invalid config, so refuse it here as well.
         if not is_safe_probe_command(server.probe_command):
             return False, "unsafe probe_command rejected", 0
-        return run_remote_probe(server, server.probe_command)
+        return run_remote_probe(server, server.probe_command,
+                                server.probe_expect)
     auto = server.posix_shell is None and server.is_host_loopback is not True
     if (auto and server._detected_posix is None) or not uses_posix_shell(
             server, detect=False):

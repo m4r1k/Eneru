@@ -453,11 +453,28 @@ check the device itself (on RouterOS, `/system scheduler print`).
 
 The global health probe `remote_health.probe_command` (default `true`) isn't a
 command on a router CLI. For a machine without a POSIX shell, Eneru's health
-check is "does it answer over SSH" instead. To probe something specific, set
-`probe_command` on that server, e.g. `:put ok` on RouterOS. On such a device
-the probe still judges the exit code, which RouterOS doesn't report reliably
-for a failed command, so test a new `probe_command` by hand first: a typo can
-read as healthy.
+check is "does it answer over SSH" instead, which is enough for most setups.
+To probe something specific, set `probe_command` on that server.
+
+#### `probe_expect`: when the exit code lies
+
+A probe normally passes when it exits 0. Some router CLIs can exit 0 for a
+command that failed; RouterOS picks 0 or 1 at random. So a typo'd
+`probe_command` makes the health check flap between healthy and failed
+(measured on RouterOS 7.21: a typo'd probe read as healthy 1 run in 10).
+`probe_expect` closes that gap: the probe passes only when it exits 0 **and**
+its standard output contains that text (surrounding spaces are trimmed).
+
+- **When to use it:** only with a `probe_command`, and only on a device whose
+  CLI can report a failure as success. Linux, BSD and NAS systems don't need
+  it.
+- **What to expect:** text that the command prints when it works and that an
+  error message wouldn't contain. On RouterOS, `:put eneru-ok` prints
+  `eneru-ok`, while a mistyped command prints `bad command name …`. Some CLIs
+  (Cisco IOS) repeat the command line in their error message, so there pick
+  text the command's *output* has but the command itself doesn't.
+- **If it doesn't match:** the server reads as failed, and `eneru config
+  check` shows what the device printed instead.
 
 #### MikroTik RouterOS
 
@@ -472,7 +489,8 @@ remote_servers:
     host: "192.168.1.2"
     user: "eneru"
     posix_shell: false
-    probe_command: ":put ok"
+    probe_command: ":put eneru-ok"
+    probe_expect: "eneru-ok"
     command_timeout: 30
     shutdown_order: 9
     shutdown_command: '/system scheduler add name="eneru-shutdown" start-time=([/system clock get time] + 00:03:00) interval=0s on-event="/system scheduler remove eneru-shutdown; /system shutdown"'

@@ -467,6 +467,11 @@ class RemoteServerConfig:
     # Per-server health probe, overriding remote_health.probe_command (whose
     # default `true` is not a command on a router CLI; e.g. `:put ok`).
     probe_command: Optional[str] = None
+    # Text the probe_command's standard output must contain (on top of exit
+    # 0), for a CLI whose exit code can't be trusted: RouterOS can exit 0 for
+    # a failed command, so a typo'd probe would otherwise flap between healthy
+    # and failed (measured: healthy 1 run in 10).
+    probe_expect: Optional[str] = None
     # Runtime cache of the auto-detection result; never read from YAML.
     _detected_posix: Optional[bool] = field(default=None, repr=False,
                                             compare=False)
@@ -1463,8 +1468,19 @@ class ConfigLoader:
                 # values (0, false) reach validation untouched.
                 probe_command=(None if server_data.get('probe_command') == ""
                                else server_data.get('probe_command')),
+                probe_expect=cls._parse_probe_expect(server_data.get('probe_expect')),
             ))
         return servers
+
+    @staticmethod
+    def _parse_probe_expect(value: Any) -> Any:
+        """Trim text (a stray trailing space would never match); empty = unset.
+
+        Non-text values pass through untouched so validation can reject them.
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
     @staticmethod
     def _parse_posix_shell(value: Any) -> Any:
@@ -2197,6 +2213,7 @@ class ConfigLoader:
                 "shutdown_order", "shutdown_safety_margin",
                 "is_host_loopback", "host_identity_command",
                 "expected_host_identity", "posix_shell", "probe_command",
+                "probe_expect",
             }
             pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts",
                                  "use_sudo"}
@@ -3378,6 +3395,20 @@ class ConfigLoader:
                             "must be a harmless, non-empty probe without shell "
                             "operators (e.g. ':put ok' on RouterOS), got "
                             f"{server.probe_command!r}"
+                        )
+
+                if server.probe_expect is not None:
+                    if (not isinstance(server.probe_expect, str)
+                            or not server.probe_expect.strip()):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': probe_expect "
+                            "must be non-empty text, got "
+                            f"{server.probe_expect!r}"
+                        )
+                    elif not server.probe_command:
+                        messages.append(
+                            f"ERROR: Remote server '{display}': probe_expect "
+                            "needs a probe_command whose output it checks."
                         )
 
                 # Issue #128: with no POSIX shell Eneru sends shutdown_command

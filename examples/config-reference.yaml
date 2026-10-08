@@ -615,8 +615,15 @@ remote_servers:
     # Health-check command for this server only, replacing
     # remote_health.probe_command. Must be harmless (no shell operators).
     # Unset: the global probe, or for a machine without a POSIX shell, "does it
-    # answer over SSH". Useful on a router CLI, e.g. ":put ok" on RouterOS.
-    # probe_command: ":put ok"
+    # answer over SSH". Useful on a router CLI, e.g. ":put eneru-ok" on RouterOS.
+    # probe_command: ":put eneru-ok"
+    #
+    # Only with probe_command, and only for a CLI that can report a failed
+    # command as success (RouterOS can exit 0 for a failed command, so a
+    # typo'd probe would flap between healthy and failed): text the probe's
+    # standard output must contain, on top of exit 0. Linux, BSD and NAS
+    # boxes don't need it.
+    # probe_expect: "eneru-ok"
 
   # Example: network device without a POSIX shell (MikroTik RouterOS)
   # Eneru exists to protect data on NAS and Linux boxes; a switch or router
@@ -631,7 +638,8 @@ remote_servers:
   #   host: "192.168.178.4"
   #   user: "eneru"
   #   posix_shell: false
-  #   probe_command: ":put ok"
+  #   probe_command: ":put eneru-ok"
+  #   probe_expect: "eneru-ok"
   #   command_timeout: 30
   #   shutdown_order: 9
   #   shutdown_command: '/system scheduler add name="eneru-shutdown" start-time=([/system clock get time] + 00:03:00) interval=0s on-event="/system scheduler remove eneru-shutdown; /system shutdown"'

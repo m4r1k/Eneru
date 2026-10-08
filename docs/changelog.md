@@ -24,27 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout message now states the real wait: `command_timeout` plus the 30 s SSH
   allowance, or less when the shutdown phase's deadline caps it. (#128)
 
-- **Remote shutdown reaches routers and switches without a POSIX shell
-  again.** MikroTik RouterOS (and Cisco, Juniper, Windows' `cmd.exe`) have no
-  `sh`. Since 6.1.8 Eneru has wrapped every remote command in shell syntax
-  (`export PATH=…` in 6.1.8, `sh -c` in 6.2.1), and RouterOS rejects such a
-  line whole, so a configured shutdown command never ran. RouterOS also exits
-  0 or 1 at random when a command fails, so Eneru could log the failure as a
-  success. A new per-server `posix_shell` setting handles this. The default,
-  `auto`, asks the machine over SSH and checks its *output* (once; health
-  checks ask again until they get an answer): a POSIX shell
-  answers with a marker, a router CLI with its own error, and from then on
-  that machine gets its commands exactly as written. Until a machine answers,
-  Eneru behaves as before, and an entry with `use_sudo` or
-  `pre_shutdown_commands` keeps the shell wrapper whatever the detection says
-  (`config check` flags the mismatch). `posix_shell: false` sets it explicitly and rejects
-  `use_sudo`, `pre_shutdown_commands` and `is_host_loopback`, which need a
-  shell. A new per-server `probe_command` (e.g. `:put ok`) replaces the global
-  health probe, whose default `true` isn't a RouterOS command; without it, a
-  shell-less machine counts as healthy when it answers over SSH. Both keys are
-  in the config editor. A leftover 6.1.7 `augment_remote_path: false` now
-  warns and points to `posix_shell: false`. (#128)
-### Documentation
+- **Remote shutdown reaches routers and switches without a POSIX shell again.**
+  MikroTik RouterOS (and Cisco, Juniper, Windows' `cmd.exe`) have no `sh`.
+  Since 6.1.8 Eneru has wrapped every remote command in shell syntax (`export
+  PATH=…` in 6.1.8, `sh -c` in 6.2.1), and RouterOS rejects such a line whole,
+  so a configured shutdown command never ran. RouterOS also exits 0 or 1 at
+  random when a command fails, so Eneru could log the failure as a success. A
+  new per-server `posix_shell` setting handles this. The default, `auto`, asks
+  the machine over SSH and checks its *output* (once; health checks ask again
+  until they get an answer): a POSIX shell answers with a marker, a router CLI
+  with its own error, and from then on that machine gets its commands exactly
+  as written. Until a machine answers, Eneru behaves as before, and an entry
+  with `use_sudo` or `pre_shutdown_commands` keeps the shell wrapper whatever
+  the detection says (`config check` flags the mismatch). `posix_shell: false`
+  sets it explicitly and rejects `use_sudo`, `pre_shutdown_commands` and
+  `is_host_loopback`, which need a shell. A new per-server `probe_command`
+  (e.g. `:put eneru-ok`) replaces the global health probe, whose default `true`
+  isn't a RouterOS command; without it, a shell-less machine counts as healthy
+  when it answers over SSH. An optional `probe_expect` adds a check on the
+  probe's output, for a CLI that can exit 0 on a failed command (on RouterOS a
+  typo'd probe otherwise read as healthy 1 run in 10). All three keys are in
+  the config editor. A leftover 6.1.7 `augment_remote_path: false` now warns
+  and points to `posix_shell: false`. (#128) ### Documentation
 
 - New "Network devices" section in the remote-servers guide: why shutting
   down network gear is optional for a data-integrity tool, how to do it safely

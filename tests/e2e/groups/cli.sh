@@ -1001,7 +1001,17 @@ remote_servers:
     host: "localhost"
     user: "routeros"
     posix_shell: false
-    probe_command: ":put ok"
+    probe_command: ":put eneru-ok"
+    probe_expect: "eneru-ok"
+    shutdown_command: '$ROS_CMD'
+    ssh_options: $SSH_OPTS
+  - name: "Switch Typo"
+    enabled: true
+    host: "localhost"
+    user: "routeros"
+    posix_shell: false
+    probe_command: ":putt eneru-ok"
+    probe_expect: "eneru-ok"
     shutdown_command: '$ROS_CMD'
     ssh_options: $SSH_OPTS
 YAML
@@ -1013,7 +1023,8 @@ cat /tmp/test73-check.log
 for line in "Switch Auto: SSH as routeros@localhost works" \
             "Switch Auto: no POSIX shell (detected): shutdown_command is sent exactly as written and was not checked" \
             "Switch Fixed: SSH as routeros@localhost works" \
-            "Switch Fixed: no POSIX shell (configured): shutdown_command is sent exactly as written and was not checked"; do
+            "Switch Fixed: no POSIX shell (configured): shutdown_command is sent exactly as written and was not checked" \
+            "Switch Typo: probe_command ':putt eneru-ok': probe output did not contain 'eneru-ok'"; do
   grep -qF -- "$line" /tmp/test73-check.log || {
     echo "FAIL: config check is missing: $line"; exit 1; }
 done
@@ -1024,7 +1035,7 @@ fi
 if docker exec eneru-e2e-ssh grep -qxF -- "$ROS_CMD" /tmp/routeros-received; then
   echo "FAIL: config check sent the RouterOS shutdown command"; exit 1
 fi
-docker exec eneru-e2e-ssh grep -qxF ":put ok" /tmp/routeros-received || {
+docker exec eneru-e2e-ssh grep -qxF ":put eneru-ok" /tmp/routeros-received || {
   echo "FAIL: the per-server probe_command was not used"; exit 1; }
 
 for name in "Switch Auto" "Switch Fixed"; do
