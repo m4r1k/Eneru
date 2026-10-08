@@ -285,6 +285,7 @@ authentication). Overridable per UPS. Full explanation:
 | `depletion.grace_period` | `90` | Seconds after power loss before depletion rate can trigger shutdown |
 | `extended_time.enabled` | `true` | Enable wall-clock time-on-battery shutdown |
 | `extended_time.threshold` | `900` | Seconds on battery before extended-time shutdown |
+| `trust_battery_charge` | `true` | `false` skips the low-battery and depletion triggers for a UPS whose `battery.charge` reading is unreliable. Requires `extended_time.enabled: true`. See [When the charge reading lies](triggers.md#when-the-charge-reading-lies) |
 | `voltage_sensitivity` | `normal` | Voltage warning preset: `tight`, `normal`, or `loose` |
 
 See [Shutdown triggers](triggers.md) for decision order, voltage threshold details, and common UPS transfer points by vendor.

@@ -11,6 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [6.2.2] - 2026-10-08
 
+### Added
+
+- **`triggers.trust_battery_charge` for a UPS whose charge reading lies.**
+  During a real outage a UniFi UPS reported its charge falling from 100% to
+  52% in 90 seconds while the battery voltage held at 12.2 V and its own
+  runtime estimate still showed about 18 minutes. The depletion trigger shut
+  the host down correctly on those numbers; the battery then ran it for more
+  than 30 minutes.
+  - Set `trust_battery_charge: false` (globally or per UPS) and Eneru skips
+    the two triggers that read the charge: low battery and depletion rate.
+    Critical runtime, time on battery, a failed self-test, FSD and a lost
+    connection still apply.
+  - It's rejected unless `extended_time` is enabled, so a UPS can't be left
+    without a time-based safety net.
+  - While the charge is still trusted, Eneru watches for this pattern: the
+    charge says the battery is nearly empty while the runtime estimate and
+    battery voltage disagree. It then logs and notifies a
+    `BATTERY_CHARGE_ANOMALY` event once per outage. The warning never changes
+    a shutdown decision, and it can be muted with `notifications.suppress`.
+  - The dashboard, `eneru monitor` and `config check` stop counting the two
+    triggers for that UPS. A redundancy group also checks its members
+    against its own triggers, so set it there too when the UPS is a member. The setting
+    is in the config editor's advanced options.
+
 ### Fixed
 
 - **Remote shutdown reaches routers and switches without a POSIX shell

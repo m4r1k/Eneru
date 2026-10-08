@@ -154,7 +154,7 @@ SUPPRESSIBLE_EVENTS = (
     "POWER_RESTORED", "VOLTAGE_NORMALIZED", "AVR_BOOST_ACTIVE",
     "AVR_TRIM_ACTIVE", "AVR_INACTIVE", "BYPASS_MODE_INACTIVE",
     "OVERLOAD_RESOLVED", "CONNECTION_RESTORED", "VOLTAGE_AUTODETECT_MISMATCH",
-    "VOLTAGE_FLAP_SUPPRESSED",
+    "VOLTAGE_FLAP_SUPPRESSED", "BATTERY_CHARGE_ANOMALY",
 )
 REPORT_FIELDS = ("events", "battery_health", "self_tests", "energy", "uptime")
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
@@ -236,6 +236,12 @@ TRIGGERS_SECTION = Section(
                            "may trigger (the first minute is noisy).",
                            _d(_DEP, "grace_period"), minimum=0),
                 )),
+        Option("trust_battery_charge", "bool",
+               "Off: this UPS's battery.charge reading can't be believed, so "
+               "the low-battery and depletion-rate triggers are skipped. "
+               "Runtime, time on battery, failed self-test and FSD still "
+               "apply. Requires extended_time to be enabled.",
+               _d(_TRG, "trust_battery_charge")),
         Section("extended_time", "Time on battery",
                 "A wall-clock safety net: shut down after being on battery "
                 "for a fixed time, whatever the battery reports.",

@@ -19,6 +19,8 @@ When a UPS is on battery, Eneru evaluates these conditions in order. The first m
 
 Only on-battery status activates the shutdown triggers. Voltage, AVR, bypass, overload, and battery anomaly events are health alerts unless they also lead to one of the trigger conditions above.
 
+For a UPS set to `trust_battery_charge: false`, rows 3 and 5 (low battery and depletion rate) are skipped. See [When the charge reading lies](#when-the-charge-reading-lies).
+
 ## Previous self-test failure
 
 ```yaml
@@ -171,6 +173,64 @@ triggers:
   extended_time:
     enabled: false
 ```
+
+## When the charge reading lies
+
+Picture a car whose fuel gauge drops from full to half in 90 seconds while the engine runs normally and the range display still says 18 minutes. A driver who pulls over is doing the right thing given the gauge. The gauge is what's broken.
+
+Some UPS firmware does the same with `battery.charge`. On 2026-10-08 a UniFi UPS on a planned outage reported this, at a steady load of about 110 W:
+
+| Time on battery | `battery.charge` | `battery.voltage` | `battery.runtime` |
+|-----------------|------------------|-------------------|-------------------|
+| 0s | 100% | 12.8 V | 3647s |
+| 6s | 97% | 12.2 V | 1148s |
+| 59s | 65% | 12.2 V | 1095s |
+| 88s | 52% | 12.2 V | 1065s |
+
+The charge fell 48 points in 90 seconds, about 32%/min. Over the same time the battery voltage didn't move, and the UPS's own runtime estimate counted down at about one second per second. The depletion trigger fired correctly on the numbers it was given. The host was later powered back on while the UPS still read "15%", and the battery kept it running for more than 30 minutes. Low battery would have fired too: it reads the same charge.
+
+### What Eneru does about it
+
+Two triggers read `battery.charge`: low battery and depletion rate. Eneru can't safely decide on its own which reading is lying. If the charge is the honest one, ignoring it means riding into a dead battery. So the default stays as it is, and Eneru adds a warning:
+
+- **Warning only (always on while the charge is trusted).** On battery, Eneru compares three readings. If, for three polls in a row, the charge points to an empty battery in under a quarter of the UPS's runtime estimate while the battery voltage has dropped less than 3% since the switch to battery settled, it logs and notifies a `BATTERY_CHARGE_ANOMALY` event, once per outage. The event names the setting below. It never changes a shutdown decision. UPSes that don't report `battery.voltage` are never flagged.
+- **Opt-in: `trust_battery_charge: false`.** You tell Eneru this UPS's charge can't be believed. The low-battery and depletion triggers are skipped for it, and the dashboard, `eneru monitor` and `config check` show them as off. Critical runtime, time on battery, a failed self-test, FSD and a lost connection still apply.
+
+The warning can also fire on a UPS whose driver reports a fixed `battery.voltage` (the nominal value) or a runtime estimate that never changes. There a fast-falling charge may be the honest reading, which is why the warning asks you to confirm with a real battery run before turning the charge off.
+
+### Before you turn it off
+
+Turning the gauge off removes two of the overlapping triggers, so confirm the reading is really wrong first:
+
+1. Look at an outage, or a controlled battery run, in the statistics database. The pattern is the charge falling fast while the battery voltage holds:
+
+    ```bash
+    sqlite3 /var/lib/eneru/<ups>.db \
+      "SELECT datetime(ts,'unixepoch'), status, battery_charge, battery_voltage,
+              battery_runtime, ups_load
+       FROM samples WHERE status LIKE '%OB%' ORDER BY ts LIMIT 120;"
+    ```
+
+2. Measure how long the battery really lasts at your normal load. Use that, with a generous margin, as the time-on-battery budget.
+
+### Configuration
+
+`trust_battery_charge: false` is rejected unless `extended_time` is enabled. Ignoring the gauge without a stopwatch would leave only the UPS's runtime estimate, which on firmware like this is often computed from the same bad charge figure. Set it on the affected UPS only:
+
+```yaml
+ups:
+  - name: "ups@192.168.178.11"
+    display_name: "Lab"
+    triggers:
+      trust_battery_charge: false
+      extended_time:
+        enabled: true
+        threshold: 900   # measured runtime was 30+ minutes; keep a margin
+```
+
+If the UPS is a member of a [redundancy group](redundancy-groups.md), the group also checks each member's readings against its own `redundancy_groups[].triggers` (or the global ones). Set `trust_battery_charge: false` there as well, or the group still treats the lying charge as critical.
+
+What you give up: Eneru no longer notices a battery that really is emptying faster than expected, so the time-on-battery budget is your floor. Keep it well under the runtime you measured, and repeat the measurement as the battery ages.
 
 ## FSD flag
 

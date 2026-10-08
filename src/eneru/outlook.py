@@ -187,17 +187,29 @@ def _trigger(tid: str, *, enabled: bool = True, state: str,
     }
 
 
+def _trusts_charge(triggers: Any) -> bool:
+    """False only when triggers.trust_battery_charge is explicitly false."""
+    return getattr(triggers, "trust_battery_charge", True) is not False
+
+
+_UNTRUSTED_CHARGE_TEXT = "off: trust_battery_charge is false"
+
+
 def describe_trigger_conditions(triggers: Any, *,
                                 self_test_failure_armed: bool = False
                                 ) -> List[str]:
     """Static human list of every configured trigger (Shutdown tab, notices)."""
     dep = triggers.depletion
-    out = [
-        f"charge below {_fmt_pct(triggers.low_battery_threshold)}",
-        f"runtime below {format_seconds(triggers.critical_runtime_threshold)}",
-        f"depletion above {float(dep.critical_rate):g}%/min "
-        f"(after {format_seconds(dep.grace_period)} on battery)",
-    ]
+    if _trusts_charge(triggers):
+        out = [
+            f"charge below {_fmt_pct(triggers.low_battery_threshold)}",
+            f"runtime below {format_seconds(triggers.critical_runtime_threshold)}",
+            f"depletion above {float(dep.critical_rate):g}%/min "
+            f"(after {format_seconds(dep.grace_period)} on battery)",
+        ]
+    else:
+        out = [f"runtime below "
+               f"{format_seconds(triggers.critical_runtime_threshold)}"]
     if triggers.extended_time.enabled:
         out.append(f"{format_seconds(triggers.extended_time.threshold)} on battery")
     if self_test_failure_armed:
@@ -279,9 +291,16 @@ def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
         return "held" if stabilizing else "fired"
 
     # T1 low battery: int(charge) < threshold.
+    trust_charge = _trusts_charge(triggers)
     lb_thr = triggers.low_battery_threshold
     lb_cond = f"charge < {_fmt_pct(lb_thr)}"
-    if charge is None:
+    if not trust_charge:
+        rows.append(_trigger(
+            "lowBattery", enabled=False, state="disabled", comparison="below",
+            value=round(charge, 1) if charge is not None else None,
+            threshold=lb_thr, unit="%", condition=lb_cond,
+            text=_UNTRUSTED_CHARGE_TEXT))
+    elif charge is None:
         rows.append(_trigger(
             "lowBattery", state="unknown" if on_battery else "idle",
             comparison="below", value=None, threshold=lb_thr, unit="%",
@@ -334,7 +353,9 @@ def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
     dep_cond = (f"drain > {dep_thr:g}%/min after "
                 f"{format_seconds(grace)} on battery")
     met = rate > 0 and rate > dep_thr
-    if not on_battery:
+    if not trust_charge:
+        dep_state, eta = "disabled", None
+    elif not on_battery:
         dep_state, eta = "idle", None
     elif not met:
         dep_state, eta = "ok", None
@@ -344,11 +365,13 @@ def evaluate_triggers(triggers: Any, *, status: Any, battery_charge: Any,
     else:
         dep_state, eta = "fired", 0.0
     rows.append(_trigger(
-        "depletionRate", state=dep_state, comparison="above",
+        "depletionRate", enabled=trust_charge, state=dep_state,
+        comparison="above",
         value=round(rate, 2), threshold=dep_thr, unit="%/min",
         margin=round(dep_thr - rate, 2), eta=eta,
         eta_basis="clock" if eta is not None else None, condition=dep_cond,
-        text=f"{rate:g}%/min now · fires above {dep_thr:g}%/min"))
+        text=(f"{rate:g}%/min now · fires above {dep_thr:g}%/min"
+              if trust_charge else _UNTRUSTED_CHARGE_TEXT)))
 
     # T4 extended time: tob > threshold (enabled), held while stabilizing.
     ext = triggers.extended_time

@@ -107,6 +107,12 @@ class MonitorState:
     ups_transfer_low: Optional[float] = None
     ups_transfer_high: Optional[float] = None
     battery_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    # Warning-only battery.charge plausibility check (per outage). The
+    # reference voltage is the first battery.voltage read once the switch to
+    # battery has settled; the count is consecutive disagreeing polls.
+    charge_check_ref_voltage: Optional[float] = None
+    charge_check_count: int = 0
+    charge_anomaly_reported: bool = False
     # Battery anomaly detection (recalibration, sudden drops while online)
     last_battery_charge: float = -1.0  # -1 = not yet initialized
     last_battery_charge_time: float = 0.0

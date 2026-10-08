@@ -789,13 +789,17 @@ def probe_ups(config: Config, group: UPSGroupConfig) -> List[Finding]:
             "power-event detection.")
     if "OB" in status.split():
         add(LEVEL_WARN, f"{label}: the UPS is ON BATTERY right now")
-    if charge is None:
+    trust_charge = group.triggers.trust_battery_charge is not False
+    if charge is None and trust_charge:
         add(LEVEL_WARN, f"{label}: the UPS does not report battery.charge",
             "triggers.low_battery_threshold can never fire for this UPS.")
     if runtime is None:
         add(LEVEL_WARN, f"{label}: the UPS does not report battery.runtime",
             "triggers.critical_runtime_threshold can never fire; the "
-            "charge, depletion and extended-time triggers still work.")
+            + ("charge, depletion and extended-time triggers still work."
+               if trust_charge else
+               "charge is ignored (trust_battery_charge: false), so only "
+               "extended time, FSD and a lost connection remain."))
     elif is_numeric(runtime) and is_numeric(group.triggers.critical_runtime_threshold):
         if float(runtime) <= float(group.triggers.critical_runtime_threshold):
             add(LEVEL_WARN,
@@ -1615,10 +1619,14 @@ def _plan_for_group(config: Config, group: Any) -> Dict[str, Any]:
 
 
 def _trigger_line(t: Any) -> str:
-    parts = [f"battery <= {t.low_battery_threshold}%",
-             f"runtime <= {format_seconds(t.critical_runtime_threshold)}",
-             f"drain > {t.depletion.critical_rate}%/min "
-             f"(after {format_seconds(t.depletion.grace_period)})"]
+    if getattr(t, "trust_battery_charge", True) is not False:
+        parts = [f"battery <= {t.low_battery_threshold}%",
+                 f"runtime <= {format_seconds(t.critical_runtime_threshold)}",
+                 f"drain > {t.depletion.critical_rate}%/min "
+                 f"(after {format_seconds(t.depletion.grace_period)})"]
+    else:
+        parts = [f"runtime <= {format_seconds(t.critical_runtime_threshold)}",
+                 "charge ignored (trust_battery_charge: false)"]
     if t.extended_time.enabled:
         parts.append(f"{format_seconds(t.extended_time.threshold)} on battery")
     parts.append("UPS signals FSD")

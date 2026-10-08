@@ -1480,5 +1480,151 @@ fi
 echo "PASS (71b): omitted is_local still powers this host off and warns"
 )
 
+
+# ======================================================================
+# Test 74: a UPS whose battery.charge lies (trust_battery_charge, 6.2.2)
+# ======================================================================
+(
+echo ""
+echo ">>> Running: Test 74: a UPS whose battery.charge lies (trust_battery_charge)"
+
+# 2026-10-08 UniFi incident: charge fell ~32%/min while battery.voltage and
+# battery.runtime said the battery was fine. Replay that shape: charge drops
+# one point per apply (~40%/min), voltage 12.2 V and runtime 1200 s hold.
+#  74a (trusted, default): the warning-only BATTERY_CHARGE_ANOMALY event
+#       lands first, then the depletion trigger still shuts down after its
+#       60 s grace -- the warning never changes the decision.
+#  74b (trust_battery_charge: false): a faster drain (two points per
+#       apply) runs past the depletion grace AND below the 20% low-battery
+#       threshold without a shutdown, and no warning is raised.
+STEP="$E2E_DIR/scenarios/charge-lies-step.dev"
+feed_lying_charge() {  # [step] [floor]
+  local c
+  for c in $(seq 97 "-${1:-1}" "${2:-30}"); do
+    sed "s/^battery\.charge: .*/battery.charge: $c/" \
+      "$E2E_DIR/scenarios/charge-lies.dev" > "$STEP"
+    apply_scenario charge-lies-step || return 1
+  done
+}
+write_charge_config() {
+  cat > "$1" <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+  check_interval: 1
+triggers:
+  low_battery_threshold: 20
+  critical_runtime_threshold: 600
+  on_battery_stabilization_delay: 0
+  trust_battery_charge: $2
+  depletion:
+    window: 300
+    critical_rate: 15.0
+    grace_period: 60
+  extended_time:
+    enabled: true
+    threshold: 600
+behavior:
+  dry_run: true
+logging:
+  file: null
+  state_file: "/tmp/eneru-e2e-t74-state"
+  battery_history_file: "/tmp/eneru-e2e-t74-history"
+  shutdown_flag_file: "/tmp/eneru-e2e-t74-flag"
+statistics:
+  db_directory: "/tmp/eneru-e2e-t74-stats"
+notifications:
+  enabled: false
+YAML
+}
+cleanup_74() {
+  [ -n "${FEED_PID:-}" ] && kill "$FEED_PID" 2>/dev/null || true
+  wait 2>/dev/null || true
+  rm -f "$STEP" /tmp/eneru-e2e-t74-flag
+  apply_scenario online-charging
+}
+trap cleanup_74 EXIT
+
+# --- 74a: trusted (default) ---
+rm -f /tmp/eneru-e2e-t74-flag
+write_charge_config /tmp/config-e2e-t74a.yaml true
+apply_scenario charge-lies
+feed_lying_charge & FEED_PID=$!
+set +e
+timeout 150s eneru run --config /tmp/config-e2e-t74a.yaml --exit-after-shutdown \
+  > /tmp/test74a.log 2>&1
+RC=$?
+set -e
+kill "$FEED_PID" 2>/dev/null || true; wait "$FEED_PID" 2>/dev/null || true
+if [ "$RC" -ne 0 ]; then
+  echo "FAIL (74a): eneru exited with $RC (expected 0 after the dry-run shutdown)"
+  cat /tmp/test74a.log; exit 1
+fi
+WARN_LINE=$(grep -n "POWER EVENT: BATTERY_CHARGE_ANOMALY" /tmp/test74a.log | head -1 | cut -d: -f1)
+SD_LINE=$(grep -n "Depletion rate .* above threshold" /tmp/test74a.log | head -1 | cut -d: -f1)
+if [ -z "$WARN_LINE" ]; then
+  echo "FAIL (74a): no BATTERY_CHARGE_ANOMALY warning for a charge that contradicts voltage and runtime"
+  cat /tmp/test74a.log; exit 1
+fi
+if [ -z "$SD_LINE" ]; then
+  echo "FAIL (74a): the depletion trigger did not fire (the warning must not change the decision)"
+  cat /tmp/test74a.log; exit 1
+fi
+if [ "$WARN_LINE" -ge "$SD_LINE" ]; then
+  echo "FAIL (74a): the warning landed after the shutdown started"
+  cat /tmp/test74a.log; exit 1
+fi
+if ! grep -q "trust_battery_charge: false" /tmp/test74a.log; then
+  echo "FAIL (74a): the warning does not name the setting"
+  cat /tmp/test74a.log; exit 1
+fi
+echo "PASS (74a): warning first, then the depletion trigger still fired"
+
+# --- 74b: trust_battery_charge: false ---
+rm -f /tmp/eneru-e2e-t74-flag /tmp/eneru-e2e-t74-history*
+write_charge_config /tmp/config-e2e-t74b.yaml false
+eneru validate --config /tmp/config-e2e-t74b.yaml >/tmp/test74b-validate.log 2>&1 || {
+  echo "FAIL (74b): a config with trust_battery_charge: false + extended_time must validate"
+  cat /tmp/test74b-validate.log; exit 1; }
+apply_scenario charge-lies
+feed_lying_charge 2 5 & FEED_PID=$!
+set +e
+timeout 80s eneru run --config /tmp/config-e2e-t74b.yaml > /tmp/test74b.log 2>&1
+RC=$?
+set -e
+kill "$FEED_PID" 2>/dev/null || true; wait "$FEED_PID" 2>/dev/null || true
+if [ "$RC" -ne 124 ]; then
+  echo "FAIL (74b): eneru exited with $RC (expected 124 = still running at the timeout)"
+  cat /tmp/test74b.log; exit 1
+fi
+if grep -q "SHUTDOWN SEQUENCE" /tmp/test74b.log; then
+  echo "FAIL (74b): shutdown triggered although trust_battery_charge is false"
+  cat /tmp/test74b.log; exit 1
+fi
+if ! grep -qE "Depletion: (1[6-9]|[2-9][0-9])(\.[0-9]+)?%/min, Time on battery: 1m" /tmp/test74b.log; then
+  echo "FAIL (74b): the drain never exceeded 15%/min past the grace period (test feed broken?)"
+  cat /tmp/test74b.log; exit 1
+fi
+if ! grep -qE "On battery: (1[0-9]|[0-9])% " /tmp/test74b.log; then
+  echo "FAIL (74b): the charge never fell below the 20% low-battery threshold (test feed broken?)"
+  cat /tmp/test74b.log; exit 1
+fi
+if grep -q "BATTERY_CHARGE_ANOMALY" /tmp/test74b.log; then
+  echo "FAIL (74b): the warning fired although the charge is already ignored"
+  cat /tmp/test74b.log; exit 1
+fi
+
+# extended_time is the required safety net: validation refuses it disabled.
+sed 's/^    enabled: true$/    enabled: false/' /tmp/config-e2e-t74b.yaml > /tmp/config-e2e-t74c.yaml
+if eneru validate --config /tmp/config-e2e-t74c.yaml >/tmp/test74c.log 2>&1; then
+  echo "FAIL (74b): trust_battery_charge: false without extended_time validated"
+  cat /tmp/test74c.log; exit 1
+fi
+if ! grep -q "trust_battery_charge is false but triggers.extended_time is disabled" /tmp/test74c.log; then
+  echo "FAIL (74b): the rejection does not explain the extended_time requirement"
+  cat /tmp/test74c.log; exit 1
+fi
+echo "PASS (74b): charge ignored below 20% and past the grace, extended_time required"
+)
+
 echo ""
 echo "=== Group 'single-ups-core' completed successfully ==="

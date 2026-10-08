@@ -119,6 +119,17 @@ triggers:
     # Time threshold (seconds) - 900 = 15 minutes
     threshold: 900
 
+  # Whether this UPS's battery.charge reading can be believed (default
+  # true). Some firmware reports a charge that collapses under load while
+  # the battery voltage and the UPS's own runtime estimate say the battery
+  # is fine. false skips the two triggers that read the charge (low
+  # battery and depletion rate); critical runtime, extended time, a failed
+  # self-test, FSD and a lost connection still apply. Requires
+  # extended_time.enabled: true -- set its threshold from a real battery
+  # run. Usually set per UPS, not globally. See docs/triggers.md
+  # ("When the charge reading lies").
+  trust_battery_charge: true
+
   # Voltage warning band preset (per-UPS-group). The daemon does NOT
   # expose raw warning_low / warning_high volt-level overrides -- a
   # misconfigured `warning_high: 200` on a 120V grid would mask a real
@@ -424,7 +435,8 @@ notifications:
   #   POWER_RESTORED, VOLTAGE_NORMALIZED,
   #   AVR_BOOST_ACTIVE, AVR_TRIM_ACTIVE, AVR_INACTIVE,
   #   BYPASS_MODE_INACTIVE, OVERLOAD_RESOLVED, CONNECTION_RESTORED,
-  #   VOLTAGE_AUTODETECT_MISMATCH, VOLTAGE_FLAP_SUPPRESSED
+  #   VOLTAGE_AUTODETECT_MISMATCH, VOLTAGE_FLAP_SUPPRESSED,
+  #   BATTERY_CHARGE_ANOMALY
   # Safety-critical events CANNOT be muted by design (the config
   # validator rejects them): OVER_VOLTAGE_DETECTED, BROWNOUT_DETECTED,
   # OVERLOAD_ACTIVE, BYPASS_MODE_ACTIVE, ON_BATTERY, CONNECTION_LOST,

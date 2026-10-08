@@ -474,6 +474,21 @@ class TestProbeUps:
         out, _ = self.probe(env, {"ups": {"name": "bob@h"}}, fake_run(listing=""))
         assert "available: none" in out[0].message
 
+    def test_untrusted_charge_hints(self, env):
+        """trust_battery_charge: false -> no missing-charge warning, and the
+        missing-runtime hint names only the triggers that are left."""
+        data = {"ups": {"name": "ups@h"},
+                "triggers": {"trust_battery_charge": False}}
+        out, _ = self.probe(env, data, fake_run(vars_="ups.status: OB\n"))
+        text = " ".join(f.message + " " + f.hint for f in out)
+        assert "does not report battery.charge" not in text
+        assert "only extended time, FSD and a lost connection remain" in text
+        out, _ = self.probe(env, {"ups": {"name": "ups@h"}},
+                            fake_run(vars_="ups.status: OB\n"))
+        text = " ".join(f.message + " " + f.hint for f in out)
+        assert "does not report battery.charge" in text
+        assert "charge, depletion and extended-time triggers still work" in text
+
     def test_vars_fail(self, env):
         out, _ = self.probe(env, {"ups": {"name": "ups@h"}}, fake_run(vars_code=1))
         assert out[-1].level == "error" and "var fail" in out[-1].message

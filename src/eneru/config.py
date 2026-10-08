@@ -59,6 +59,13 @@ class TriggersConfig:
     self_test_failure_shutdown_delay: int = 30
     depletion: DepletionConfig = field(default_factory=DepletionConfig)
     extended_time: ExtendedTimeConfig = field(default_factory=ExtendedTimeConfig)
+    # False = this UPS's battery.charge can't be believed (a fuel gauge that
+    # drops from full to half in 90 s while the engine runs fine), so the two
+    # triggers that read it -- low battery (T1) and depletion rate (T3) -- are
+    # skipped. Runtime, time on battery, failed self-test, FSD and connection
+    # loss still apply. Validation refuses False unless extended_time is
+    # enabled: no switching off the gauge without setting a stopwatch.
+    trust_battery_charge: bool = True
     # Voltage warning band as a fraction of input.voltage.nominal.
     # `tight` = ±5%, `normal` = ±10% (EN 50160), `loose` = ±15%.
     # Per-UPS-group so a clean PDU and a generator-fed leg in the same
@@ -360,6 +367,7 @@ SUPPRESSIBLE_EVENTS: frozenset = frozenset({
     "CONNECTION_RESTORED",
     "VOLTAGE_AUTODETECT_MISMATCH",
     "VOLTAGE_FLAP_SUPPRESSED",
+    "BATTERY_CHARGE_ANOMALY",
 })
 
 
@@ -831,6 +839,9 @@ def _sch_number(minimum=None, maximum=None, *, optional=False):
 # next `.get` blows up. Unknown keys here are still swept by the hand-written
 # `_validate_triggers`, so this node does NOT sweep (avoids double-reporting).
 _TRIGGERS_SCHEMA = _sch_map(fatal=True, keys={
+    # A quoted "false" is a truthy str: it would silently keep trusting a
+    # lying charge gauge, so a non-bool is rejected like extended_time.enabled.
+    "trust_battery_charge": _SCH_BOOL,
     "depletion": _sch_map(fatal=True, keys={}),
     "extended_time": _sch_map(fatal=True, keys={"enabled": _SCH_BOOL}),  # F-002
 })
@@ -1404,6 +1415,8 @@ class ConfigLoader:
                 enabled=extended_data.get('enabled', defaults.extended_time.enabled),
                 threshold=extended_data.get('threshold', defaults.extended_time.threshold),
             ),
+            trust_battery_charge=triggers_data.get(
+                'trust_battery_charge', defaults.trust_battery_charge),
             voltage_sensitivity=sensitivity,
             voltage_sensitivity_explicit=sensitivity_explicit,
         )
@@ -2201,6 +2214,7 @@ class ConfigLoader:
                 "on_battery_stabilization_delay",
                 "self_test_failure_shutdown_delay", "depletion",
                 "extended_time", "voltage_sensitivity",
+                "trust_battery_charge",
             }
             remote_server_keys = {
                 "name", "enabled", "host", "user", "connect_timeout",
@@ -2849,6 +2863,19 @@ class ConfigLoader:
                 messages.append(
                     f"ERROR: {label}.triggers.extended_time.threshold must be a "
                     f"non-negative integer, got {t.extended_time.threshold!r}."
+                )
+            # Ignoring battery.charge switches off T1 and T3. With the
+            # time-on-battery trigger also off, only the UPS's own runtime
+            # estimate (often derived from the same lying gauge) would stand
+            # between the host and a dead battery. Refuse it.
+            if (t.trust_battery_charge is False
+                    and not t.extended_time.enabled):
+                messages.append(
+                    f"ERROR: {label}.triggers.trust_battery_charge is false but "
+                    "triggers.extended_time is disabled. Ignoring the charge "
+                    "reading switches off the low-battery and depletion "
+                    "triggers, so enable extended_time with a time budget "
+                    "(measured from a real battery run) as the safety net."
                 )
             # L2: relationship check -- a stabilization window >= the
             # critical-runtime threshold suppresses the runtime trigger for the

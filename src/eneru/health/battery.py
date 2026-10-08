@@ -11,7 +11,7 @@ from collections import deque
 from typing import Dict, Optional
 
 from eneru.health import prediction
-from eneru.utils import is_numeric, status_has_token
+from eneru.utils import format_seconds, is_numeric, status_has_token
 
 # meta keys for cross-restart battery-health bookkeeping.
 _META_NOMINAL_RUNTIME = "battery_nominal_runtime"
@@ -19,6 +19,20 @@ _META_REPLACEMENT_PREDICTED = "battery_replacement_predicted_ts"
 _META_HEALTH_ALERT_TIER = "battery_health_alert_tier"  # none|warn|critical
 
 _HEALTH_TIER_RANK = {"none": 0, "warn": 1, "critical": 2}
+
+# Warning-only battery.charge plausibility check (calibrated on the
+# 2026-10-08 UniFi outage: charge 100% -> 52% in 90 s, runtime estimate
+# ~18 min ticking down in real time, battery voltage flat at 12.2 V).
+# Fires when the charge says "empty soon" but the other two readings don't:
+# - the charge-implied time to empty is under a quarter of battery.runtime,
+# - battery.voltage has fallen less than 3% since the settled reference,
+# - and both hold for 3 consecutive polls (filters a single noisy reading).
+_CHARGE_CHECK_RUNTIME_RATIO = 0.25
+_CHARGE_CHECK_VOLTAGE_DROP = 0.03
+_CHARGE_CHECK_CONFIRM_POLLS = 3
+# Floor for the "switch to battery has settled" point: the first on-battery
+# reading carries the switchover transient (12.8 V before 12.2 V that day).
+_CHARGE_CHECK_SETTLE_SECONDS = 10
 
 
 class BatteryMonitorMixin:
@@ -108,6 +122,70 @@ class BatteryMonitorMixin:
             return round(rate, 2)
 
         return 0.0
+
+    def _check_charge_plausibility(self, ups_data: Dict[str, str],
+                                   depletion_rate: float, time_on_battery: int,
+                                   stabilization_delay: int,
+                                   final_poll: bool = False) -> None:
+        """Warn once per outage when battery.charge contradicts the UPS's
+        own runtime estimate and battery voltage. Never changes a decision.
+
+        ELI5: the fuel gauge says "empty in 2 minutes" while the range display
+        says 18 minutes and the engine sounds exactly as it did at the start.
+        One instrument is lying; Eneru can't safely pick which on its own, so
+        it tells the operator and keeps obeying every trigger as configured.
+        If a real battery run proves the gauge wrong, the operator sets
+        ``triggers.trust_battery_charge: false``.
+
+        ``final_poll``: a trigger fires on this poll, so a single disagreeing
+        poll is enough (there won't be a second one).
+        """
+        st = self.state
+        if st.charge_anomaly_reported:
+            return
+        if time_on_battery < max(stabilization_delay, _CHARGE_CHECK_SETTLE_SECONDS):
+            return
+        charge = ups_data.get('battery.charge', '')
+        runtime = ups_data.get('battery.runtime', '')
+        voltage = ups_data.get('battery.voltage', '')
+        if not (is_numeric(charge) and is_numeric(runtime)
+                and is_numeric(voltage)):
+            st.charge_check_count = 0
+            return
+        charge_f, runtime_f, voltage_f = (
+            float(charge), float(runtime), float(voltage))
+        if charge_f <= 0 or runtime_f <= 0 or voltage_f <= 0:
+            st.charge_check_count = 0
+            return
+        if st.charge_check_ref_voltage is None:
+            st.charge_check_ref_voltage = voltage_f
+            return
+        ref = st.charge_check_ref_voltage
+        if not (is_numeric(depletion_rate) and depletion_rate > 0):
+            st.charge_check_count = 0
+            return
+        charge_eta = min(charge_f, 100.0) / depletion_rate * 60.0
+        disagrees = (
+            charge_eta < runtime_f * _CHARGE_CHECK_RUNTIME_RATIO
+            and (ref - voltage_f) < ref * _CHARGE_CHECK_VOLTAGE_DROP
+        )
+        if not disagrees:
+            st.charge_check_count = 0
+            return
+        st.charge_check_count += 1
+        if st.charge_check_count < (1 if final_poll else _CHARGE_CHECK_CONFIRM_POLLS):
+            return
+        st.charge_anomaly_reported = True
+        self._log_power_event(
+            "BATTERY_CHARGE_ANOMALY",
+            f"battery.charge {charge_f:g}% is falling {depletion_rate:g}%/min "
+            f"(empty in ~{format_seconds(int(charge_eta))}), but the UPS "
+            f"estimates {format_seconds(int(runtime_f))} of runtime and the "
+            f"battery voltage holds at {voltage_f:g} V (was {ref:g} V). This "
+            "UPS may report an unreliable charge. If a real battery run "
+            "confirms it, set triggers.trust_battery_charge: false (see the "
+            "triggers docs). Warning only: no shutdown decision was changed.",
+        )
 
     def _check_battery_anomaly(self, ups_data: Dict[str, str]):
         """Detect abnormal battery charge changes while on line power.

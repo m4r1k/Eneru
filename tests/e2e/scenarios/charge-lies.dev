@@ -1,0 +1,21 @@
+# Scenario: a UPS whose battery.charge lies (UniFi incident, 2026-10-08).
+# Test 74 rewrites battery.charge downward on every apply while the battery
+# voltage and the runtime estimate stay put: the charge says "empty in a
+# couple of minutes", the other two readings say the battery is fine.
+ups.status: OB DISCHRG
+ups.load: 18
+
+battery.charge: 98
+battery.runtime: 1200
+battery.voltage: 12.2
+
+input.voltage: 0.0
+input.voltage.nominal: 230
+input.frequency: 0.0
+input.transfer.low: 170
+input.transfer.high: 280
+
+output.voltage: 230.0
+
+device.mfr: Eneru
+device.model: E2E Test UPS
