@@ -639,13 +639,15 @@ remote_servers:
   # Example: FreeBSD / pfSense (tcsh login shell, sudo package)
   # FreeBSD's shutdown keeps running through its delay and holds the SSH
   # session open even with `&`, so redirect its output, in the login shell's
-  # syntax (tcsh: `>&`). -p powers off; -h only halts.
+  # syntax (tcsh: `>&`). -p powers off; -h only halts. stdin is redirected,
+  # so sudo can't ask for a password: the SSH user needs NOPASSWD sudo for
+  # /sbin/shutdown, and `sudo -n` fails at once if that rule is missing.
   # - name: "pfSense"
   #   enabled: true
   #   host: "192.168.178.1"
   #   user: "eneru"
   #   shutdown_order: 9
-  #   shutdown_command: "sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &"
+  #   shutdown_command: "sudo -n /sbin/shutdown -p +3 >& /dev/null < /dev/null &"
 
   # Example: Proxmox server with VMs and containers
   # stop_proxmox_vms / stop_proxmox_cts run qm and pct via sudo. The SSH user

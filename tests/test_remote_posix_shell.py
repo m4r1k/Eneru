@@ -534,3 +534,38 @@ def test_drill_label_reflects_detection_with_a_probe_command(tmp_path, capsys):
         except SystemExit as exc:
             assert exc.code in (0, None)
     assert "Remote shell: no POSIX shell (detected)" in capsys.readouterr().out
+
+
+@pytest.mark.real_posix_detection
+@pytest.mark.parametrize("rc,stdout,stderr,verdict", [
+    # ssh forwards a remote 127; only run_command's own message is local.
+    (127, "bad command name sh (line 1 column 1)", "", False),
+    (127, "", "Command not found: ssh", None),
+    (127, "eneru-posix-ok", "", True),
+    # 255 with output came from the remote, not from ssh itself.
+    (255, "bad command name sh (line 1 column 1)", "", False),
+    (255, "", "Connection refused", None),
+])
+def test_forwarded_exit_codes(rc, stdout, stderr, verdict):
+    with patch("eneru.remote_health.run_command", return_value=(rc, stdout, stderr)):
+        assert rh.detect_posix_shell(srv()) is verdict
+
+
+def test_unsafe_per_server_probe_is_never_sent():
+    # config check probes even a config that failed validation.
+    with patch("eneru.remote_health.run_remote_probe") as rp:
+        assert rh.run_server_probe(srv(probe_command="reboot"), "true") == (
+            False, "unsafe probe_command rejected", 0)
+    rp.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [0, False])
+def test_falsy_probe_command_is_validated_not_dropped(tmp_path, value):
+    config, messages = load(tmp_path, {"probe_command": value})
+    assert config.remote_servers[0].probe_command is value
+    assert any("probe_command must be a harmless" in m for m in messages)
+
+
+def test_non_string_shutdown_command_is_an_error_not_a_crash(tmp_path):
+    _, messages = load(tmp_path, {"posix_shell": False, "shutdown_command": 5})
+    assert any("needs an explicit shutdown_command" in m for m in messages)

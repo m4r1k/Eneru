@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SSH waiting, so Eneru timed out and reported a failure although the shutdown
   was scheduled. The warning shows the redirect for sh and for tcsh. A trailing
   `&` is no longer reported as "only its first command runs under sudo". The
-  timeout message now states the real wait (`command_timeout` plus the 30 s SSH
-  allowance). (#128)
+  timeout message now states the real wait: `command_timeout` plus the 30 s SSH
+  allowance, or less when the shutdown phase's deadline caps it. (#128)
 
 - **Remote shutdown reaches routers and switches without a POSIX shell
   again.** MikroTik RouterOS (and Cisco, Juniper, Windows' `cmd.exe`) have no
@@ -31,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line whole, so a configured shutdown command never ran. RouterOS also exits
   0 or 1 at random when a command fails, so Eneru could log the failure as a
   success. A new per-server `posix_shell` setting handles this. The default,
-  `auto`, asks the machine once over SSH and checks its *output*: a POSIX shell
+  `auto`, asks the machine over SSH and checks its *output* (once; health
+  checks ask again until they get an answer): a POSIX shell
   answers with a marker, a router CLI with its own error, and from then on
   that machine gets its commands exactly as written. Until a machine answers,
   Eneru behaves as before, and an entry with `use_sudo` or

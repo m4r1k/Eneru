@@ -2009,7 +2009,9 @@ class TestIssue128Backgrounding:
         ("sudo shutdown -h +3 </dev/null >/dev/null 2>&1 &", False),
         ("&", False),
         ("sudo shutdown -h now", False),
-        ("a & b", False),
+        # `a` runs in the background and keeps the session after `b` ends.
+        ("a & b", True),
+        ("a >/dev/null 2>&1 & b", False),
         ("sh -c 'x &'", False),
         ("echo 'unterminated &", False),
         ("", False),
@@ -2024,6 +2026,16 @@ class TestIssue128Backgrounding:
     ])
     def test_trailing_operator_chains_nothing(self, command, chained):
         assert cc.first_command_tokens(command)[1] is chained
+
+    @pytest.mark.parametrize("command,args", [
+        # A number is a descriptor only when written against the operator.
+        ("sudo tool 123 >log", ["123"]),
+        ("sudo tool 123>log", []),
+        ("sudo tool 2>&1", []),
+        ("sudo tool x 1 2>/dev/null", ["x", "1"]),
+    ])
+    def test_numeric_arguments_survive_redirects(self, command, args):
+        assert cc.command_binary(command) == ("tool", True, args)
 
     def test_unbalanced_quote_is_unparseable(self):
         assert cc.first_command_tokens("a & 'unterminated") == (None, False)

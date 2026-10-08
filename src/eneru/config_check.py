@@ -894,11 +894,14 @@ def _is_operator(token: str) -> bool:
     return bool(token) and not token.strip(";&|<>")
 
 
-def _split_redirects(tokens: List[str]) -> Tuple[List[str], List[Tuple[str, str, str]]]:
+def _split_redirects(tokens: List[str], raw: str = ""
+                     ) -> Tuple[List[str], List[Tuple[str, str, str]]]:
     """Separate redirections from the words of ONE simple command.
 
     Returns (words, [(fd, op, target), ...]); ``fd`` is "" when the operator
-    has no explicit descriptor (`>file`, `>& file`, `&>file`).
+    has no explicit descriptor (`>file`, `>& file`, `&>file`). A number is a
+    descriptor only when ``raw`` writes it against the operator (`2>&1`);
+    `tool 123 >log` keeps 123 as an argument (sudoers rules may pin it).
     """
     words: List[str] = []
     redirects: List[Tuple[str, str, str]] = []
@@ -907,7 +910,8 @@ def _split_redirects(tokens: List[str]) -> Tuple[List[str], List[Tuple[str, str,
         tok = tokens[i]
         if _is_operator(tok) and ("<" in tok or ">" in tok):
             fd = ""
-            if words and words[-1].isdigit():
+            if (words and words[-1].isdigit() and re.search(
+                    r"(?<![^\s;&|])" + re.escape(words[-1] + tok), raw)):
                 fd = words.pop()
             target = tokens[i + 1] if i + 1 < len(tokens) else ""
             redirects.append((fd, tok, target))
@@ -932,7 +936,7 @@ def first_command_tokens(command: str) -> Tuple[Optional[List[str]], bool]:
         return None, False
     end = next((i for i, t in enumerate(tokens)
                 if _is_operator(t) and not ("<" in t or ">" in t)), len(tokens))
-    words, _ = _split_redirects(tokens[:end])
+    words, _ = _split_redirects(tokens[:end], command or "")
     return words, any(t.strip(";&| ") for t in tokens[end + 1:])
 
 
@@ -947,9 +951,24 @@ def backgrounds_holding_output(command: str) -> bool:
     redirected: `>& f` / `&> f`, or `> f` plus `2>&1` / `2> f`, in order.
     """
     tokens = _shell_tokens(command)
-    if not tokens or tokens[-1] != "&":
+    if not tokens:
         return False
-    words, redirects = _split_redirects(tokens[:-1])
+    segment: List[str] = []
+    for tok in tokens + [";"]:
+        if _is_operator(tok) and not ("<" in tok or ">" in tok):
+            # Every `&`, not only a trailing one: in `a & b`, `a` keeps the
+            # session open after `b` is done.
+            if tok == "&" and _holds_output(segment, command):
+                return True
+            segment = []
+        else:
+            segment.append(tok)
+    return False
+
+
+def _holds_output(segment: List[str], raw: str) -> bool:
+    """Does this simple command leave stdout or stderr on the SSH session?"""
+    words, redirects = _split_redirects(segment, raw)
     if not words:
         return False
     where = {"1": "ssh", "2": "ssh"}

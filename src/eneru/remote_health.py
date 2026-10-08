@@ -194,7 +194,11 @@ def _posix_probe(server: RemoteServerConfig, timeout: Optional[int] = None
     exit_code, stdout, stderr = run_command(cmd, timeout=limit)
     if exit_code == 124:
         return None, f"timed out after {limit}s", False
-    if exit_code in (127, 255):
+    # 127 is local only when run_command could not start ssh at all; ssh
+    # forwards a remote command's own 127. 255 is ssh's own failure unless
+    # the remote did print something.
+    local_127 = exit_code == 127 and (stderr or "").startswith("Command not found:")
+    if local_127 or (exit_code == 255 and not (stdout or "").strip()):
         return None, (stderr or "").strip() or f"exit code {exit_code}", False
     if POSIX_DETECT_MARKER in (stdout or ""):
         return True, "", True
@@ -272,6 +276,10 @@ def run_server_probe(server: RemoteServerConfig,
     exactly as before 6.2.2.
     """
     if server.probe_command:
+        # Validation already rejects an unsafe value; config check probes
+        # even an invalid config, so refuse it here as well.
+        if not is_safe_probe_command(server.probe_command):
+            return False, "unsafe probe_command rejected", 0
         return run_remote_probe(server, server.probe_command)
     auto = server.posix_shell is None and server.is_host_loopback is not True
     if (auto and server._detected_posix is None) or not uses_posix_shell(

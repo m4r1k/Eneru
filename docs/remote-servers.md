@@ -331,19 +331,21 @@ sudo shutdown -p now
 ```
 
 On FreeBSD `-p` powers off; `-h` only halts, leaving the box drawing power.
-`/sbin/shutdown` is executable only by root and the `operator` group, so the
-SSH user can't run it directly; `eneru config check` asks `sudo -n -l` instead
-of looking the binary up as that user.
+`/sbin/shutdown` is executable only by root and the `operator` group, so an
+SSH user outside `operator` can't run it directly; `eneru config check` asks
+`sudo -n -l` instead of looking the binary up as that user.
 
 pfSense and FreeBSD users often log in with **tcsh**. Eneru runs
 `shutdown_command` in the user's own login shell, so write it in that shell's
 syntax. A **delayed** shutdown needs care: FreeBSD's `shutdown -p +3` keeps
 running for those 3 minutes and holds the SSH session open, even with `&`.
 Eneru then waits, times out, and reports a failure although the shutdown is
-scheduled. Discard its output so SSH can close:
+scheduled. Discard its output so SSH can close (stdin is redirected too, so
+the SSH user needs NOPASSWD sudo for `/sbin/shutdown`; `sudo -n` fails at
+once if the rule is missing):
 
 ```text
-sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &
+sudo -n /sbin/shutdown -p +3 >& /dev/null < /dev/null &
 ```
 
 `>&` is tcsh syntax. In sh, bash or zsh use `</dev/null >/dev/null 2>&1 &`.
@@ -452,7 +454,10 @@ check the device itself (on RouterOS, `/system scheduler print`).
 The global health probe `remote_health.probe_command` (default `true`) isn't a
 command on a router CLI. For a machine without a POSIX shell, Eneru's health
 check is "does it answer over SSH" instead. To probe something specific, set
-`probe_command` on that server, e.g. `:put ok` on RouterOS.
+`probe_command` on that server, e.g. `:put ok` on RouterOS. On such a device
+the probe still judges the exit code, which RouterOS doesn't report reliably
+for a failed command, so test a new `probe_command` by hand first: a typo can
+read as healthy.
 
 #### MikroTik RouterOS
 

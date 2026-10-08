@@ -1459,8 +1459,10 @@ class ConfigLoader:
                     'host_identity_command', 'cat /etc/machine-id'),
                 expected_host_identity=server_data.get('expected_host_identity'),
                 posix_shell=cls._parse_posix_shell(server_data.get('posix_shell')),
-                # An empty probe_command means unset, as in the editor.
-                probe_command=server_data.get('probe_command') or None,
+                # An empty probe_command means unset, as in the editor; other
+                # values (0, false) reach validation untouched.
+                probe_command=(None if server_data.get('probe_command') == ""
+                               else server_data.get('probe_command')),
             ))
         return servers
 
@@ -3394,7 +3396,8 @@ class ConfigLoader:
                                 f"posix_shell: false cannot be combined with "
                                 f"{key}; it needs a POSIX shell on the remote."
                             )
-                    if (server.shutdown_command or "").strip() in (
+                    command = server.shutdown_command
+                    if not isinstance(command, str) or command.strip() in (
                             "", RemoteServerConfig.shutdown_command):
                         messages.append(
                             f"ERROR: Remote server '{display}': posix_shell: "

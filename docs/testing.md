@@ -248,7 +248,7 @@ matrix wall-clock is bounded by a smaller slowest group):
 
 | Group | Focus |
 |-------|-------|
-| CLI | Validation, bare command safety, one-shot output, auth CLI, NUT name autodiscovery, `config check` / config editor, `use_sudo` custom commands, split `ssh_options`, zsh/tcsh login shells (tests 1, 8, 11–13, 20, 51, 58, 65–67, 69, 70, E1) |
+| CLI | Validation, bare command safety, one-shot output, auth CLI, NUT name autodiscovery, `config check` / config editor, `use_sudo` custom commands, split `ssh_options`, zsh/tcsh login shells, FreeBSD-style sudo commands, shell-less remotes (tests 1, 8, 11–13, 20, 51, 58, 65–67, 69, 70, 72, 73, E1) |
 | UPS Single Core | Single UPS events, shutdown paths, manual remote drills, embedded API, MQTT, unconditional remote PATH augmentation, real Compose timeout shutdown, shutdown re-arm, single-UPS `is_local: false` (tests 2–7, 33, 39–46, 59, 60, 70, 71) |
 | UPS Single Auth | v6.0 auth, UPS control, hot-reload, dashboard, event management, self-test attribution and failed-test outage trigger, authenticated remote shutdown output (tests 52–56, 62, 64) |
 | UPS Multi | Independent UPS groups, local-drain policies, shutdown ordering, multi-UPS restart notification (tests 9, 10, 14–19, 36) |
@@ -266,7 +266,7 @@ The scenario files simulate online, on-battery, neutral/unknown, low-battery, FS
 
 ### E2E test inventory
 
-The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 73 numbered tests, two redundancy runtime regression cases, plus one CLI completion smoke check. Every group script must end with its `=== Group '<name>' completed successfully ===` line and have a matrix entry in `.github/workflows/e2e.yml`; a workflow step checks both.
+The numbered E2E tests are defined in `tests/e2e/groups/*.sh`. There are 74 numbered tests (IDs 1–73; 70 is used twice), two redundancy runtime regression cases, plus one CLI completion smoke check. Every group script must end with its `=== Group '<name>' completed successfully ===` line and have a matrix entry in `.github/workflows/e2e.yml`; a workflow step checks both.
 
 | Test | Group | What it proves |
 |------|-------|----------------|

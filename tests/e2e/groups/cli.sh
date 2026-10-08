@@ -920,8 +920,12 @@ YAML
 
 set +e
 eneru config check --config /tmp/config-e2e-128-sudo.yaml >/tmp/test72-check.log 2>&1
+rc=$?
 set -e
 cat /tmp/test72-check.log
+if [ "$rc" -ne 1 ]; then
+  echo "FAIL: config check should exit 1 for the missing command (got $rc)"; exit 1
+fi
 for line in "Root Only: sudo allows '/usr/local/sbin/eneru-rootonly-shutdown' without a password" \
             "Missing: '/usr/local/sbin/eneru-not-here' is NOT installed" \
             "Background: 'sudo /usr/local/sbin/eneru-rootonly-shutdown &' runs in the background but keeps the SSH session's output open"; do
