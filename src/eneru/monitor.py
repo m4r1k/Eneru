@@ -2541,21 +2541,6 @@ class UPSGroupMonitor(
                         f"{self.config.triggers.depletion.critical_rate}%/min (after grace period)"
                     )
 
-        # Warning-only charge plausibility check. It runs after T1-T3 have
-        # decided and before anything acts, and never touches the decision.
-        # When a trigger is about to fire this is the last chance to warn, so
-        # one disagreeing poll is enough: with slow polling (check_interval
-        # >= 3 s) the depletion rate first appears on the poll T3 fires, and
-        # the usual 3-poll confirmation would never complete.
-        if trust_charge:
-            try:
-                self._check_charge_plausibility(
-                    ups_data, depletion_rate, time_on_battery,
-                    stabilization_delay, final_poll=bool(shutdown_reason))
-            except Exception as exc:
-                self._log_message(
-                    f"⚠️  WARNING: battery charge plausibility check failed: {exc}")
-
         # T4. Extended time on battery
         if not shutdown_reason and time_on_battery > self.config.triggers.extended_time.threshold:
             if stabilizing:
@@ -2609,6 +2594,21 @@ class UPSGroupMonitor(
             self.state.latest_depletion_rate = (
                 float(depletion_rate) if is_numeric(depletion_rate) else 0.0
             )
+
+        # Warning-only charge plausibility check. It runs after every trigger
+        # (T1-T5) has decided and before anything acts, and never touches the
+        # decision. When a trigger is about to fire this is the last chance to
+        # warn, so one disagreeing poll is enough: with slow polling
+        # (check_interval >= 3 s) the depletion rate first appears on the poll
+        # T3 fires, and the usual 3-poll confirmation would never complete.
+        if trust_charge:
+            try:
+                self._check_charge_plausibility(
+                    ups_data, depletion_rate, time_on_battery,
+                    stabilization_delay, final_poll=bool(shutdown_reason))
+            except Exception as exc:
+                self._log_message(
+                    f"⚠️  WARNING: battery charge plausibility check failed: {exc}")
 
         if shutdown_reason:
             if self_test_failure_trigger and self._is_monitor_only_group():

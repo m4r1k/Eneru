@@ -59,13 +59,6 @@ class TriggersConfig:
     self_test_failure_shutdown_delay: int = 30
     depletion: DepletionConfig = field(default_factory=DepletionConfig)
     extended_time: ExtendedTimeConfig = field(default_factory=ExtendedTimeConfig)
-    # False = this UPS's battery.charge can't be believed (a fuel gauge that
-    # drops from full to half in 90 s while the engine runs fine), so the two
-    # triggers that read it -- low battery (T1) and depletion rate (T3) -- are
-    # skipped. Runtime, time on battery, failed self-test, FSD and connection
-    # loss still apply. Validation refuses False unless extended_time is
-    # enabled: no switching off the gauge without setting a stopwatch.
-    trust_battery_charge: bool = True
     # Voltage warning band as a fraction of input.voltage.nominal.
     # `tight` = ±5%, `normal` = ±10% (EN 50160), `loose` = ±15%.
     # Per-UPS-group so a clean PDU and a generator-fed leg in the same
@@ -76,6 +69,15 @@ class TriggersConfig:
     # (vs. dataclass default). Gates the v5.1.1→v5.1.2 migration warning
     # so users who've already chosen a preset don't get a recurring nag.
     voltage_sensitivity_explicit: bool = False
+    # False = this UPS's battery.charge can't be believed (a fuel gauge that
+    # drops from full to half in 90 s while the engine runs fine), so the two
+    # triggers that read it -- low battery (T1) and depletion rate (T3) -- are
+    # skipped. Runtime, time on battery, failed self-test, FSD and connection
+    # loss still apply. Validation refuses False unless extended_time is
+    # enabled: no switching off the gauge without setting a stopwatch.
+    # Last field on purpose: positional TriggersConfig(...) callers keep
+    # their argument order.
+    trust_battery_charge: bool = True
 
 
 VOLTAGE_SENSITIVITY_PRESETS: Dict[str, float] = {

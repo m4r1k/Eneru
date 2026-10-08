@@ -187,13 +187,13 @@ Some UPS firmware does the same with `battery.charge`. On 2026-10-08 a UniFi UPS
 | 59s | 65% | 12.2 V | 1095s |
 | 88s | 52% | 12.2 V | 1065s |
 
-The charge fell 48 points in 90 seconds, about 32%/min. Over the same time the battery voltage didn't move, and the UPS's own runtime estimate counted down at about one second per second. The depletion trigger fired correctly on the numbers it was given. The host was later powered back on while the UPS still read "15%", and the battery kept it running for more than 30 minutes. Low battery would have fired too: it reads the same charge.
+The charge fell 48 points in 90 seconds, about 32%/min. After the switchover transient (0-6s), the battery voltage held at 12.2 V and the UPS's own runtime estimate counted down at about one second per second. The depletion trigger fired correctly on the numbers it was given. The host was later powered back on while the UPS still read "15%", and the battery kept it running for more than 30 minutes. Low battery would have fired too: it reads the same charge.
 
 ### What Eneru does about it
 
 Two triggers read `battery.charge`: low battery and depletion rate. Eneru can't safely decide on its own which reading is lying. If the charge is the honest one, ignoring it means riding into a dead battery. So the default stays as it is, and Eneru adds a warning:
 
-- **Warning only (always on while the charge is trusted).** On battery, Eneru compares three readings. If, for three polls in a row, the charge points to an empty battery in under a quarter of the UPS's runtime estimate while the battery voltage has dropped less than 3% since the switch to battery settled, it logs and notifies a `BATTERY_CHARGE_ANOMALY` event, once per outage. The event names the setting below. It never changes a shutdown decision. UPSes that don't report `battery.voltage` are never flagged.
+- **Warning only (always on while the charge is trusted).** On battery, Eneru compares three readings. If, for three polls in a row (or on a single poll when a shutdown trigger fires on it, the last chance to warn), the charge points to an empty battery in under a quarter of the UPS's runtime estimate while the battery voltage has dropped less than 3% since the switch to battery settled, it logs and notifies a `BATTERY_CHARGE_ANOMALY` event, once per outage. The event names the setting below. It never changes a shutdown decision. UPSes that don't report `battery.voltage` are never flagged.
 - **Opt-in: `trust_battery_charge: false`.** You tell Eneru this UPS's charge can't be believed. The low-battery and depletion triggers are skipped for it, and the dashboard, `eneru monitor` and `config check` show them as off. Critical runtime, time on battery, a failed self-test, FSD and a lost connection still apply.
 
 The warning can also fire on a UPS whose driver reports a fixed `battery.voltage` (the nominal value) or a runtime estimate that never changes. There a fast-falling charge may be the honest reading, which is why the warning asks you to confirm with a real battery run before turning the charge off.
@@ -206,9 +206,11 @@ Turning the gauge off removes two of the overlapping triggers, so confirm the re
 
     ```bash
     sqlite3 /var/lib/eneru/<ups>.db \
-      "SELECT datetime(ts,'unixepoch'), status, battery_charge, battery_voltage,
-              battery_runtime, ups_load
-       FROM samples WHERE status LIKE '%OB%' ORDER BY ts LIMIT 120;"
+      "SELECT * FROM (
+         SELECT datetime(ts,'unixepoch') AS t, status, battery_charge,
+                battery_voltage, battery_runtime, ups_load
+         FROM samples WHERE status LIKE '%OB%' ORDER BY ts DESC LIMIT 120
+       ) ORDER BY t;"
     ```
 
 2. Measure how long the battery really lasts at your normal load. Use that, with a generous margin, as the time-on-battery budget.

@@ -239,8 +239,9 @@ TRIGGERS_SECTION = Section(
         Option("trust_battery_charge", "bool",
                "Off: this UPS's battery.charge reading can't be believed, so "
                "the low-battery and depletion-rate triggers are skipped. "
-               "Runtime, time on battery, failed self-test and FSD still "
-               "apply. Requires extended_time to be enabled.",
+               "Runtime, time on battery, failed self-test, FSD and a lost "
+               "connection still apply. Requires extended_time to be "
+               "enabled.",
                _d(_TRG, "trust_battery_charge")),
         Section("extended_time", "Time on battery",
                 "A wall-clock safety net: shut down after being on battery "

@@ -78,6 +78,15 @@ class TestConfig:
         assert TriggersConfig().trust_battery_charge is True
 
     @pytest.mark.unit
+    def test_positional_construction_keeps_its_order(self):
+        """The new field is appended, so positional callers are unaffected."""
+        from eneru.config import DepletionConfig, ExtendedTimeConfig
+        t = TriggersConfig(20, 600, 30, 30, DepletionConfig(),
+                           ExtendedTimeConfig(), "loose")
+        assert t.voltage_sensitivity == "loose"
+        assert t.trust_battery_charge is True
+
+    @pytest.mark.unit
     def test_parse_global_and_per_group_override(self, tmp_path):
         path = tmp_path / "c.yaml"
         path.write_text(
@@ -376,6 +385,26 @@ class TestPlausibilityCheck:
         assert events == ["BATTERY_CHARGE_ANOMALY"]
         sd.assert_called_once()
         assert "Depletion rate" in sd.call_args[0][0]
+
+    @pytest.mark.unit
+    def test_extended_time_poll_is_also_a_last_chance(self, monitor):
+        """The check runs after T4/T5 too: a single disagreement on the poll
+        the time-on-battery trigger fires still warns."""
+        events = []
+        with patch.object(monitor, "_log_power_event",
+                          side_effect=lambda e, d, **k: events.append(e)), \
+                patch.object(monitor, "_trigger_immediate_shutdown") as sd:
+            _on_battery_for(monitor, 800)
+            with patch.object(monitor, "_calculate_depletion_rate",
+                              return_value=0.0):
+                monitor._handle_on_battery(_ups(60, 12.2, 1100))
+            _on_battery_for(monitor, 1000)
+            with patch.object(monitor, "_calculate_depletion_rate",
+                              return_value=10.0):
+                monitor._handle_on_battery(_ups(30, 12.2, 1100))
+        assert events == ["BATTERY_CHARGE_ANOMALY"]
+        sd.assert_called_once()
+        assert "Time on battery" in sd.call_args[0][0]
 
     @pytest.mark.unit
     def test_a_failing_check_never_breaks_the_decision(self, monitor):
