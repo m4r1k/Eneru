@@ -881,7 +881,9 @@ echo "PASS: config check and remote shutdown work under zsh and tcsh login shell
 # FreeBSD's /sbin/shutdown is runnable by root and the operator group only:
 # like a fire extinguisher in a cabinet only the manager can open, asking
 # "can the SSH user run it?" says "missing" although sudo can. config check
-# must ask sudo (`sudo -n -l`).
+# must ask sudo (`sudo -n -l`). A command ending in `&` that keeps its output
+# attached holds the SSH session open, so config check warns about it, and a
+# trailing `&` is not "a second command".
 (
 echo ""
 echo ">>> Running: Test 72: FreeBSD-style sudo shutdown commands (issue #128)"
@@ -908,6 +910,12 @@ remote_servers:
     user: "testuser"
     shutdown_command: "sudo /usr/local/sbin/eneru-not-here"
     ssh_options: $SSH_OPTS
+  - name: "Background"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo /usr/local/sbin/eneru-rootonly-shutdown &"
+    ssh_options: $SSH_OPTS
 YAML
 
 set +e
@@ -915,11 +923,13 @@ eneru config check --config /tmp/config-e2e-128-sudo.yaml >/tmp/test72-check.log
 set -e
 cat /tmp/test72-check.log
 for line in "Root Only: sudo allows '/usr/local/sbin/eneru-rootonly-shutdown' without a password" \
-            "Missing: '/usr/local/sbin/eneru-not-here' is NOT installed"; do
+            "Missing: '/usr/local/sbin/eneru-not-here' is NOT installed" \
+            "Background: 'sudo /usr/local/sbin/eneru-rootonly-shutdown &' runs in the background but keeps the SSH session's output open"; do
   grep -qF -- "$line" /tmp/test72-check.log || {
     echo "FAIL: config check is missing: $line"; exit 1; }
 done
-for bad in "Root Only: '/usr/local/sbin/eneru-rootonly-shutdown' is NOT installed"; do
+for bad in "Root Only: '/usr/local/sbin/eneru-rootonly-shutdown' is NOT installed" \
+           "Background: 'sudo /usr/local/sbin/eneru-rootonly-shutdown &': only its first command runs under sudo"; do
   if grep -qF -- "$bad" /tmp/test72-check.log; then
     echo "FAIL: config check reported: $bad"; exit 1
   fi
@@ -941,7 +951,7 @@ docker exec eneru-e2e-ssh test -e /tmp/eneru-rootonly-ran || {
   echo "FAIL: the root-only shutdown did not run through sudo"; exit 1; }
 
 docker exec eneru-e2e-ssh rm -f /tmp/eneru-rootonly-ran
-echo "PASS: root-only sudo binaries pass config check and run"
+echo "PASS: root-only sudo binaries pass config check and run; backgrounding is flagged"
 )
 
 echo ""

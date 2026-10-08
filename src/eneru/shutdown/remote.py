@@ -793,7 +793,9 @@ class RemoteShutdownMixin:
                     f"timed out after {command_timeout}s "
                     f"(configured {timeout}s, capped by phase deadline)",
                 )
-            return False, f"timed out after {timeout}s"
+            return False, (f"timed out after {command_timeout}s "
+                           f"(command_timeout {timeout}s + "
+                           f"{_SSH_OVERHEAD_BUFFER}s SSH allowance)")
         elif (
             is_final_shutdown
             and exit_code == 255

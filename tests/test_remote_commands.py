@@ -1647,6 +1647,18 @@ class TestRunRemoteCommand:
             assert "/usr/syno/sbin" in call_args[-1]
 
     @pytest.mark.unit
+    def test_timeout_message_shows_the_real_wait(self, ssh_monitor):
+        """#128: the wall wait is command_timeout + the SSH allowance; saying
+        only "30s" after a 60 s wait misled the FreeBSD investigation."""
+        server = RemoteServerConfig(host="192.168.1.50", user="root")
+        with patch("eneru.shutdown.remote.run_command",
+                   return_value=(124, "", "Command timed out")):
+            ok, err = ssh_monitor._run_remote_command(server, "x", 30, "x")
+        assert not ok
+        assert err == ("timed out after 60s (command_timeout 30s + 30s SSH "
+                       "allowance)")
+
+    @pytest.mark.unit
     def test_synology_bare_command_gets_path_augmentation(self, ssh_monitor):
         """Regression (DS1821 outage, Eneru 6.1.6): a bare-name shutdown
         command like ``synoshutdown -s`` over SSH previously failed with

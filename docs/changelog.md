@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check looked it up as the SSH user. For a command run through sudo, the
   `sudo -n -l` answer now decides, and a binary sudo can't find is reported as
   missing. (#128)
+- **`config check` warns about a backgrounded command that keeps the SSH
+  session open.** FreeBSD's delayed `shutdown -h +3 &` keeps running and keeps
+  SSH waiting, so Eneru timed out and reported a failure although the shutdown
+  was scheduled. The warning shows the redirect for sh and for tcsh. A trailing
+  `&` is no longer reported as "only its first command runs under sudo". The
+  timeout message now states the real wait (`command_timeout` plus the 30 s SSH
+  allowance). (#128)
 
 ## [6.2.1] - 2026-10-03
 

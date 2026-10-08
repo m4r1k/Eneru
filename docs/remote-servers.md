@@ -335,6 +335,20 @@ On FreeBSD `-p` powers off; `-h` only halts, leaving the box drawing power.
 SSH user can't run it directly; `eneru config check` asks `sudo -n -l` instead
 of looking the binary up as that user.
 
+pfSense and FreeBSD users often log in with **tcsh**. Eneru runs
+`shutdown_command` in the user's own login shell, so write it in that shell's
+syntax. A **delayed** shutdown needs care: FreeBSD's `shutdown -p +3` keeps
+running for those 3 minutes and holds the SSH session open, even with `&`.
+Eneru then waits, times out, and reports a failure although the shutdown is
+scheduled. Discard its output so SSH can close:
+
+```text
+sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &
+```
+
+`>&` is tcsh syntax. In sh, bash or zsh use `</dev/null >/dev/null 2>&1 &`.
+`eneru config check` warns about a backgrounded command that keeps its output.
+
 ## Common shutdown commands
 
 These commands match the previously documented, validated shutdown forms. Keep platform-specific forms unless you have tested an alternative on that device.

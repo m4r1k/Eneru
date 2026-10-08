@@ -1987,3 +1987,66 @@ class TestIssue128SudoPresence:
         assert "'umount' is NOT installed" in text
         assert "sudo allows 'umount" not in text
         assert "sudo refuses it without a password: sudo allows 'umount" not in text
+
+
+
+class TestIssue128Backgrounding:
+    """#128: `cmd &` keeps the SSH session's output attached, so ssh waits
+    (measured on FreeBSD 15 with `shutdown -h +3 &`)."""
+
+    @pytest.mark.parametrize("command,expected", [
+        ("sudo /sbin/shutdown -h +3 &", True),
+        ("sudo /sbin/shutdown -h +3 2>&1 &", True),
+        ("sudo /sbin/shutdown -h +3 2>/dev/null &", True),
+        # stdout gone but stderr still attached: sshd waits for both.
+        ("sudo /sbin/shutdown -h +3 >/dev/null &", True),
+        # order matters: 2>&1 first copies the (still attached) stdout.
+        ("sudo /sbin/shutdown -h +3 2>&1 >/dev/null &", True),
+        ("sudo /sbin/shutdown -h +3 1>/dev/null 2>&1 &", False),
+        ("sudo /sbin/shutdown -h +3 >/dev/null 2>/dev/null &", False),
+        ("sudo /sbin/shutdown -h +3 &>/dev/null &", False),
+        ("sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &", False),
+        ("sudo shutdown -h +3 </dev/null >/dev/null 2>&1 &", False),
+        ("&", False),
+        ("sudo shutdown -h now", False),
+        ("a & b", False),
+        ("sh -c 'x &'", False),
+        ("echo 'unterminated &", False),
+        ("", False),
+    ])
+    def test_backgrounds_holding_output(self, command, expected):
+        assert cc.backgrounds_holding_output(command) is expected
+
+    @pytest.mark.parametrize("command,chained", [
+        ("a &", False), ("a ;", False), ("a & b", True), ("a; b", True),
+        ("a | b", True), ("a && b", True), ("a >x &", False),
+        ("a >& /dev/null < /dev/null &", False), ("a 2>&1 | b", True),
+    ])
+    def test_trailing_operator_chains_nothing(self, command, chained):
+        assert cc.first_command_tokens(command)[1] is chained
+
+    def test_unbalanced_quote_is_unparseable(self):
+        assert cc.first_command_tokens("a & 'unterminated") == (None, False)
+
+    @pytest.mark.parametrize("command", [
+        # The two fixes the background warning itself recommends.
+        "sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &",
+        "sudo /sbin/shutdown -p +3 </dev/null >/dev/null 2>&1 &",
+    ])
+    def test_recommended_redirects_are_clean(self, command):
+        checks, notes = cc.command_checks(command, False)
+        assert notes == []
+        assert checks[-1].script == "sudo -n -l /sbin/shutdown -p +3"
+        assert cc.command_binary(command) == ("/sbin/shutdown", True, ["-p", "+3"])
+
+    def test_trailing_ampersand_is_not_a_second_command(self):
+        _, notes = cc.command_checks("sudo /sbin/shutdown -h +3 &", False)
+        assert not [n for n in notes if "first command" in n]
+        assert [n for n in notes if "keeps the SSH session's output open" in n]
+
+    def test_background_note_is_a_warning(self, env):
+        out, _ = TestProbeRemote().run_probe(
+            env, server(shutdown_command="sudo /sbin/shutdown -h +3 &"))
+        warn = [f for f in out if "output open" in f.message]
+        assert warn and warn[0].level == cc.LEVEL_WARN
+        assert ">& /dev/null" in warn[0].message

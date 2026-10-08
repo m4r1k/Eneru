@@ -880,23 +880,89 @@ _POWER_BINARIES = {"shutdown", "poweroff", "halt", "reboot", "synoshutdown",
                    "systemctl", "init"}
 
 
+def _shell_tokens(command: str) -> Optional[List[str]]:
+    """Quote-aware words plus operator runs (`;`, `&&`, `>&`, `2`, `>` ...)."""
+    lex = shlex.shlex(command or "", posix=True, punctuation_chars=";&|<>")
+    lex.whitespace_split = True
+    try:
+        return [t for t in lex if t]
+    except ValueError:
+        return None
+
+
+def _is_operator(token: str) -> bool:
+    return bool(token) and not token.strip(";&|<>")
+
+
+def _split_redirects(tokens: List[str]) -> Tuple[List[str], List[Tuple[str, str, str]]]:
+    """Separate redirections from the words of ONE simple command.
+
+    Returns (words, [(fd, op, target), ...]); ``fd`` is "" when the operator
+    has no explicit descriptor (`>file`, `>& file`, `&>file`).
+    """
+    words: List[str] = []
+    redirects: List[Tuple[str, str, str]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _is_operator(tok) and ("<" in tok or ">" in tok):
+            fd = ""
+            if words and words[-1].isdigit():
+                fd = words.pop()
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            redirects.append((fd, tok, target))
+            i += 2
+            continue
+        words.append(tok)
+        i += 1
+    return words, redirects
+
+
 def first_command_tokens(command: str) -> Tuple[Optional[List[str]], bool]:
-    """Quote-aware tokens of the first simple command, and "is it chained?".
+    """Quote-aware words of the first simple command, and "is it chained?".
 
     Splits like the shell: an operator inside quotes (`sh -c 'a; b'`) is
-    data, only an unquoted `;`, `&` or `|` ends the first command.
+    data, only an unquoted `;`, `&` or `|` ends the first command. A
+    trailing operator with nothing after it (`cmd &`) chains nothing, and
+    redirections (`>& /dev/null`, `2>&1`, `< /dev/null`) are neither words
+    nor a second command.
     """
-    lex = shlex.shlex(command or "", posix=True, punctuation_chars=";&|")
-    lex.whitespace_split = True
-    tokens: List[str] = []
-    try:
-        for tok in lex:
-            if tok and not tok.strip(";&|"):
-                return tokens, True
-            tokens.append(tok)
-    except ValueError:
+    tokens = _shell_tokens(command)
+    if tokens is None:
         return None, False
-    return tokens, False
+    end = next((i for i, t in enumerate(tokens)
+                if _is_operator(t) and not ("<" in t or ">" in t)), len(tokens))
+    words, _ = _split_redirects(tokens[:end])
+    return words, any(t.strip(";&| ") for t in tokens[end + 1:])
+
+
+def backgrounds_holding_output(command: str) -> bool:
+    """True for `cmd &` that leaves the SSH session's stdout or stderr attached.
+
+    ELI5: you hang up the phone but leave the other person's microphone
+    taped to yours; the line stays open until they stop talking. ssh waits
+    for every process holding its stdout or stderr, `&` or not, so FreeBSD's
+    delayed `shutdown -h +3 &` keeps Eneru waiting until it times out
+    (measured on FreeBSD 15.0 / tcsh, issue #128). Both streams must be
+    redirected: `>& f` / `&> f`, or `> f` plus `2>&1` / `2> f`, in order.
+    """
+    tokens = _shell_tokens(command)
+    if not tokens or tokens[-1] != "&":
+        return False
+    words, redirects = _split_redirects(tokens[:-1])
+    if not words:
+        return False
+    where = {"1": "ssh", "2": "ssh"}
+    for fd, op, target in redirects:
+        if "<" in op:
+            continue
+        if op == "&>" or (op == ">&" and not fd and not target.isdigit()):
+            where["1"] = where["2"] = "file"
+        elif op == ">&" and target.isdigit():
+            where[fd or "1"] = where.get(target, "ssh")
+        else:
+            where[fd or "1"] = "file"
+    return where["1"] == "ssh" or where["2"] == "ssh"
 
 
 def command_binary(command: str) -> Tuple[Optional[str], bool, List[str]]:
@@ -1166,6 +1232,14 @@ def command_checks(command: str, use_sudo: bool, *,
         notes.append(
             f"'{command}': only its first command runs under sudo; wrap the "
             "rest yourself (e.g. sudo -n sh -c '...') if it needs root too.")
+    if backgrounds_holding_output(effective):
+        notes.append(
+            f"'{command}' runs in the background but keeps the SSH session's "
+            "output open: if it keeps running (FreeBSD's delayed shutdown "
+            "does), ssh waits for it and Eneru reports a timeout. Redirect its "
+            "output in the login shell's syntax: `… </dev/null >/dev/null "
+            "2>&1 &` (sh, bash, zsh) or `… < /dev/null >& /dev/null &` "
+            "(csh, tcsh).")
     if via_sudo:
         # Issue #128: `command -v` as the SSH user needs execute permission,
         # which FreeBSD's root:operator 4554 /sbin/shutdown denies, so it
@@ -1315,7 +1389,8 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     checks, notes = remote_checks(config, server)
     for note in notes:
         warn = ("most systems refuse" in note or "first command runs under sudo" in note
-                or "no `mounts` listed" in note or "environment variables" in note)
+                or "no `mounts` listed" in note or "environment variables" in note
+                or "keeps the SSH session's output open" in note)
         level = LEVEL_ERROR if "which cannot work" in note else (
             LEVEL_WARN if warn else LEVEL_INFO)
         add(level, note)
