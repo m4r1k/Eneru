@@ -501,9 +501,10 @@ expect() {
 expect "NUT server localhost:3493 lists UPS 'TestUPS'"
 expect "NUT login as 'admin' works"
 expect "Probe Target: SSH as testuser@localhost works"
-expect "Probe Target: 'shutdown' is installed"
+# Through sudo, `sudo -n -l` alone proves presence and permission (#128):
+# no separate "is installed" row, and the PATH-augmented bare name resolves.
 expect "Probe Target: sudo allows 'shutdown -h now' without a password"
-expect "Probe Target: 'eneru-path-probe' is installed"
+expect "Probe Target: sudo allows 'eneru-path-probe' without a password"
 expect "Probe Target: failed: listing containers works"
 expect "Missing Tool: 'synoshutdown' is NOT installed"
 expect "What happens on power loss"
@@ -842,7 +843,6 @@ YAML
   set -e
   cat /tmp/test70-$u-check.log
   for line in "Shell $u: SSH as $u@localhost works" \
-              "Shell $u: 'shutdown' is installed" \
               "Shell $u: sudo allows 'shutdown -h now' without a password" \
               "Shell $u: 'eneru-path-probe' is installed"; do
     grep -qF -- "$line" /tmp/test70-$u-check.log || {
