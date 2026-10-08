@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`eneru config check` no longer reports FreeBSD's `/sbin/shutdown` as
+  missing.** It's executable only by root and the `operator` group, and the
+  check looked it up as the SSH user. For a command run through sudo, the
+  `sudo -n -l` answer now decides, and a binary sudo can't find is reported as
+  missing. (#128)
+
 ## [6.2.1] - 2026-10-03
 
 ### Fixed

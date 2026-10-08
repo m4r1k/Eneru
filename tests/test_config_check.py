@@ -557,7 +557,8 @@ class TestCommandChecks:
     def test_final_use_sudo_prefixes(self):
         checks, notes = cc.command_checks("shutdown -h now", True, final=True,
                                           user="bob")
-        assert self.kinds(checks) == [("exists", "shutdown"), ("sudo", "shutdown")]
+        # #128: through sudo, `sudo -n -l` alone proves presence + permission.
+        assert self.kinds(checks) == [("sudo", "shutdown")]
         assert notes == []
 
     def test_final_non_root_without_sudo_note(self):
@@ -571,11 +572,11 @@ class TestCommandChecks:
     def test_custom_command_use_sudo_applies(self):
         # 6.2: use_sudo prefixes custom commands too, like the runtime.
         checks, notes = cc.command_checks("systemctl stop foo", True)
-        assert self.kinds(checks) == [("exists", "systemctl"), ("sudo", "systemctl")]
+        assert self.kinds(checks) == [("sudo", "systemctl")]
         assert checks[-1].script == "sudo -n -l systemctl stop foo"
         assert notes == []
         checks, notes = cc.command_checks("sudo -n systemctl stop foo", True)
-        assert self.kinds(checks) == [("exists", "systemctl"), ("sudo", "systemctl")]
+        assert self.kinds(checks) == [("sudo", "systemctl")]
         assert notes == []
         checks, notes = cc.command_checks("systemctl stop foo", False)
         assert self.kinds(checks) == [("exists", "systemctl")]
@@ -740,7 +741,8 @@ class TestProbeRemote:
             lines = []
             for i, c in enumerate(checks):
                 if c.binary == "synoshutdown":
-                    lines.append(f"__ENERU_CHECK__ {i} 1 ")  # missing -> mute sudo
+                    lines.append(f"__ENERU_CHECK__ {i} 1 sudo: synoshutdown: "
+                                 "command not found")
                 elif c.kind == "run":
                     lines.append(f"__ENERU_CHECK__ {i} 1 error: failed to connect")
                 elif c.kind == "sudo":
@@ -768,7 +770,7 @@ class TestProbeRemote:
 
     def test_missing_result_row(self, env):
         out, _ = self.run_probe(env, server(),
-                                script_out=lambda c: (0, "__ENERU_CHECK__ 0 0 x", ""))
+                                script_out=lambda c: (0, "__ENERU_CHECK__ 9 0 x", ""))
         assert "(no result)" in joined(out)
 
     def test_script_did_not_run(self, env):
@@ -1648,7 +1650,7 @@ class TestQuoteAwareCommands:
     def test_quoted_operators_stay_in_the_argument(self):
         assert cc.command_binary("sudo -n sh -c 'a; b'") == ("sh", True, ["-c", "a; b"])
         checks, notes = cc.command_checks("sudo -n sh -c 'systemctl stop a; systemctl stop b'", True)
-        assert [c.kind for c in checks] == ["exists", "sudo"]
+        assert [c.kind for c in checks] == ["sudo"]
         assert not [n for n in notes if "first command" in n]
 
     def test_unquoted_operator_ends_the_first_command(self):
@@ -1924,3 +1926,64 @@ class TestGroupIReviewFixes:
     def test_parse_remote_output_ignores_unmarked_lines(self):
         text = (f"junk 0 0 ok\n7 1 fake\n{cc._REMOTE_MARKER} 1 0 real\n")
         assert cc.parse_remote_output(text) == {1: (0, "real")}
+
+
+class TestIssue128SudoPresence:
+    """#128: FreeBSD's /sbin/shutdown is root:operator 4554, so `command -v`
+    as the SSH user fails although sudo can run it. Through sudo, only the
+    `sudo -n -l` answer decides presence."""
+
+    def test_sudo_command_has_no_user_path_check(self):
+        checks, _ = cc.command_checks("sudo /sbin/shutdown -h +3", False,
+                                      final=True, user="bob")
+        assert [(c.kind, c.binary) for c in checks] == [("sudo", "/sbin/shutdown")]
+
+    def test_plain_command_keeps_command_v(self):
+        checks, _ = cc.command_checks("/sbin/shutdown -h now", False)
+        assert [c.kind for c in checks] == ["exists"]
+        assert checks[0].script == "command -v /sbin/shutdown"
+
+    def test_freebsd_operator_binary_passes(self, env):
+        srv = server(shutdown_command="sudo /sbin/shutdown -h +3")
+        out, _ = TestProbeRemote().run_probe(env, srv)
+        text = joined(out)
+        assert "NOT installed" not in text
+        assert "sudo allows '/sbin/shutdown -h +3' without a password" in text
+
+    def test_sudo_command_not_found_is_reported_missing(self, env):
+        srv = server(shutdown_command="sudo /sbin/nope -h now")
+
+        def script_out(checks):
+            return 0, ("__ENERU_CHECK__ 0 1 sudo: /sbin/nope: command not found"), ""
+        out, _ = TestProbeRemote().run_probe(env, srv, script_out=script_out)
+        errors = [f for f in out if f.level == "error"]
+        assert len(errors) == 1
+        assert "'/sbin/nope' is NOT installed (sudo: /sbin/nope: command not found)" \
+            in errors[0].message
+        assert "secure_path" in errors[0].hint
+        assert "refuses" not in errors[0].message
+
+    def test_missing_sudo_is_not_blamed_on_the_binary(self, env):
+        srv = server(shutdown_command="sudo /sbin/shutdown -h now")
+        out, _ = TestProbeRemote().run_probe(env, srv, script_out=lambda c: (
+            0, "__ENERU_CHECK__ 0 127 sh: line 1: sudo: command not found", ""))
+        text = joined(out)
+        assert "sudo is not installed (sh: line 1: sudo: command not found)" in text
+        assert "NOT installed" not in text
+
+    def test_missing_action_binary_mutes_its_sudo_row(self, env):
+        # Action templates keep `command -v` + `sudo -n -l` for the same
+        # binary; a missing binary is one red line, not two.
+        srv = server(use_sudo=True, shutdown_command="poweroff",
+                     pre_shutdown_commands=[RemoteCommandConfig(
+                         action="unmount_filesystems", mounts=["/mnt/data"])])
+
+        def script_out(checks):
+            return 0, "\n".join(
+                f"__ENERU_CHECK__ {i} {1 if c.binary == 'umount' else 0} "
+                for i, c in enumerate(checks)), ""
+        out, _ = TestProbeRemote().run_probe(env, srv, script_out=script_out)
+        text = joined(out)
+        assert "'umount' is NOT installed" in text
+        assert "sudo allows 'umount" not in text
+        assert "sudo refuses it without a password: sudo allows 'umount" not in text

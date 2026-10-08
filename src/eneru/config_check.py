@@ -1166,13 +1166,19 @@ def command_checks(command: str, use_sudo: bool, *,
         notes.append(
             f"'{command}': only its first command runs under sudo; wrap the "
             "rest yourself (e.g. sudo -n sh -c '...') if it needs root too.")
-    checks = [_exists(binary, hint=(
-        "Not found on the remote PATH (Eneru adds /usr/sbin, /sbin, "
-        "/usr/local/sbin and Synology's /usr/syno/sbin)."))]
     if via_sudo:
-        checks.append(_sudo_allowed(binary, args, sudo_target_opts(effective)))
-    elif (final and user and user != "root"
-          and os.path.basename(binary) in _POWER_BINARIES):
+        # Issue #128: `command -v` as the SSH user needs execute permission,
+        # which FreeBSD's root:operator 4554 /sbin/shutdown denies, so it
+        # called a present binary missing. sudo resolves the command itself
+        # (its secure_path, as root) and answers "command not found" when it
+        # is really missing, so its answer is the one that matters.
+        checks = [_sudo_allowed(binary, args, sudo_target_opts(effective))]
+    else:
+        checks = [_exists(binary, hint=(
+            "Not found on the remote PATH (Eneru adds /usr/sbin, /sbin, "
+            "/usr/local/sbin and Synology's /usr/syno/sbin)."))]
+    if (not via_sudo and final and user and user != "root"
+            and os.path.basename(binary) in _POWER_BINARIES):
         notes.append(
             f"'{binary}' runs without sudo as non-root user '{user}'; most "
             "systems refuse that. Enable use_sudo or prefix the command with sudo.")
@@ -1338,6 +1344,14 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
         if check.kind == "exists":
             add(check.fail_level, f"{check.label.replace('is installed', 'is NOT installed')}"
                 f"{detail}", check.fail_hint)
+        elif check.kind == "sudo" and rc == 127:
+            add(check.fail_level, f"sudo is not installed{detail}",
+                "Install sudo on the remote, or log in as root.")
+        elif (check.kind == "sudo"
+              and f"{check.binary}: command not found" in first):
+            add(check.fail_level, f"'{check.binary}' is NOT installed{detail}",
+                "sudo could not find it in its secure_path (or at that "
+                "absolute path) on the remote.")
         elif check.kind == "sudo":
             add(check.fail_level, f"sudo refuses it without a password: "
                 f"{check.label}{detail}", check.fail_hint)

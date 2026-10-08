@@ -53,6 +53,13 @@ RUN mkdir -p /usr/syno/sbin && \
     echo 'touch /tmp/eneru-path-augmented' >> /usr/syno/sbin/eneru-path-probe && \
     chmod +x /usr/syno/sbin/eneru-path-probe
 
+# Issue #128: a root-only "shutdown" (0750, like FreeBSD's root:operator
+# /sbin/shutdown). The SSH user cannot run it, sudo can, so config check must
+# ask sudo, not `command -v`.
+RUN echo '#!/bin/sh' > /usr/local/sbin/eneru-rootonly-shutdown && \
+    echo 'touch /tmp/eneru-rootonly-ran' >> /usr/local/sbin/eneru-rootonly-shutdown && \
+    chmod 0750 /usr/local/sbin/eneru-rootonly-shutdown
+
 # Alias shutdown to our fake version
 RUN ln -sf /usr/local/bin/fake-shutdown /usr/local/bin/shutdown
 

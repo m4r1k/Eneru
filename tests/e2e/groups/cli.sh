@@ -875,5 +875,74 @@ docker exec eneru-e2e-ssh rm -f /var/run/shutdown-triggered /tmp/shutdown-invoke
 echo "PASS: config check and remote shutdown work under zsh and tcsh login shells"
 )
 
+# ======================================================================
+# Test 72: FreeBSD-style sudo shutdown commands (issue #128)
+# ======================================================================
+# FreeBSD's /sbin/shutdown is runnable by root and the operator group only:
+# like a fire extinguisher in a cabinet only the manager can open, asking
+# "can the SSH user run it?" says "missing" although sudo can. config check
+# must ask sudo (`sudo -n -l`).
+(
+echo ""
+echo ">>> Running: Test 72: FreeBSD-style sudo shutdown commands (issue #128)"
+
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-rootonly-ran
+SSH_OPTS='["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]'
+cat >/tmp/config-e2e-128-sudo.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Root Only"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo /usr/local/sbin/eneru-rootonly-shutdown"
+    ssh_options: $SSH_OPTS
+  - name: "Missing"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo /usr/local/sbin/eneru-not-here"
+    ssh_options: $SSH_OPTS
+YAML
+
+set +e
+eneru config check --config /tmp/config-e2e-128-sudo.yaml >/tmp/test72-check.log 2>&1
+set -e
+cat /tmp/test72-check.log
+for line in "Root Only: sudo allows '/usr/local/sbin/eneru-rootonly-shutdown' without a password" \
+            "Missing: '/usr/local/sbin/eneru-not-here' is NOT installed"; do
+  grep -qF -- "$line" /tmp/test72-check.log || {
+    echo "FAIL: config check is missing: $line"; exit 1; }
+done
+for bad in "Root Only: '/usr/local/sbin/eneru-rootonly-shutdown' is NOT installed"; do
+  if grep -qF -- "$bad" /tmp/test72-check.log; then
+    echo "FAIL: config check reported: $bad"; exit 1
+  fi
+done
+# config check never runs the shutdown command itself.
+if docker exec eneru-e2e-ssh test -e /tmp/eneru-rootonly-ran; then
+  echo "FAIL: config check ran the root-only shutdown"; exit 1
+fi
+
+set +e
+timeout 60s eneru shutdown remote --config /tmp/config-e2e-128-sudo.yaml \
+  --server "Root Only" --i-really-want-to-proceed-with-remote-shutdown \
+  >/tmp/test72-rootonly.log 2>&1
+rc=$?
+set -e
+cat /tmp/test72-rootonly.log
+[ "$rc" -eq 0 ] || { echo "FAIL: Root Only shutdown exited $rc"; exit 1; }
+docker exec eneru-e2e-ssh test -e /tmp/eneru-rootonly-ran || {
+  echo "FAIL: the root-only shutdown did not run through sudo"; exit 1; }
+
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-rootonly-ran
+echo "PASS: root-only sudo binaries pass config check and run"
+)
+
 echo ""
 echo "=== Group 'cli' completed successfully ==="

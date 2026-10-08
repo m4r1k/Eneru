@@ -330,6 +330,11 @@ Use the platform's user or sudo configuration UI where available. The shutdown c
 sudo shutdown -p now
 ```
 
+On FreeBSD `-p` powers off; `-h` only halts, leaving the box drawing power.
+`/sbin/shutdown` is executable only by root and the `operator` group, so the
+SSH user can't run it directly; `eneru config check` asks `sudo -n -l` instead
+of looking the binary up as that user.
+
 ## Common shutdown commands
 
 These commands match the previously documented, validated shutdown forms. Keep platform-specific forms unless you have tested an alternative on that device.
