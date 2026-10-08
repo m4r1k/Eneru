@@ -197,6 +197,23 @@ def block_real_umount(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def stub_posix_detection(request, monkeypatch):
+    """Issue #128: ``posix_shell: auto`` (the default) asks each remote over
+    SSH whether it has a POSIX shell. Unit tests must never open a real SSH
+    session, and most of them mock only the probe or the command they care
+    about, so answer "POSIX shell" here. Tests of the detection itself opt
+    out with @pytest.mark.real_posix_detection.
+    """
+    if request.node.get_closest_marker("real_posix_detection"):
+        yield
+        return
+    import eneru.remote_health as _rh
+    monkeypatch.setattr(_rh, "_posix_probe",
+                        lambda server, timeout=None: (True, "", True))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_login_throttle():
     """ISS-032: the API login throttle is process-global module state; clear it
     around every test so failed-login tests can't bleed into unrelated ones.

@@ -166,6 +166,132 @@ def run_remote_probe(server: RemoteServerConfig,
     return False, stderr.strip() or f"exit code {exit_code}", latency_ms
 
 
+# Issue #128: does the remote run our commands through a POSIX shell?
+# ELI5: ask the device to say a password that is not written in the question.
+# A POSIX shell assembles "eneru-" + "posix" + "-ok" and says it back; a router
+# CLI answers "syntax error"; a Cisco CLI may echo the question, but the
+# question never contains the assembled marker, so an echo cannot fake it.
+# Only the OUTPUT decides: RouterOS returns exit 0 or 1 at random for failed
+# commands (measured on 7.21), so exit codes are useless for this.
+POSIX_DETECT_COMMAND = "sh -c 'printf eneru-%s-ok posix'"
+POSIX_DETECT_MARKER = "eneru-posix-ok"
+
+
+def _posix_probe(server: RemoteServerConfig, timeout: Optional[int] = None
+                 ) -> Tuple[Optional[bool], str, bool]:
+    """Run the detection probe once.
+
+    Returns ``(verdict, ssh error text, answered)``. ``answered`` is True when
+    SSH got through and the remote ran *something* (any exit but ssh's own
+    255, a timeout or a missing ssh client): Windows answers on stderr only,
+    which is not a verdict but still proves the machine is up.
+    """
+    try:
+        cmd = build_ssh_probe_command(server, POSIX_DETECT_COMMAND)
+    except ValueError as exc:
+        return None, str(exc), False
+    limit = timeout or server.connect_timeout + 10
+    exit_code, stdout, stderr = run_command(cmd, timeout=limit)
+    if exit_code == 124:
+        return None, f"timed out after {limit}s", False
+    if exit_code in (127, 255):
+        return None, (stderr or "").strip() or f"exit code {exit_code}", False
+    if POSIX_DETECT_MARKER in (stdout or ""):
+        return True, "", True
+    if (stdout or "").strip():
+        return False, "", True
+    return None, (stderr or "").strip() or f"no output (exit code {exit_code})", True
+
+
+def detect_posix_shell(server: RemoteServerConfig,
+                       timeout: Optional[int] = None) -> Optional[bool]:
+    """Probe once: True = POSIX shell, False = no shell, None = unknown.
+
+    False needs positive evidence: SSH connected and the device printed
+    something on stdout other than the marker (RouterOS prints its errors
+    there). ssh's own failures (255), timeouts (124), a missing ssh client
+    (127) and empty output stay unknown, so a down or slow host never flips
+    a POSIX server to verbatim mode.
+    """
+    verdict = _posix_probe(server, timeout)[0]
+    if verdict is not None:
+        server._detected_posix = verdict
+    return verdict
+
+
+def uses_posix_shell(server: RemoteServerConfig, *, detect: bool = True,
+                     timeout: Optional[int] = None) -> bool:
+    """The effective mode for ``server``: wrap commands in sh, or not.
+
+    A loopback delegate is always POSIX (it is the Linux host). An explicit
+    ``posix_shell`` wins. ``auto`` uses the cached detection, probing once
+    when ``detect`` allows it; while still unknown it stays POSIX, which is
+    exactly how every release before 6.2.2 behaved. A "no shell" verdict on
+    an entry configured with ``use_sudo`` or ``pre_shutdown_commands`` (both
+    need a shell) is overruled: the config wins, ``config check`` reports it.
+    """
+    if server.is_host_loopback is True:
+        return True
+    if isinstance(server.posix_shell, bool):
+        return server.posix_shell
+    if server._detected_posix is None and detect:
+        detect_posix_shell(server, timeout)
+    if server._detected_posix is False and posix_shell_conflict(server):
+        return True
+    return server._detected_posix is not False
+
+
+def posix_shell_conflict(server: RemoteServerConfig) -> bool:
+    """Detected "no shell", but the entry uses settings that need one."""
+    return bool(server.posix_shell is None and server._detected_posix is False
+                and (server.use_sudo is True or server.pre_shutdown_commands))
+
+
+def posix_mode_label(server: RemoteServerConfig) -> str:
+    """Short human label of the shell mode, for logs and config check."""
+    if server.is_host_loopback is True or server.posix_shell is True:
+        return "POSIX shell (configured)"
+    if server.posix_shell is False:
+        return "no POSIX shell (configured)"
+    if server._detected_posix is True:
+        return "POSIX shell (detected)"
+    if server._detected_posix is False:
+        return "no POSIX shell (detected)"
+    return "POSIX shell (assumed: not detected)"
+
+
+def run_server_probe(server: RemoteServerConfig,
+                     default_probe: Optional[str]) -> Tuple[bool, str, int]:
+    """Health probe for one server, honouring its shell mode.
+
+    Order: the server's own ``probe_command``; else, while an ``auto``
+    server is undetected or once it has no POSIX shell, the detection probe
+    (which also warms the cache); else the global ``default_probe``. A
+    shell-less server is healthy when it answers over SSH at all. An ``auto``
+    server whose detection is inconclusive falls back to ``default_probe``,
+    exactly as before 6.2.2.
+    """
+    if server.probe_command:
+        return run_remote_probe(server, server.probe_command)
+    auto = server.posix_shell is None and server.is_host_loopback is not True
+    if (auto and server._detected_posix is None) or not uses_posix_shell(
+            server, detect=False):
+        start = time.monotonic()
+        verdict, error, answered = _posix_probe(server)
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if auto and verdict is not None:
+            server._detected_posix = verdict
+        if server.posix_shell is False or (auto and verdict is False):
+            return answered, ("" if answered else error), latency_ms
+        if verdict is None and not answered:
+            return False, error, latency_ms
+    if default_probe is None:
+        return False, "unsafe probe command rejected", 0
+    # Only the probe's own latency: the one-off detection must not trip the
+    # slow-SSH diagnostics.
+    return run_remote_probe(server, default_probe)
+
+
 def run_loopback_identity_probe(
     server: RemoteServerConfig,
 ) -> Tuple[bool, str, int]:
@@ -441,10 +567,12 @@ class RemoteHealthManager:
                 "If using the default /etc/machine-id path and it is empty on "
                 "the host, initialize it with systemd-machine-id-setup."
             ), 0
-        elif probe is None:
+        elif (probe is None and not server.probe_command
+              and uses_posix_shell(server, detect=False)):
             success, error, latency_ms = False, "unsafe probe command rejected", 0
         else:
-            success, error, latency_ms = run_remote_probe(server, probe)
+            # Per-server probe_command / shell-less detection first (#128).
+            success, error, latency_ms = run_server_probe(server, probe)
             # v5.5: loopback entries get an extra host-identity step. The
             # standard probe proves SSH reachability; identity proves we're
             # actually talking to the host Eneru is meant to control.

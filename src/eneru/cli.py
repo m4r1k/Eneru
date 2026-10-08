@@ -33,7 +33,12 @@ from eneru.monitor import UPSGroupMonitor, compute_effective_order
 from eneru.multi_ups import MultiUPSCoordinator
 from eneru.notifications import APPRISE_AVAILABLE
 from eneru.redundancy import RedundancyGroupExecutor
-from eneru.remote_health import is_safe_probe_command, run_remote_probe
+from eneru.remote_health import (
+    is_safe_probe_command,
+    posix_mode_label,
+    run_server_probe,
+    uses_posix_shell,
+)
 from eneru.status import remote_health_for_config
 from eneru.utils import redact_apprise_url, runs_coordinator
 
@@ -1382,12 +1387,16 @@ def _cmd_shutdown_remote(args):
 
     if args.connectivity_check:
         probe = config.remote_health.probe_command
-        if not is_safe_probe_command(probe):
+        if (not is_safe_probe_command(probe) and not server.probe_command
+                and uses_posix_shell(server, detect=False)):
             logger.log("  Connectivity check: skipped (unsafe probe command rejected)")
         else:
-            ok, error, latency = run_remote_probe(server, probe)
+            ok, error, latency = run_server_probe(
+                server, probe if is_safe_probe_command(probe) else None)
             if ok:
                 logger.log(f"  Connectivity check: OK ({latency} ms)")
+                uses_posix_shell(server)  # a per-server probe skips detection
+                logger.log(f"  Remote shell: {posix_mode_label(server)}")
             else:
                 logger.log(f"  Connectivity check: FAILED ({error})")
 

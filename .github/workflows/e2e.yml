@@ -292,6 +292,9 @@ jobs:
           grep -q "Test 72: FreeBSD-style sudo shutdown commands (issue #128)" tests/e2e/groups/cli.sh
           grep -q 'docker exec eneru-e2e-ssh test -e /tmp/eneru-rootonly-ran' tests/e2e/groups/cli.sh
           grep -q 'chmod 0750 /usr/local/sbin/eneru-rootonly-shutdown' tests/e2e/ssh-target/Dockerfile
+          grep -q "Test 73: shell-less remotes get commands verbatim (issue #128)" tests/e2e/groups/cli.sh
+          grep -q 'docker exec eneru-e2e-ssh grep -qxF -- "$ROS_CMD" /tmp/routeros-received' tests/e2e/groups/cli.sh
+          grep -q 'COPY fake-routeros /usr/local/bin/fake-routeros' tests/e2e/ssh-target/Dockerfile
           grep -q "Pinned Custom: sudo refuses it without a password: sudo allows 'touch /tmp/eneru-pinned-custom' without a password" tests/e2e/groups/cli.sh
           grep -q 'expect "== Shutdown order =="' tests/e2e/groups/cli.sh
           grep -q 'docker exec eneru-e2e-ssh test -e /tmp/shutdown-invoked' tests/e2e/groups/cli.sh

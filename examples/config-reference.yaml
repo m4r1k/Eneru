@@ -601,6 +601,40 @@ remote_servers:
     # battery-backed RAID or large flush windows; tune lower for fast VMs.
     # Set to 0 to opt out of the safety buffer entirely.
     # shutdown_safety_margin: 60
+    #
+    # Does this machine run commands through a POSIX shell? (issue #128)
+    #   auto  (default) ask the machine once over SSH and remember the answer.
+    #         Until it answers, Eneru behaves as before (POSIX).
+    #   true  skip the check: Linux, BSD, NAS, ESXi, ...
+    #   false a router, switch or Windows box with no POSIX shell (MikroTik
+    #         RouterOS, Cisco, Juniper): shutdown_command is sent exactly as
+    #         written. Cannot be combined with use_sudo, pre_shutdown_commands
+    #         or is_host_loopback, and needs an explicit shutdown_command.
+    # posix_shell: auto
+    #
+    # Health-check command for this server only, replacing
+    # remote_health.probe_command. Must be harmless (no shell operators).
+    # Unset: the global probe, or for a machine without a POSIX shell, "does it
+    # answer over SSH". Useful on a router CLI, e.g. ":put ok" on RouterOS.
+    # probe_command: ":put ok"
+
+  # Example: network device without a POSIX shell (MikroTik RouterOS)
+  # Eneru exists to protect data on NAS and Linux boxes; a switch or router
+  # losing power at the end of an outage is usually fine, so this is optional
+  # and best-effort. If you do it: give it the LAST shutdown_order, schedule
+  # the shutdown on the device (so SSH to the other servers isn't cut
+  # mid-drain), and keep command_timeout short. A halted device stays off when
+  # mains returns until it is power-cycled. See docs/remote-servers.md
+  # ("Network devices").
+  # - name: "Core Switch"
+  #   enabled: true
+  #   host: "192.168.178.4"
+  #   user: "eneru"
+  #   posix_shell: false
+  #   probe_command: ":put ok"
+  #   command_timeout: 30
+  #   shutdown_order: 9
+  #   shutdown_command: '/system scheduler add name="eneru-shutdown" start-time=([/system clock get time] + 00:03:00) interval=0s on-event="/system scheduler remove eneru-shutdown; /system shutdown"'
 
   # Example: FreeBSD / pfSense (tcsh login shell, sudo package)
   # FreeBSD's shutdown keeps running through its delay and holds the SSH

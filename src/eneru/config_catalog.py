@@ -421,6 +421,19 @@ REMOTE_SERVER_SECTION = Section(
         ListSection("pre_shutdown_commands", "Pre-shutdown steps",
                     "Steps run on this server, in order, before the shutdown "
                     "command.", PRE_SHUTDOWN_SECTION, tier=BASIC),
+        Option("posix_shell", "tristate",
+               "Does this machine run commands through a Unix shell? auto = "
+               "Eneru asks it over SSH once (recommended). false = a router, "
+               "switch or Windows box with no POSIX shell (MikroTik RouterOS, "
+               "Cisco, Juniper): shutdown_command is sent exactly as written, "
+               "with no sudo or pre-shutdown steps. true = skip the check.",
+               _d(_RS, "posix_shell"), nullable=True, tier=BASIC),
+        Option("probe_command", "str",
+               "Harmless health-check command for this server only, replacing "
+               "remote_health.probe_command. Use the device's own no-op on a "
+               "router CLI. Empty = the global probe (shell-less devices: "
+               "\"does it answer over SSH\").",
+               _d(_RS, "probe_command"), nullable=True, example=":put ok"),
         Option("connect_timeout", "int",
                "Seconds to wait for the SSH connection.",
                _d(_RS, "connect_timeout"), minimum=1),

@@ -1341,8 +1341,11 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     from eneru.remote_health import (
         build_ssh_probe_command,
         is_safe_probe_command,
+        posix_mode_label,
+        posix_shell_conflict,
         run_loopback_identity_probe,
-        run_remote_probe,
+        run_server_probe,
+        uses_posix_shell,
     )
     name = server.name or server.host
     out: List[Finding] = []
@@ -1361,7 +1364,7 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     if not is_safe_probe_command(probe):
         probe = "true"
     try:
-        ok, err, latency = run_remote_probe(server, probe)
+        ok, err, latency = run_server_probe(server, probe)
     except ValueError as exc:
         add(LEVEL_ERROR, str(exc))
         return out
@@ -1385,6 +1388,25 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
             add(LEVEL_OK, "host identity matches (loopback reaches THIS host)")
         else:
             add(LEVEL_ERROR, id_err)
+
+    posix = uses_posix_shell(server)
+    if posix_shell_conflict(server):
+        # The runtime keeps the POSIX wrapper here (the config wins), so the
+        # steps would be sent to a device that rejects them.
+        used = [k for k, v in (
+            ("use_sudo", server.use_sudo is True),
+            ("pre_shutdown_commands", bool(server.pre_shutdown_commands))) if v]
+        add(LEVEL_ERROR, f"no POSIX shell detected, but {' and '.join(used)} "
+            f"{'need' if len(used) > 1 else 'needs'} one",
+            "For a router or switch: remove them and set posix_shell: false. "
+            "If detection is wrong: set posix_shell: true.")
+        return out
+    if not posix:
+        # Issue #128: a router/switch CLI. Nothing can be checked in sh there,
+        # and the command is sent as written, so say so instead of failing.
+        add(LEVEL_INFO, f"{posix_mode_label(server)}: shutdown_command is sent "
+            "exactly as written and was not checked")
+        return out
 
     checks, notes = remote_checks(config, server)
     for note in notes:

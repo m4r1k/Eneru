@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from eneru.actions import REMOTE_ACTIONS, render_action, serialize_umount_targets
 from eneru.config import RemoteServerConfig
-from eneru.remote_health import build_ssh_probe_command
+from eneru.remote_health import build_ssh_probe_command, uses_posix_shell
 from eneru.utils import run_command
 
 # Per-command wall-clock buffer added on top of the configured timeout to absorb
@@ -276,6 +276,9 @@ class RemoteShutdownMixin:
         from eneru.monitor import compute_effective_order
 
         enabled_servers = [s for s in self.config.remote_servers if s.enabled]
+        for server in enabled_servers:
+            # A new shutdown run may re-detect a host that was down last time.
+            server._runtime_detect_tried = False
 
         if not enabled_servers:
             return []
@@ -757,8 +760,14 @@ class RemoteShutdownMixin:
         # augmentation wraps the ONE argv element that carries the remote
         # command string (remote_shell_command), so argv stays `ssh <opts> -- user@host "<cmd>"`.
         # The LOCAL, non-SSH execution paths never reach _run_remote_command.
+        # Issue #128: a device without a POSIX shell (RouterOS, Cisco, ...)
+        # rejects the sh wrapper as a whole line, so it gets the command
+        # exactly as written. Until a device proves it has no shell it stays
+        # POSIX.
+        posix = self._remote_uses_posix_shell(server, timeout, deadline)
         try:
-            ssh_cmd = build_ssh_probe_command(server, remote_shell_command(command))
+            ssh_cmd = build_ssh_probe_command(
+                server, remote_shell_command(command) if posix else command)
         except ValueError as exc:
             # A dangling option (e.g. a trailing "-i") is a config error for
             # this server only: fail the step, never crash the sequence.
@@ -780,6 +789,15 @@ class RemoteShutdownMixin:
             capture.update(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
         if exit_code == 0:
+            if not posix:
+                # A shell-less CLI may report a failure with exit 0 (RouterOS
+                # does, half the time), so surface whatever it printed.
+                reply = next((line.strip() for line in
+                              f"{stdout or ''}\n{stderr or ''}".splitlines()
+                              if line.strip()), "")
+                if reply:
+                    return True, (f"the device replied: {reply[:200]}; no POSIX "
+                                  "shell, so its exit status is not reliable")
             return True, ""
         elif exit_code == 124:
             # ``command_timeout`` is the value actually handed to
@@ -809,8 +827,35 @@ class RemoteShutdownMixin:
             # code, or "Permission denied" all stay failures.
             return True, "SSH transport ended (result unknown)"
         else:
-            error_msg = stderr.strip() if stderr.strip() else f"exit code {exit_code}"
-            return False, error_msg
+            # A shell-less CLI (RouterOS) prints its errors on stdout.
+            reply = stderr.strip() or ("" if posix else next(
+                (line.strip() for line in (stdout or "").splitlines()
+                 if line.strip()), ""))
+            return False, reply or f"exit code {exit_code}"
+
+    @staticmethod
+    def _remote_uses_posix_shell(server: RemoteServerConfig, timeout: int,
+                                 deadline: Optional[float]) -> bool:
+        """Shell mode for the shutdown path, detecting ``auto`` at most once.
+
+        ELI5: knocking to ask "anyone speak sh?" must not eat the minutes
+        reserved for the real message. Detection only runs while the phase
+        deadline still leaves room for the command itself (``timeout`` + the
+        SSH allowance), is capped to the spare time, and is tried once per
+        server per shutdown run: an unreachable host is not re-probed before
+        every step. Skipped or inconclusive means POSIX, as before 6.2.2.
+        """
+        detect = not server._runtime_detect_tried
+        probe_timeout = server.connect_timeout + 10
+        if detect and deadline is not None:
+            spare = int(deadline - time.monotonic()) - (timeout + _SSH_OVERHEAD_BUFFER)
+            if spare < 5:
+                detect = False
+            else:
+                probe_timeout = min(probe_timeout, spare)
+        if detect and server._detected_posix is None:
+            server._runtime_detect_tried = True
+        return uses_posix_shell(server, detect=detect, timeout=probe_timeout)
 
     @staticmethod
     def _remote_deadline_exceeded(deadline: Optional[float] = None) -> bool:
@@ -1070,7 +1115,13 @@ class RemoteShutdownMixin:
             server.shutdown_command,
             server.use_sudo,
         )
-        self._log_message(f"  🔌  Sending shutdown command: {shutdown_command}")
+        posix = (uses_posix_shell(server, detect=False)
+                 if self.config.behavior.dry_run  # a dry run never SSHes
+                 else self._remote_uses_posix_shell(
+                     server, server.command_timeout, deadline))
+        verbatim = "" if posix else " (as written: no POSIX shell)"
+        self._log_message(
+            f"  🔌  Sending shutdown command{verbatim}: {shutdown_command}")
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True

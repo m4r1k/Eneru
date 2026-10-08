@@ -458,6 +458,22 @@ class RemoteServerConfig:
     _is_host_loopback_explicit: bool = False
     host_identity_command: str = "cat /etc/machine-id"
     expected_host_identity: Optional[str] = None
+    # Issue #128. ELI5: some doors have no lock to turn (RouterOS, Cisco,
+    # Junos, Windows cmd.exe have no POSIX shell), so wrapping the command in
+    # `sh -c` makes them reject it whole. None = auto-detect over SSH (keeps
+    # the POSIX wrapper until a device proves it has no shell); True = POSIX;
+    # False = send shutdown_command exactly as written, nothing added.
+    posix_shell: Optional[bool] = None
+    # Per-server health probe, overriding remote_health.probe_command (whose
+    # default `true` is not a command on a router CLI; e.g. `:put ok`).
+    probe_command: Optional[str] = None
+    # Runtime cache of the auto-detection result; never read from YAML.
+    _detected_posix: Optional[bool] = field(default=None, repr=False,
+                                            compare=False)
+    # Set once the shutdown path tried detection, so an unreachable host is
+    # not re-probed before every step of the same run.
+    _runtime_detect_tried: bool = field(default=False, repr=False,
+                                        compare=False)
 
     def __post_init__(self):
         # Default remote host-key checking to accept-new. OpenSSH's own default
@@ -1442,8 +1458,21 @@ class ConfigLoader:
                 host_identity_command=server_data.get(
                     'host_identity_command', 'cat /etc/machine-id'),
                 expected_host_identity=server_data.get('expected_host_identity'),
+                posix_shell=cls._parse_posix_shell(server_data.get('posix_shell')),
+                # An empty probe_command means unset, as in the editor.
+                probe_command=server_data.get('probe_command') or None,
             ))
         return servers
+
+    @staticmethod
+    def _parse_posix_shell(value: Any) -> Any:
+        """``auto`` (any case) and unset both mean auto-detect (None).
+
+        Anything else passes through untouched so validation can reject it.
+        """
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            return None
+        return value
 
     @classmethod
     def _parse_containers_config(cls, containers_data: Dict[str, Any],
@@ -2165,7 +2194,7 @@ class ConfigLoader:
                 "pre_shutdown_commands", "parallel",
                 "shutdown_order", "shutdown_safety_margin",
                 "is_host_loopback", "host_identity_command",
-                "expected_host_identity",
+                "expected_host_identity", "posix_shell", "probe_command",
             }
             pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts",
                                  "use_sudo"}
@@ -2405,6 +2434,23 @@ class ConfigLoader:
                     messages.extend(cls._unknown_key_errors(
                         server_section, entry, remote_server_keys,
                     ))
+                    posix_raw = entry.get("posix_shell")
+                    if not (posix_raw is None or isinstance(posix_raw, bool)
+                            or (isinstance(posix_raw, str)
+                                and posix_raw.strip().lower() == "auto")):
+                        messages.append(
+                            f"ERROR: {server_section}.posix_shell must be "
+                            f"true, false or auto, got {posix_raw!r}"
+                        )
+                    if entry.get("augment_remote_path") is False:
+                        # The 6.1.7 opt-out users: 6.1.8 ignored it and their
+                        # shell-less remotes broke (issue #128).
+                        messages.append(
+                            f"WARNING: {server_section}.augment_remote_path is "
+                            "ignored since 6.1.8. For a device without a POSIX "
+                            "shell (router, switch, Windows) set "
+                            "posix_shell: false instead."
+                        )
                     ssh_options = entry.get("ssh_options")
                     if ssh_options is not None:
                         if not isinstance(ssh_options, list):
@@ -3067,7 +3113,7 @@ class ConfigLoader:
                 for s in g.remote_servers:
                     yield g.name or "(unnamed)", s
         for owner, srv in _all_remote_servers():
-            if not srv.enabled:
+            if not srv.enabled or srv.posix_shell is False:
                 continue
             user = srv.user.strip().lower()
             if (
@@ -3084,7 +3130,9 @@ class ConfigLoader:
                     f"WARNING: remote_server '{where}' user is {srv.user!r} "
                     "but use_sudo is false. Non-root users typically need "
                     "use_sudo: true unless shutdown_command invokes sudo "
-                    "itself and no generated pre-shutdown actions are enabled."
+                    "itself and no generated pre-shutdown actions are enabled. "
+                    "For a router or switch without a POSIX shell, set "
+                    "posix_shell: false instead."
                 )
 
         # --- Redundancy-group validation (Phase 2) ---
@@ -3318,6 +3366,43 @@ class ConfigLoader:
                         f"ERROR: Remote server '{display}': is_host_loopback "
                         f"must be a boolean, got {server.is_host_loopback!r}"
                     )
+
+                if server.probe_command is not None:
+                    from eneru.remote_health import is_safe_probe_command
+                    if (not isinstance(server.probe_command, str)
+                            or not is_safe_probe_command(server.probe_command)):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': probe_command "
+                            "must be a harmless, non-empty probe without shell "
+                            "operators (e.g. ':put ok' on RouterOS), got "
+                            f"{server.probe_command!r}"
+                        )
+
+                # Issue #128: with no POSIX shell Eneru sends shutdown_command
+                # verbatim, so everything it would otherwise generate in sh
+                # (sudo prefix, action templates, the loopback's identity
+                # probe) cannot work there.
+                if server.posix_shell is False:
+                    for key, used in (
+                            ("is_host_loopback", server.is_host_loopback is True),
+                            ("use_sudo", server.use_sudo is True),
+                            ("pre_shutdown_commands",
+                             bool(server.pre_shutdown_commands))):
+                        if used:
+                            messages.append(
+                                f"ERROR: Remote server '{display}': "
+                                f"posix_shell: false cannot be combined with "
+                                f"{key}; it needs a POSIX shell on the remote."
+                            )
+                    if (server.shutdown_command or "").strip() in (
+                            "", RemoteServerConfig.shutdown_command):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': posix_shell: "
+                            "false needs an explicit shutdown_command in the "
+                            "device's own CLI syntax (the default "
+                            f"{RemoteServerConfig.shutdown_command!r} is a Unix "
+                            "command)."
+                        )
 
                 so = server.shutdown_order
                 so_valid = False

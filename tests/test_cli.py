@@ -783,7 +783,7 @@ class TestCLIManualRemoteShutdown:
     @pytest.mark.unit
     def test_remote_shutdown_dry_run_does_not_execute_configured_commands(self, tmp_path):
         config_file = self._remote_config(tmp_path)
-        with patch("eneru.cli.run_remote_probe", return_value=(True, "", 1)):
+        with patch("eneru.cli.run_server_probe", return_value=(True, "", 1)):
             with patch("eneru.shutdown.remote.RemoteShutdownMixin._run_remote_command") as mock_run:
                 with patch.object(sys, "argv", [
                     "eneru", "shutdown", "remote",
@@ -3807,7 +3807,7 @@ class TestShutdownRemoteConnectivityCheck:
     @pytest.mark.unit
     def test_failed_probe_is_reported(self, tmp_path, capsys):
         config_file = self._drill_config(tmp_path)
-        with patch("eneru.cli.run_remote_probe",
+        with patch("eneru.cli.run_server_probe",
                    return_value=(False, "connection refused", 0)), \
              patch("eneru.shutdown.remote.RemoteShutdownMixin._run_remote_command"), \
              patch.object(sys, "argv", [

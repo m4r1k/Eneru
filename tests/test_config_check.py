@@ -2050,3 +2050,44 @@ class TestIssue128Backgrounding:
         warn = [f for f in out if "output open" in f.message]
         assert warn and warn[0].level == cc.LEVEL_WARN
         assert ">& /dev/null" in warn[0].message
+
+
+class TestIssue128ShellLess:
+    """#128: a remote without a POSIX shell (RouterOS) is not script-checked."""
+
+    def test_configured_shell_less_skips_the_script(self, env):
+        srv = server(posix_shell=False, user="admin",
+                     shutdown_command="/system shutdown")
+        run = MagicMock()
+        with patch("eneru.remote_health._posix_probe", return_value=(False, "", True)), \
+                patch.object(cc, "_run", run):
+            out = cc.probe_remote(Config(), srv)
+        run.assert_not_called()
+        text = joined(out)
+        assert "SSH as admin@10.0.0.2 works" in text
+        assert ("no POSIX shell (configured): shutdown_command is sent exactly "
+                "as written and was not checked") in text
+        assert not [f for f in out if f.level == "error"]
+
+    def test_detected_shell_less_flags_posix_only_settings(self, env):
+        srv = server(use_sudo=True, shutdown_command="/system shutdown",
+                     pre_shutdown_commands=[RemoteCommandConfig(command="x")])
+        run = MagicMock()
+        with patch("eneru.remote_health._posix_probe", return_value=(False, "", True)), \
+                patch.object(cc, "_run", run):
+            out = cc.probe_remote(Config(), srv)
+        run.assert_not_called()
+        errors = [f for f in out if f.level == "error"]
+        assert len(errors) == 1
+        assert ("no POSIX shell detected, but use_sudo and "
+                "pre_shutdown_commands need one") in errors[0].message
+        assert "posix_shell: false" in errors[0].hint
+
+    def test_detected_posix_runs_the_script(self, env):
+        srv = server()
+        with patch("eneru.remote_health._posix_probe", return_value=(True, "", True)), \
+                patch("eneru.remote_health.run_remote_probe",
+                      return_value=(True, "", 3)), \
+                patch.object(cc, "_run", return_value=(0, "", "")) as run:
+            cc.probe_remote(Config(), srv)
+        run.assert_called_once()

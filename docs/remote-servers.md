@@ -399,6 +399,92 @@ Two consequences worth knowing:
   `sudo /usr/syno/sbin/synoshutdown -s`). Absolute paths bypass `PATH`
   resolution entirely and always work.
 
+## Network devices
+
+Eneru exists to protect **data**: NAS boxes and Linux servers that are writing
+when the power goes. A router or switch losing power at the end of an outage
+loses nothing, so shutting network gear down is optional and best-effort.
+Most deployments leave it alone.
+
+Do it only when there's a reason, for example a device whose flash storage is
+known to handle power loss badly. If you do:
+
+- **Shut it down last.** Give it the highest `shutdown_order`, or the other
+  servers lose their SSH path mid-drain.
+- **Schedule the shutdown on the device.** Send a command that powers off in a
+  few minutes rather than right away, so the rest of Eneru's sequence finishes
+  first.
+- **Keep `command_timeout` short.** A failure on a network device never blocks
+  the other servers.
+- **Plan for the power coming back.** A halted device stays off when mains
+  returns before the UPS cuts its output, so the network stays down until
+  someone power-cycles it.
+
+### Devices without a POSIX shell
+
+Linux, BSD and NAS systems run Eneru's commands through a POSIX shell, which
+Eneru relies on: it adds the system directories to `PATH`, prefixes `sudo`,
+and runs the pre-shutdown actions in `sh`. Network operating systems such as
+MikroTik RouterOS, Cisco IOS and Juniper Junos (and Windows' `cmd.exe`) have
+no such shell. Wrapping a command for them makes the device reject the whole
+line, so the command never runs.
+
+`posix_shell` (per server) handles this:
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | Eneru asks the machine once over SSH (`sh -c 'printf …'`) and checks the reply. A shell answers with a marker; a router CLI answers with its own error, so Eneru sends commands to it exactly as written from then on. Until the machine answers (it's down, or SSH fails), Eneru keeps the POSIX behavior, and so it does when the reply is unclear: Windows prints its error on stderr only, so set `false` there yourself. An entry with `use_sudo` or `pre_shutdown_commands` (both need a shell) keeps the POSIX behavior whatever the reply; `eneru config check` reports the mismatch. |
+| `true` | Always POSIX; no detection. |
+| `false` | Never POSIX: `shutdown_command` is sent byte-for-byte. `use_sudo`, `pre_shutdown_commands` and `is_host_loopback` are rejected, and `shutdown_command` must be set explicitly. |
+
+Setting `false` explicitly for known network gear is still worth it: no
+detection round-trip, and `eneru validate` checks the entry up front. Set
+`true` explicitly when the SSH key has a forced command (`command="…"` in
+`authorized_keys`): sshd runs that command for every SSH session, the
+detection probe included.
+
+The detection decides on the device's **output**, not its exit code. RouterOS
+returns exit 0 or 1 at random when a command fails, so an exit code says
+nothing there. For the same reason, Eneru can't always tell that a command
+failed on such a device: it logs whatever the device printed. After a drill,
+check the device itself (on RouterOS, `/system scheduler print`).
+
+The global health probe `remote_health.probe_command` (default `true`) isn't a
+command on a router CLI. For a machine without a POSIX shell, Eneru's health
+check is "does it answer over SSH" instead. To probe something specific, set
+`probe_command` on that server, e.g. `:put ok` on RouterOS.
+
+#### MikroTik RouterOS
+
+Use an SSH key for a RouterOS user whose group allows `reboot` and `write`
+(a scheduler entry is a config write). This example, from a user's working
+setup, schedules the power-off 3 minutes out and removes itself:
+
+```yaml
+remote_servers:
+  - name: "Core Switch"
+    enabled: true
+    host: "192.168.1.2"
+    user: "eneru"
+    posix_shell: false
+    probe_command: ":put ok"
+    command_timeout: 30
+    shutdown_order: 9
+    shutdown_command: '/system scheduler add name="eneru-shutdown" start-time=([/system clock get time] + 00:03:00) interval=0s on-event="/system scheduler remove eneru-shutdown; /system shutdown"'
+```
+
+Quotes, `[...]` and `;` reach the device unchanged. Use single quotes in YAML
+around a command that contains double quotes.
+
+#### Cisco, Juniper and others (untested)
+
+The same pattern applies to any device with an SSH CLI: `posix_shell: false`,
+a `shutdown_command` in the device's own syntax, and a harmless
+`probe_command`. These haven't been tested with Eneru. Check that your device
+accepts the command over a non-interactive `ssh user@host "<command>"`: some
+commands ask for confirmation (Cisco IOS `reload` does), which an SSH exec
+session can't answer.
+
 ## Safe test checklist
 
 Run these before relying on remote shutdown:
