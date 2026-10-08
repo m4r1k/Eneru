@@ -427,7 +427,7 @@ REMOTE_SERVER_SECTION = Section(
                "switch or Windows box with no POSIX shell (MikroTik RouterOS, "
                "Cisco, Juniper): shutdown_command is sent exactly as written, "
                "with no sudo or pre-shutdown steps. true = skip the check.",
-               _d(_RS, "posix_shell"), nullable=True, tier=BASIC),
+               _d(_RS, "posix_shell"), nullable=True),
         Option("probe_command", "str",
                "Harmless health-check command for this server only, replacing "
                "remote_health.probe_command. Use the device's own no-op on a "

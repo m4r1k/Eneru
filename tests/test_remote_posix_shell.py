@@ -651,3 +651,12 @@ def test_probe_expect_is_trimmed_and_non_text_never_crashes(tmp_path):
     assert config.remote_servers[0].probe_expect == "eneru-ok"
     with patch("eneru.remote_health.run_command", return_value=(0, "x", "")):
         assert rh.run_remote_probe(srv(), ":put x", 5)[0] is True
+
+
+def test_shell_keys_are_advanced_only():
+    # Network gear is optional for a data-integrity tool and `auto` needs no
+    # config, so guided (basic) mode doesn't show these.
+    keys = {o.key: o for o in cat.REMOTE_SERVER_SECTION.children
+            if hasattr(o, "kind")}
+    for key in ("posix_shell", "probe_command", "probe_expect"):
+        assert keys[key].tier == cat.ADVANCED, key
