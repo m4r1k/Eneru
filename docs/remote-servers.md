@@ -336,7 +336,7 @@ SSH user outside `operator` can't run it directly; `eneru config check` asks
 `sudo -n -l` instead of looking the binary up as that user.
 
 pfSense and FreeBSD users often log in with **tcsh**. Eneru runs
-`shutdown_command` in the user's own login shell, so write it in that shell's
+`shutdown_command` in the SSH user's own shell, so write it in that shell's
 syntax. A **delayed** shutdown needs care: FreeBSD's `shutdown -p +3` keeps
 running for those 3 minutes and holds the SSH session open, even with `&`.
 Eneru then waits, times out, and reports a failure although the shutdown is
@@ -435,12 +435,15 @@ line, so the command never runs.
 
 | Value | Behavior |
 |-------|----------|
-| `auto` (default) | Eneru asks the machine once over SSH (`sh -c 'printf …'`) and checks the reply. A shell answers with a marker; a router CLI answers with its own error, so Eneru sends commands to it exactly as written from then on. Until the machine answers (it's down, or SSH fails), Eneru keeps the POSIX behavior, and so it does when the reply is unclear: Windows prints its error on stderr only, so set `false` there yourself. An entry with `use_sudo` or `pre_shutdown_commands` (both need a shell) keeps the POSIX behavior whatever the reply; `eneru config check` reports the mismatch. |
+| `auto` (default) | Eneru asks the machine over SSH (`sh -c 'printf …'`) and checks the reply, asking again until the answer is clear. A shell answers with a marker; a router CLI answers with its own error, so Eneru sends commands to it exactly as written from then on. Until the machine answers (it's down, or SSH fails), Eneru keeps the POSIX behavior, and so it does when the reply is unclear: Windows prints its error on stderr only, so set `false` there yourself. An entry with `use_sudo` or `pre_shutdown_commands` (both need a shell) keeps the POSIX behavior whatever the reply; `eneru config check` reports the mismatch. |
 | `true` | Always POSIX; no detection. |
 | `false` | Never POSIX: `shutdown_command` is sent byte-for-byte. `use_sudo`, `pre_shutdown_commands` and `is_host_loopback` are rejected, and `shutdown_command` must be set explicitly. |
 
-Setting `false` explicitly for known network gear is still worth it: no
-detection round-trip, and `eneru validate` checks the entry up front. Set
+Setting `false` explicitly for known network gear is still worth it: the
+shutdown path skips detection, and `eneru validate` checks the entry up
+front. Health checks still need to send *something*; without a
+`probe_command` they send the same harmless detection line, which the
+device rejects, to see that it answers. Set
 `true` explicitly when the SSH key has a forced command (`command="…"` in
 `authorized_keys`): sshd runs that command for every SSH session, the
 detection probe included.

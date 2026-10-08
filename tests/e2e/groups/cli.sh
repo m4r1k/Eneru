@@ -1018,8 +1018,13 @@ YAML
 
 set +e
 eneru config check --config /tmp/config-e2e-128.yaml >/tmp/test73-check.log 2>&1
+rc=$?
 set -e
 cat /tmp/test73-check.log
+# The typo'd probe is an ERROR, so config check must exit 1.
+if [ "$rc" -ne 1 ]; then
+  echo "FAIL: config check should exit 1 for the typo'd probe (got $rc)"; exit 1
+fi
 for line in "Switch Auto: SSH as routeros@localhost works" \
             "Switch Auto: no POSIX shell (detected): shutdown_command is sent exactly as written and was not checked" \
             "Switch Fixed: SSH as routeros@localhost works" \

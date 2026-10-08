@@ -19,11 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell syntax (`export PATH=…` in 6.1.8, `sh -c` in 6.2.1). RouterOS rejects
   such a line whole, so a configured switch shutdown never ran, and because
   RouterOS can exit 0 for a failed command, Eneru could log it as sent. (#128)
-  - New per-server `posix_shell`. The default, `auto`, asks the machine once
-    over SSH and judges its output: a shell answers with a marker, a router
-    CLI with its own error. A machine without a shell then gets its commands
-    exactly as written. Until a machine answers, Eneru behaves as before, and
-    an entry with `use_sudo` or `pre_shutdown_commands` keeps the wrapper.
+  - New per-server `posix_shell`. The default, `auto`, asks the machine over
+    SSH until it gets a clear answer and judges the output: a shell answers
+    with a marker, a router CLI with its own error. A machine without a shell
+    then gets its commands exactly as written. Until a machine answers, Eneru
+    behaves as before, and an entry with `use_sudo` or `pre_shutdown_commands`
+    keeps the wrapper. Windows prints its error on stderr only, so `auto`
+    can't tell; set `posix_shell: false` there.
   - `posix_shell: false` sets it explicitly. It can't be combined with
     `use_sudo`, `pre_shutdown_commands` or `is_host_loopback`, and needs its
     own `shutdown_command`.
