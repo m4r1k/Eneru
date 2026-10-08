@@ -5,13 +5,13 @@ Codename: stable
 Architectures: all
 Components: main
 Description: Eneru UPS Monitor packages (stable)
-Date: Sat, 03 Oct 2026 19:29:17 +0000
+Date: Thu, 08 Oct 2026 14:14:15 +0000
 MD5Sum:
- 263a20253243b0adb9b8c0ffabeb860d 804 main/binary-all/Packages
- 53cde31bc628b87404af5e02f9b4dae9 559 main/binary-all/Packages.gz
+ c732700884af016c600570abd966d6eb 804 main/binary-all/Packages
+ d8f0653bc6f37f16ca1d567f2dbff6fa 560 main/binary-all/Packages.gz
 SHA1:
- 9aef7480da35cb34d244cea8a607fa1dc285e960 804 main/binary-all/Packages
- 1b7aa194b85d7da1efc67511671dd438772c5bd7 559 main/binary-all/Packages.gz
+ efdd76c8467c2c1b1ffb60f7e74b03065757c7cf 804 main/binary-all/Packages
+ ab64f4acc6c7486b856333328860b20acf9bc864 560 main/binary-all/Packages.gz
 SHA256:
- 7c97b774fdf0b80a9d69af20620ae5bf4359b617af01f7cbf1027306739ea825 804 main/binary-all/Packages
- 5d95b0e146f3e985402d76198965061e064267009feeaa6011134854c0a78acc 559 main/binary-all/Packages.gz
+ de7c47742e97dc3fbd8ba6204599b9f960258599bc132a26a98442838ca565a2 804 main/binary-all/Packages
+ 3d3fec1ef760a9f79d1ae86a4029724b85eb391aef56919f706d4d19874cb4a9 560 main/binary-all/Packages.gz
