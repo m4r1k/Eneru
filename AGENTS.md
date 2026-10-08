@@ -147,6 +147,15 @@ create a CI run for every commit.
 
 Tags are the immutable release snapshots; no release branches. Point releases (`X.Y.Z`) are for **bug fixes only** — feature work waits for the next minor.
 
+**How a point release is advertised (do this every time, unasked).** Think of the `X.Y.0` release page as the shop window: it stays in the window, and each point release gets a sticky note on the glass, not a new window. Concretely:
+
+1. **Never Latest.** `gh release create vX.Y.Z --verify-tag --latest=false --title "vX.Y.Z" --notes-file <notes>`. The `X.Y.0` release stays GitHub's pinned **Latest**; apt/dnf, PyPI and the Docker `latest` tag still advance (they follow tags, not the GitHub flag).
+2. **Point-release notes** (model: v6.2.1): one plain sentence on what it fixes; `### Fixed` (and `### Added` only if the release really adds an opt-in key), each bullet user-facing; `### Thanks` crediting issue reporters by handle and issue link; then the closing blockquote `> This point release is intentionally not marked GitHub "Latest". The vX.Y.0 feature release remains pinned there, while package repositories and container tags advance to X.Y.Z.` and `Full details: [changelog](https://eneru.readthedocs.io/latest/changelog/).`
+3. **Swap the sticky note on `X.Y.0`.** `gh release view vX.Y.0 --json body --jq .body > body.md`, replace ONLY the top `> **Update:** …` blockquote (what X.Y.Z fixes in one or two sentences, "There are no new features and no breaking config changes." or the honest equivalent, "apt/dnf and the Docker `latest` tag upgrade automatically.", a link to the X.Y.Z notes, and "This page stays pinned as the latest stable."), keep the rest byte-for-byte, then `gh release edit vX.Y.0 --notes-file body.md`. Verify afterwards that `gh release list` still shows `Latest` on `X.Y.0`.
+4. **Issues the release addresses:** comment with what shipped and ask the reporter to try it. Leave the issue open until the reporter confirms, unless the maintainer says otherwise.
+
+Full mechanics: `docs/maintenance.md` ("Release mechanics").
+
 **Pre-release deep review (MANDATORY for minor/major releases).** Before tagging any `X.Y.0` or `X.0.0`, run the `release-review` skill (`.claude/skills/release-review/SKILL.md`) end-to-end: parallel multi-agent audit of the whole repository → stable-ID findings report → user triage → remediation PR → post-implementation verification round with fresh lenses. Patch releases are exempt — they inherit the minor's review. The v6.0.0/v6.1.6/v6.1.7 cycles each surfaced 60–100 real findings; the skill codifies that process so it survives context loss and model changes.
 
 ## Code review workflow (manual AI invocation)
