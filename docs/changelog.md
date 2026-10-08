@@ -9,47 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.2] - 2026-10-08
+
 ### Fixed
 
+- **Remote shutdown reaches routers and switches without a POSIX shell
+  again.** MikroTik RouterOS has no `sh`, and neither do Cisco, Juniper or
+  Windows' `cmd.exe`. Since 6.1.8 Eneru has wrapped every remote command in
+  shell syntax (`export PATH=…` in 6.1.8, `sh -c` in 6.2.1). RouterOS rejects
+  such a line whole, so a configured switch shutdown never ran, and because
+  RouterOS can exit 0 for a failed command, Eneru could log it as sent. (#128)
+  - New per-server `posix_shell`. The default, `auto`, asks the machine once
+    over SSH and judges its output: a shell answers with a marker, a router
+    CLI with its own error. A machine without a shell then gets its commands
+    exactly as written. Until a machine answers, Eneru behaves as before, and
+    an entry with `use_sudo` or `pre_shutdown_commands` keeps the wrapper.
+  - `posix_shell: false` sets it explicitly. It can't be combined with
+    `use_sudo`, `pre_shutdown_commands` or `is_host_loopback`, and needs its
+    own `shutdown_command`.
+  - New per-server `probe_command` replaces the global health probe, whose
+    default `true` isn't a RouterOS command. Without one, a machine without a
+    shell counts as healthy when it answers over SSH.
+  - Optional `probe_expect`: text the probe's output must contain. On RouterOS
+    a mistyped probe otherwise read as healthy 1 run in 10.
+  - A leftover 6.1.7 `augment_remote_path: false` now warns and points to
+    `posix_shell: false`.
 - **`eneru config check` no longer reports FreeBSD's `/sbin/shutdown` as
-  missing.** It's executable only by root and the `operator` group, and the
-  check looked it up as the SSH user. For a command run through sudo, the
-  `sudo -n -l` answer now decides, and a binary sudo can't find is reported as
-  missing. (#128)
-- **`config check` warns about a backgrounded command that keeps the SSH
-  session open.** FreeBSD's delayed `shutdown -h +3 &` keeps running and keeps
-  SSH waiting, so Eneru timed out and reported a failure although the shutdown
-  was scheduled. The warning shows the redirect for sh and for tcsh. A trailing
-  `&` is no longer reported as "only its first command runs under sudo". The
-  timeout message now states the real wait: `command_timeout` plus the 30 s SSH
-  allowance, or less when the shutdown phase's deadline caps it. (#128)
+  missing.** Only root and the `operator` group can run it, and the check
+  looked it up as the SSH user. For a command run through sudo, `sudo -n -l`
+  now decides, and a binary sudo can't find is reported as missing. (#128)
+- **`config check` warns about a backgrounded command that keeps SSH
+  waiting.** FreeBSD's delayed `shutdown -h +3 &` keeps the session open for
+  the whole delay, so Eneru timed out and reported a failed shutdown that was
+  in fact scheduled. The warning shows the redirect for sh and for tcsh. A
+  trailing `&` no longer counts as a second command under sudo, and the
+  timeout message states the real wait. (#128)
 
-- **Remote shutdown reaches routers and switches without a POSIX shell again.**
-  MikroTik RouterOS (and Cisco, Juniper, Windows' `cmd.exe`) have no `sh`.
-  Since 6.1.8 Eneru has wrapped every remote command in shell syntax (`export
-  PATH=…` in 6.1.8, `sh -c` in 6.2.1), and RouterOS rejects such a line whole,
-  so a configured shutdown command never ran. RouterOS also exits 0 or 1 at
-  random when a command fails, so Eneru could log the failure as a success. A
-  new per-server `posix_shell` setting handles this. The default, `auto`, asks
-  the machine over SSH and checks its *output* (once; health checks ask again
-  until they get an answer): a POSIX shell answers with a marker, a router CLI
-  with its own error, and from then on that machine gets its commands exactly
-  as written. Until a machine answers, Eneru behaves as before, and an entry
-  with `use_sudo` or `pre_shutdown_commands` keeps the shell wrapper whatever
-  the detection says (`config check` flags the mismatch). `posix_shell: false`
-  sets it explicitly and rejects `use_sudo`, `pre_shutdown_commands` and
-  `is_host_loopback`, which need a shell. A new per-server `probe_command`
-  (e.g. `:put eneru-ok`) replaces the global health probe, whose default `true`
-  isn't a RouterOS command; without it, a shell-less machine counts as healthy
-  when it answers over SSH. An optional `probe_expect` adds a check on the
-  probe's output, for a CLI that can exit 0 on a failed command (on RouterOS a
-  typo'd probe otherwise read as healthy 1 run in 10). All three keys are in
-  the config editor. A leftover 6.1.7 `augment_remote_path: false` now warns
-  and points to `posix_shell: false`. (#128) ### Documentation
+### Documentation
 
 - New "Network devices" section in the remote-servers guide: why shutting
-  down network gear is optional for a data-integrity tool, how to do it safely
-  when you want to, `posix_shell`, and a MikroTik RouterOS example. The FreeBSD
+  down network gear is optional for a data-integrity tool, how to do it
+  safely, `posix_shell`, `probe_expect`, and a MikroTik example. The FreeBSD
   and pfSense section covers `-p` vs `-h` and tcsh redirect syntax.
 
 ## [6.2.1] - 2026-10-03
