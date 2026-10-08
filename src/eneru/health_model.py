@@ -217,8 +217,12 @@ def assess_health(
             )
         except (TypeError, ValueError):
             runtime = None
+        # trust_battery_charge: false -> the charge-based checks (T1, T3)
+        # stand down here too, mirroring _handle_on_battery.
+        trust_charge = getattr(triggers, "trust_battery_charge", True) is not False
         if (
-            battery is not None
+            trust_charge
+            and battery is not None
             and battery < getattr(triggers, "low_battery_threshold", 20)
         ):
             return UPSHealth.CRITICAL
@@ -228,7 +232,7 @@ def assess_health(
         ):
             return UPSHealth.CRITICAL
         depletion = getattr(triggers, "depletion", None)
-        if depletion is not None:
+        if trust_charge and depletion is not None:
             rate = getattr(snapshot, "depletion_rate", 0.0) or 0.0
             if (
                 rate > getattr(depletion, "critical_rate", 15.0)

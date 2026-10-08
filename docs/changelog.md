@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.2] - 2026-10-08
+
+### Added
+
+- **`triggers.trust_battery_charge` for a UPS whose charge reading lies.**
+  During a real outage a UniFi UPS reported its charge falling from 100% to
+  52% in 90 seconds while the battery voltage held at 12.2 V and its own
+  runtime estimate still showed about 18 minutes. The depletion trigger shut
+  the host down correctly on those numbers; the battery then ran it for more
+  than 30 minutes.
+  - Set `trust_battery_charge: false` (globally or per UPS) and Eneru skips
+    the two triggers that read the charge: low battery and depletion rate.
+    Critical runtime, time on battery, a failed self-test, FSD and a lost
+    connection still apply.
+  - It's rejected unless `extended_time` is enabled, so a UPS can't be left
+    without a time-based safety net.
+  - While the charge is still trusted, Eneru watches for this pattern: the
+    charge says the battery is nearly empty while the runtime estimate and
+    battery voltage disagree. It then logs and notifies a
+    `BATTERY_CHARGE_ANOMALY` event once per outage. The warning never changes
+    a shutdown decision, and it can be muted with `notifications.suppress`.
+  - The dashboard, `eneru monitor` and `config check` stop counting the two
+    triggers for that UPS. A redundancy group also checks its members
+    against its own triggers, so set it there too when the UPS is a member. The setting
+    is in the config editor's advanced options.
+
+### Fixed
+
+- **Remote shutdown reaches routers and switches without a POSIX shell
+  again.** MikroTik RouterOS has no `sh`, and neither do Cisco, Juniper or
+  Windows' `cmd.exe`. Since 6.1.8 Eneru has wrapped every remote command in
+  shell syntax (`export PATH=…` in 6.1.8, `sh -c` in 6.2.1). RouterOS rejects
+  such a line whole, so a configured switch shutdown never ran, and because
+  RouterOS can exit 0 for a failed command, Eneru could log it as sent. (#128)
+  - New per-server `posix_shell`. The default, `auto`, asks the machine over
+    SSH until it gets a clear answer and judges the output: a shell answers
+    with a marker, a router CLI with its own error. A machine without a shell
+    then gets its commands exactly as written. Until a machine answers, Eneru
+    behaves as before, and an entry with `use_sudo` or `pre_shutdown_commands`
+    keeps the wrapper. Windows prints its error on stderr only, so `auto`
+    can't tell; set `posix_shell: false` there.
+  - `posix_shell: false` sets it explicitly. It can't be combined with
+    `use_sudo`, `pre_shutdown_commands` or `is_host_loopback`, and needs its
+    own `shutdown_command`.
+  - New per-server `probe_command` replaces the global health probe, whose
+    default `true` isn't a RouterOS command. Without one, a machine without a
+    shell counts as healthy when it answers over SSH.
+  - Optional `probe_expect`: text the probe's output must contain. On RouterOS
+    a mistyped probe otherwise read as healthy 1 run in 10.
+  - A leftover 6.1.7 `augment_remote_path: false` now warns and points to
+    `posix_shell: false`.
+- **`eneru config check` no longer reports FreeBSD's `/sbin/shutdown` as
+  missing.** Only root and the `operator` group can run it, and the check
+  looked it up as the SSH user. For a command run through sudo, `sudo -n -l`
+  now decides, and a binary sudo can't find is reported as missing. (#128)
+- **`config check` warns about a backgrounded command that keeps SSH
+  waiting.** FreeBSD's delayed `shutdown -h +3 &` keeps the session open for
+  the whole delay, so Eneru timed out and reported a failed shutdown that was
+  in fact scheduled. The warning shows the redirect for sh and for tcsh. A
+  trailing `&` no longer counts as a second command under sudo, and the
+  timeout message states the real wait. (#128)
+
+### Documentation
+
+- New "Network devices" section in the remote-servers guide: why shutting
+  down network gear is optional for a data-integrity tool, how to do it
+  safely, `posix_shell`, `probe_expect`, and a MikroTik example. The FreeBSD
+  and pfSense section covers `-p` vs `-h` and tcsh redirect syntax.
+
 ## [6.2.1] - 2026-10-03
 
 ### Fixed

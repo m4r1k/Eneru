@@ -119,6 +119,17 @@ triggers:
     # Time threshold (seconds) - 900 = 15 minutes
     threshold: 900
 
+  # Whether this UPS's battery.charge reading can be believed (default
+  # true). Some firmware reports a charge that collapses under load while
+  # the battery voltage and the UPS's own runtime estimate say the battery
+  # is fine. false skips the two triggers that read the charge (low
+  # battery and depletion rate); critical runtime, extended time, a failed
+  # self-test, FSD and a lost connection still apply. Requires
+  # extended_time.enabled: true -- set its threshold from a real battery
+  # run. Usually set per UPS, not globally. See docs/triggers.md
+  # ("When the charge reading lies").
+  trust_battery_charge: true
+
   # Voltage warning band preset (per-UPS-group). The daemon does NOT
   # expose raw warning_low / warning_high volt-level overrides -- a
   # misconfigured `warning_high: 200` on a 120V grid would mask a real
@@ -424,7 +435,8 @@ notifications:
   #   POWER_RESTORED, VOLTAGE_NORMALIZED,
   #   AVR_BOOST_ACTIVE, AVR_TRIM_ACTIVE, AVR_INACTIVE,
   #   BYPASS_MODE_INACTIVE, OVERLOAD_RESOLVED, CONNECTION_RESTORED,
-  #   VOLTAGE_AUTODETECT_MISMATCH, VOLTAGE_FLAP_SUPPRESSED
+  #   VOLTAGE_AUTODETECT_MISMATCH, VOLTAGE_FLAP_SUPPRESSED,
+  #   BATTERY_CHARGE_ANOMALY
   # Safety-critical events CANNOT be muted by design (the config
   # validator rejects them): OVER_VOLTAGE_DETECTED, BROWNOUT_DETECTED,
   # OVERLOAD_ACTIVE, BYPASS_MODE_ACTIVE, ON_BATTERY, CONNECTION_LOST,
@@ -601,6 +613,61 @@ remote_servers:
     # battery-backed RAID or large flush windows; tune lower for fast VMs.
     # Set to 0 to opt out of the safety buffer entirely.
     # shutdown_safety_margin: 60
+    #
+    # Does this machine run commands through a POSIX shell? (issue #128)
+    #   auto  (default) ask the machine once over SSH and remember the answer.
+    #         Until it answers, Eneru behaves as before (POSIX).
+    #   true  skip the check: Linux, BSD, NAS, ESXi, ...
+    #   false a router, switch or Windows box with no POSIX shell (MikroTik
+    #         RouterOS, Cisco, Juniper): shutdown_command is sent exactly as
+    #         written. Cannot be combined with use_sudo, pre_shutdown_commands
+    #         or is_host_loopback, and needs an explicit shutdown_command.
+    # posix_shell: auto
+    #
+    # Health-check command for this server only, replacing
+    # remote_health.probe_command. Must be harmless (no shell operators).
+    # Unset: the global probe, or for a machine without a POSIX shell, "does it
+    # answer over SSH". Useful on a router CLI, e.g. ":put eneru-ok" on RouterOS.
+    # probe_command: ":put eneru-ok"
+    #
+    # Only with probe_command, and only for a CLI that can report a failed
+    # command as success (RouterOS can exit 0 for a failed command, so a
+    # typo'd probe would flap between healthy and failed): text the probe's
+    # standard output must contain, on top of exit 0. Linux, BSD and NAS
+    # boxes don't need it.
+    # probe_expect: "eneru-ok"
+
+  # Example: network device without a POSIX shell (MikroTik RouterOS)
+  # Eneru exists to protect data on NAS and Linux boxes; a switch or router
+  # losing power at the end of an outage is usually fine, so this is optional
+  # and best-effort. If you do it: give it the LAST shutdown_order, schedule
+  # the shutdown on the device (so SSH to the other servers isn't cut
+  # mid-drain), and keep command_timeout short. A halted device stays off when
+  # mains returns until it is power-cycled. See docs/remote-servers.md
+  # ("Network devices").
+  # - name: "Core Switch"
+  #   enabled: true
+  #   host: "192.168.178.4"
+  #   user: "eneru"
+  #   posix_shell: false
+  #   probe_command: ":put eneru-ok"
+  #   probe_expect: "eneru-ok"
+  #   command_timeout: 30
+  #   shutdown_order: 9
+  #   shutdown_command: '/system scheduler add name="eneru-shutdown" start-time=([/system clock get time] + 00:03:00) interval=0s on-event="/system scheduler remove eneru-shutdown; /system shutdown"'
+
+  # Example: FreeBSD / pfSense (tcsh login shell, sudo package)
+  # FreeBSD's shutdown keeps running through its delay and holds the SSH
+  # session open even with `&`, so redirect its output, in the login shell's
+  # syntax (tcsh: `>&`). -p powers off; -h only halts. stdin is redirected,
+  # so sudo can't ask for a password: the SSH user needs NOPASSWD sudo for
+  # /sbin/shutdown, and `sudo -n` fails at once if that rule is missing.
+  # - name: "pfSense"
+  #   enabled: true
+  #   host: "192.168.178.1"
+  #   user: "eneru"
+  #   shutdown_order: 9
+  #   shutdown_command: "sudo -n /sbin/shutdown -p +3 >& /dev/null < /dev/null &"
 
   # Example: Proxmox server with VMs and containers
   # stop_proxmox_vms / stop_proxmox_cts run qm and pct via sudo. The SSH user

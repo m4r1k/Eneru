@@ -960,6 +960,10 @@ class UPSGroupMonitor(
                 f"✅  **Overload Resolved**\nDetails: {display_details}",
                 self.config.NOTIFY_SUCCESS
             ),
+            "BATTERY_CHARGE_ANOMALY": (
+                f"⚠️  **BATTERY CHARGE READING LOOKS WRONG**\n{display_details}",
+                self.config.NOTIFY_WARNING
+            ),
             "CONNECTION_LOST": (
                 f"❌  **ERROR: Connection Lost**\n{display_details}",
                 self.config.NOTIFY_FAILURE
@@ -2404,6 +2408,9 @@ class UPSGroupMonitor(
             self.state.on_battery_start_mono = time.monotonic()  # ISS-020
             self.state.extended_time_logged = False
             self.state.battery_history.clear()
+            self.state.charge_check_ref_voltage = None
+            self.state.charge_check_count = 0
+            self.state.charge_anomaly_reported = False
             # A successful neutral/unknown status can separate outages without
             # an OL poll. Re-arm T5 here as well as in _handle_on_line so the
             # new outage is not mistaken for a continuing, already-fired one.
@@ -2453,11 +2460,16 @@ class UPSGroupMonitor(
             0, int(self.config.triggers.on_battery_stabilization_delay)
         )
         stabilizing = time_on_battery < stabilization_delay
+        # triggers.trust_battery_charge: false means this UPS's charge gauge
+        # lies, so T1 and T3 (the two triggers that read it) stand down.
+        trust_charge = self.config.triggers.trust_battery_charge is not False
 
         shutdown_reason = ""
 
         # T1. Critical battery level
-        if battery_charge_valid:
+        if not trust_charge:
+            pass  # T1 reads battery.charge: skipped, with no invalid-reading noise
+        elif battery_charge_valid:
             battery_int = int(float(battery_charge))
             if battery_int < self.config.triggers.low_battery_threshold:
                 if stabilizing:
@@ -2510,7 +2522,8 @@ class UPSGroupMonitor(
             )
 
         # T3. Dangerous depletion rate (with grace period)
-        if not shutdown_reason and is_numeric(depletion_rate) and depletion_rate > 0:
+        if (trust_charge and not shutdown_reason and is_numeric(depletion_rate)
+                and depletion_rate > 0):
             if depletion_rate > self.config.triggers.depletion.critical_rate:
                 if stabilizing:
                     self._log_message(
@@ -2581,6 +2594,21 @@ class UPSGroupMonitor(
             self.state.latest_depletion_rate = (
                 float(depletion_rate) if is_numeric(depletion_rate) else 0.0
             )
+
+        # Warning-only charge plausibility check. It runs after every trigger
+        # (T1-T5) has decided and before anything acts, and never touches the
+        # decision. When a trigger is about to fire this is the last chance to
+        # warn, so one disagreeing poll is enough: with slow polling
+        # (check_interval >= 3 s) the depletion rate first appears on the poll
+        # T3 fires, and the usual 3-poll confirmation would never complete.
+        if trust_charge:
+            try:
+                self._check_charge_plausibility(
+                    ups_data, depletion_rate, time_on_battery,
+                    stabilization_delay, final_poll=bool(shutdown_reason))
+            except Exception as exc:
+                self._log_message(
+                    f"⚠️  WARNING: battery charge plausibility check failed: {exc}")
 
         if shutdown_reason:
             if self_test_failure_trigger and self._is_monitor_only_group():

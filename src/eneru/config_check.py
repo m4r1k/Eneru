@@ -789,13 +789,17 @@ def probe_ups(config: Config, group: UPSGroupConfig) -> List[Finding]:
             "power-event detection.")
     if "OB" in status.split():
         add(LEVEL_WARN, f"{label}: the UPS is ON BATTERY right now")
-    if charge is None:
+    trust_charge = group.triggers.trust_battery_charge is not False
+    if charge is None and trust_charge:
         add(LEVEL_WARN, f"{label}: the UPS does not report battery.charge",
             "triggers.low_battery_threshold can never fire for this UPS.")
     if runtime is None:
         add(LEVEL_WARN, f"{label}: the UPS does not report battery.runtime",
             "triggers.critical_runtime_threshold can never fire; the "
-            "charge, depletion and extended-time triggers still work.")
+            + ("charge, depletion and extended-time triggers still work."
+               if trust_charge else
+               "charge is ignored (trust_battery_charge: false), so only "
+               "extended time, FSD and a lost connection remain."))
     elif is_numeric(runtime) and is_numeric(group.triggers.critical_runtime_threshold):
         if float(runtime) <= float(group.triggers.critical_runtime_threshold):
             add(LEVEL_WARN,
@@ -880,23 +884,152 @@ _POWER_BINARIES = {"shutdown", "poweroff", "halt", "reboot", "synoshutdown",
                    "systemctl", "init"}
 
 
+_SHELL_OPS = ";&|<>"
+# Private-use stand-ins for operator characters that are quoted or escaped.
+_OP_STANDIN = {c: chr(0xE000 + i) for i, c in enumerate(_SHELL_OPS)}
+_OP_RESTORE = str.maketrans({v: k for k, v in _OP_STANDIN.items()})
+
+
+def _protect_quoted_ops(command: str) -> str:
+    """Swap quoted/escaped `;&|<>` for stand-ins before lexing.
+
+    ELI5: a ">" written on a sign is not a door. shlex drops the quotes, so
+    after lexing `'>'` and `>` look identical; hiding the quoted one first
+    keeps it a word (sudoers rules may pin it as an argument).
+    """
+    out: List[str] = []
+    quote = None
+    escaped = False
+    for ch in command:
+        if escaped:
+            out.append(_OP_STANDIN.get(ch, ch))
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            out.append(ch)
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = None
+                out.append(ch)
+            else:
+                out.append(_OP_STANDIN.get(ch, ch))
+        else:
+            if ch in "'\"":
+                quote = ch
+            out.append(ch)
+    return "".join(out)
+
+
+def _shell_tokens(command: str) -> Optional[List[str]]:
+    """Quote-aware words plus operator runs (`;`, `&&`, `>&`, `2`, `>` ...).
+
+    Quoted operator characters stay as stand-ins so they never read as
+    operators; ``_split_redirects`` restores them in the words it returns.
+    """
+    lex = shlex.shlex(_protect_quoted_ops(command or ""), posix=True,
+                      punctuation_chars=_SHELL_OPS)
+    lex.whitespace_split = True
+    try:
+        return [t for t in lex if t]
+    except ValueError:
+        return None
+
+
+def _is_operator(token: str) -> bool:
+    return bool(token) and not token.strip(";&|<>")
+
+
+def _split_redirects(tokens: List[str], raw: str = ""
+                     ) -> Tuple[List[str], List[Tuple[str, str, str]]]:
+    """Separate redirections from the words of ONE simple command.
+
+    Returns (words, [(fd, op, target), ...]); ``fd`` is "" when the operator
+    has no explicit descriptor (`>file`, `>& file`, `&>file`). A number is a
+    descriptor only when ``raw`` writes it against the operator (`2>&1`);
+    `tool 123 >log` keeps 123 as an argument (sudoers rules may pin it).
+    """
+    words: List[str] = []
+    redirects: List[Tuple[str, str, str]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _is_operator(tok) and ("<" in tok or ">" in tok):
+            fd = ""
+            if (words and words[-1].isdigit() and re.search(
+                    r"(?<![^\s;&|])" + re.escape(words[-1] + tok), raw)):
+                fd = words.pop()
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            redirects.append((fd, tok, target.translate(_OP_RESTORE)))
+            i += 2
+            continue
+        words.append(tok.translate(_OP_RESTORE))
+        i += 1
+    return words, redirects
+
+
 def first_command_tokens(command: str) -> Tuple[Optional[List[str]], bool]:
-    """Quote-aware tokens of the first simple command, and "is it chained?".
+    """Quote-aware words of the first simple command, and "is it chained?".
 
     Splits like the shell: an operator inside quotes (`sh -c 'a; b'`) is
-    data, only an unquoted `;`, `&` or `|` ends the first command.
+    data, only an unquoted `;`, `&` or `|` ends the first command. A
+    trailing operator with nothing after it (`cmd &`) chains nothing, and
+    redirections (`>& /dev/null`, `2>&1`, `< /dev/null`) are neither words
+    nor a second command.
     """
-    lex = shlex.shlex(command or "", posix=True, punctuation_chars=";&|")
-    lex.whitespace_split = True
-    tokens: List[str] = []
-    try:
-        for tok in lex:
-            if tok and not tok.strip(";&|"):
-                return tokens, True
-            tokens.append(tok)
-    except ValueError:
+    tokens = _shell_tokens(command)
+    if tokens is None:
         return None, False
-    return tokens, False
+    end = next((i for i, t in enumerate(tokens)
+                if _is_operator(t) and not ("<" in t or ">" in t)), len(tokens))
+    words, _ = _split_redirects(tokens[:end], command or "")
+    return words, any(t.strip(";&| ") for t in tokens[end + 1:])
+
+
+def backgrounds_holding_output(command: str) -> bool:
+    """True for `cmd &` that leaves the SSH session's stdout or stderr attached.
+
+    ELI5: you hang up the phone but leave the other person's microphone
+    taped to yours; the line stays open until they stop talking. ssh waits
+    for every process holding its stdout or stderr, `&` or not, so FreeBSD's
+    delayed `shutdown -h +3 &` keeps Eneru waiting until it times out
+    (measured on FreeBSD 15.0 / tcsh, issue #128). Both streams must be
+    redirected: `>& f` / `&> f`, or `> f` plus `2>&1` / `2> f`, in order.
+    """
+    tokens = _shell_tokens(command)
+    if not tokens:
+        return False
+    segment: List[str] = []
+    for tok in tokens + [";"]:
+        if _is_operator(tok) and not ("<" in tok or ">" in tok):
+            # Every `&`, not only a trailing one: in `a & b`, `a` keeps the
+            # session open after `b` is done.
+            if tok == "&" and _holds_output(segment, command):
+                return True
+            segment = []
+        else:
+            segment.append(tok)
+    return False
+
+
+def _holds_output(segment: List[str], raw: str) -> bool:
+    """Does this simple command leave stdout or stderr on the SSH session?"""
+    words, redirects = _split_redirects(segment, raw)
+    if not words:
+        return False
+    where = {"1": "ssh", "2": "ssh"}
+    for fd, op, target in redirects:
+        if "<" in op:
+            continue
+        if op == "&>" or (op == ">&" and not fd and target != "-"
+                          and not target.isdigit()):
+            where["1"] = where["2"] = "file"
+        elif op == ">&" and target == "-":
+            where[fd or "1"] = "closed"
+        elif op == ">&" and target.isdigit():
+            where[fd or "1"] = where.get(target, "ssh")
+        else:
+            where[fd or "1"] = "file"
+    return where["1"] == "ssh" or where["2"] == "ssh"
 
 
 def command_binary(command: str) -> Tuple[Optional[str], bool, List[str]]:
@@ -1166,13 +1299,27 @@ def command_checks(command: str, use_sudo: bool, *,
         notes.append(
             f"'{command}': only its first command runs under sudo; wrap the "
             "rest yourself (e.g. sudo -n sh -c '...') if it needs root too.")
-    checks = [_exists(binary, hint=(
-        "Not found on the remote PATH (Eneru adds /usr/sbin, /sbin, "
-        "/usr/local/sbin and Synology's /usr/syno/sbin)."))]
+    if backgrounds_holding_output(effective):
+        notes.append(
+            f"'{command}' runs in the background but keeps the SSH session's "
+            "output open: if it keeps running (FreeBSD's delayed shutdown "
+            "does), ssh waits for it and Eneru reports a timeout. Redirect its "
+            "output in the login shell's syntax: `… </dev/null >/dev/null "
+            "2>&1 &` (sh, bash, zsh) or `… < /dev/null >& /dev/null &` "
+            "(csh, tcsh).")
     if via_sudo:
-        checks.append(_sudo_allowed(binary, args, sudo_target_opts(effective)))
-    elif (final and user and user != "root"
-          and os.path.basename(binary) in _POWER_BINARIES):
+        # Issue #128: `command -v` as the SSH user needs execute permission,
+        # which FreeBSD's root:operator 4554 /sbin/shutdown denies, so it
+        # called a present binary missing. sudo resolves the command itself
+        # (its secure_path, as root) and answers "command not found" when it
+        # is really missing, so its answer is the one that matters.
+        checks = [_sudo_allowed(binary, args, sudo_target_opts(effective))]
+    else:
+        checks = [_exists(binary, hint=(
+            "Not found on the remote PATH (Eneru adds /usr/sbin, /sbin, "
+            "/usr/local/sbin and Synology's /usr/syno/sbin)."))]
+    if (not via_sudo and final and user and user != "root"
+            and os.path.basename(binary) in _POWER_BINARIES):
         notes.append(
             f"'{binary}' runs without sudo as non-root user '{user}'; most "
             "systems refuse that. Enable use_sudo or prefix the command with sudo.")
@@ -1259,10 +1406,15 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
                  owner: str = "") -> List[Finding]:
     """SSH reachability + harmless per-command checks for one remote."""
     from eneru.remote_health import (
+        PROBE_EXPECT_MISSING,
+        PROBE_UNSAFE,
         build_ssh_probe_command,
         is_safe_probe_command,
+        posix_mode_label,
+        posix_shell_conflict,
         run_loopback_identity_probe,
-        run_remote_probe,
+        run_server_probe,
+        uses_posix_shell,
     )
     name = server.name or server.host
     out: List[Finding] = []
@@ -1281,9 +1433,19 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
     if not is_safe_probe_command(probe):
         probe = "true"
     try:
-        ok, err, latency = run_remote_probe(server, probe)
+        ok, err, latency = run_server_probe(server, probe)
     except ValueError as exc:
         add(LEVEL_ERROR, str(exc))
+        return out
+    if not ok and err == PROBE_UNSAFE:
+        add(LEVEL_ERROR, f"probe_command {server.probe_command!r}: {err}",
+            "Nothing was sent. Use a single harmless command (no shell "
+            "operators), or remove the per-server probe_command.")
+        return out
+    if not ok and err.startswith(PROBE_EXPECT_MISSING):
+        add(LEVEL_ERROR, f"probe_command {server.probe_command!r}: {err}",
+            "SSH works, but the probe's output lacks probe_expect: check the "
+            "command for typos on the device itself.")
         return out
     if not ok:
         add(LEVEL_ERROR, f"SSH to {server.user}@{server.host} failed: {err}",
@@ -1306,10 +1468,30 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
         else:
             add(LEVEL_ERROR, id_err)
 
+    posix = uses_posix_shell(server)
+    if posix_shell_conflict(server):
+        # The runtime keeps the POSIX wrapper here (the config wins), so the
+        # steps would be sent to a device that rejects them.
+        used = [k for k, v in (
+            ("use_sudo", server.use_sudo is True),
+            ("pre_shutdown_commands", bool(server.pre_shutdown_commands))) if v]
+        add(LEVEL_ERROR, f"no POSIX shell detected, but {' and '.join(used)} "
+            f"{'need' if len(used) > 1 else 'needs'} one",
+            "For a router or switch: remove them and set posix_shell: false. "
+            "If detection is wrong: set posix_shell: true.")
+        return out
+    if not posix:
+        # Issue #128: a router/switch CLI. Nothing can be checked in sh there,
+        # and the command is sent as written, so say so instead of failing.
+        add(LEVEL_INFO, f"{posix_mode_label(server)}: shutdown_command is sent "
+            "exactly as written and was not checked")
+        return out
+
     checks, notes = remote_checks(config, server)
     for note in notes:
         warn = ("most systems refuse" in note or "first command runs under sudo" in note
-                or "no `mounts` listed" in note or "environment variables" in note)
+                or "no `mounts` listed" in note or "environment variables" in note
+                or "keeps the SSH session's output open" in note)
         level = LEVEL_ERROR if "which cannot work" in note else (
             LEVEL_WARN if warn else LEVEL_INFO)
         add(level, note)
@@ -1338,6 +1520,14 @@ def probe_remote(config: Config, server: RemoteServerConfig, *,
         if check.kind == "exists":
             add(check.fail_level, f"{check.label.replace('is installed', 'is NOT installed')}"
                 f"{detail}", check.fail_hint)
+        elif check.kind == "sudo" and rc == 127:
+            add(check.fail_level, f"sudo is not installed{detail}",
+                "Install sudo on the remote, or log in as root.")
+        elif (check.kind == "sudo"
+              and f"{check.binary}: command not found" in first):
+            add(check.fail_level, f"'{check.binary}' is NOT installed{detail}",
+                "sudo could not find it in its secure_path (or at that "
+                "absolute path) on the remote.")
         elif check.kind == "sudo":
             add(check.fail_level, f"sudo refuses it without a password: "
                 f"{check.label}{detail}", check.fail_hint)
@@ -1479,10 +1669,14 @@ def _plan_for_group(config: Config, group: Any) -> Dict[str, Any]:
 
 
 def _trigger_line(t: Any) -> str:
-    parts = [f"battery <= {t.low_battery_threshold}%",
-             f"runtime <= {format_seconds(t.critical_runtime_threshold)}",
-             f"drain > {t.depletion.critical_rate}%/min "
-             f"(after {format_seconds(t.depletion.grace_period)})"]
+    if getattr(t, "trust_battery_charge", True) is not False:
+        parts = [f"battery <= {t.low_battery_threshold}%",
+                 f"runtime <= {format_seconds(t.critical_runtime_threshold)}",
+                 f"drain > {t.depletion.critical_rate}%/min "
+                 f"(after {format_seconds(t.depletion.grace_period)})"]
+    else:
+        parts = [f"runtime <= {format_seconds(t.critical_runtime_threshold)}",
+                 "charge ignored (trust_battery_charge: false)"]
     if t.extended_time.enabled:
         parts.append(f"{format_seconds(t.extended_time.threshold)} on battery")
     parts.append("UPS signals FSD")

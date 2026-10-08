@@ -501,9 +501,10 @@ expect() {
 expect "NUT server localhost:3493 lists UPS 'TestUPS'"
 expect "NUT login as 'admin' works"
 expect "Probe Target: SSH as testuser@localhost works"
-expect "Probe Target: 'shutdown' is installed"
+# Through sudo, `sudo -n -l` alone proves presence and permission (#128):
+# no separate "is installed" row, and the PATH-augmented bare name resolves.
 expect "Probe Target: sudo allows 'shutdown -h now' without a password"
-expect "Probe Target: 'eneru-path-probe' is installed"
+expect "Probe Target: sudo allows 'eneru-path-probe' without a password"
 expect "Probe Target: failed: listing containers works"
 expect "Missing Tool: 'synoshutdown' is NOT installed"
 expect "What happens on power loss"
@@ -842,7 +843,6 @@ YAML
   set -e
   cat /tmp/test70-$u-check.log
   for line in "Shell $u: SSH as $u@localhost works" \
-              "Shell $u: 'shutdown' is installed" \
               "Shell $u: sudo allows 'shutdown -h now' without a password" \
               "Shell $u: 'eneru-path-probe' is installed"; do
     grep -qF -- "$line" /tmp/test70-$u-check.log || {
@@ -873,6 +873,200 @@ done
 docker exec eneru-e2e-ssh rm -f /var/run/shutdown-triggered /tmp/shutdown-invoked \
   /tmp/eneru-path-augmented /tmp/eneru-shell-zshuser /tmp/eneru-shell-tcshuser
 echo "PASS: config check and remote shutdown work under zsh and tcsh login shells"
+)
+
+# ======================================================================
+# Test 72: FreeBSD-style sudo shutdown commands (issue #128)
+# ======================================================================
+# FreeBSD's /sbin/shutdown is runnable by root and the operator group only:
+# like a fire extinguisher in a cabinet only the manager can open, asking
+# "can the SSH user run it?" says "missing" although sudo can. config check
+# must ask sudo (`sudo -n -l`). A command ending in `&` that keeps its output
+# attached holds the SSH session open, so config check warns about it, and a
+# trailing `&` is not "a second command".
+(
+echo ""
+echo ">>> Running: Test 72: FreeBSD-style sudo shutdown commands (issue #128)"
+
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-rootonly-ran
+SSH_OPTS='["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]'
+cat >/tmp/config-e2e-128-sudo.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Root Only"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo /usr/local/sbin/eneru-rootonly-shutdown"
+    ssh_options: $SSH_OPTS
+  - name: "Missing"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo /usr/local/sbin/eneru-not-here"
+    ssh_options: $SSH_OPTS
+  - name: "Background"
+    enabled: true
+    host: "localhost"
+    user: "testuser"
+    shutdown_command: "sudo /usr/local/sbin/eneru-rootonly-shutdown &"
+    ssh_options: $SSH_OPTS
+YAML
+
+set +e
+eneru config check --config /tmp/config-e2e-128-sudo.yaml >/tmp/test72-check.log 2>&1
+rc=$?
+set -e
+cat /tmp/test72-check.log
+if [ "$rc" -ne 1 ]; then
+  echo "FAIL: config check should exit 1 for the missing command (got $rc)"; exit 1
+fi
+for line in "Root Only: sudo allows '/usr/local/sbin/eneru-rootonly-shutdown' without a password" \
+            "Missing: '/usr/local/sbin/eneru-not-here' is NOT installed" \
+            "Background: 'sudo /usr/local/sbin/eneru-rootonly-shutdown &' runs in the background but keeps the SSH session's output open"; do
+  grep -qF -- "$line" /tmp/test72-check.log || {
+    echo "FAIL: config check is missing: $line"; exit 1; }
+done
+for bad in "Root Only: '/usr/local/sbin/eneru-rootonly-shutdown' is NOT installed" \
+           "Background: 'sudo /usr/local/sbin/eneru-rootonly-shutdown &': only its first command runs under sudo"; do
+  if grep -qF -- "$bad" /tmp/test72-check.log; then
+    echo "FAIL: config check reported: $bad"; exit 1
+  fi
+done
+# config check never runs the shutdown command itself.
+if docker exec eneru-e2e-ssh test -e /tmp/eneru-rootonly-ran; then
+  echo "FAIL: config check ran the root-only shutdown"; exit 1
+fi
+
+set +e
+timeout 60s eneru shutdown remote --config /tmp/config-e2e-128-sudo.yaml \
+  --server "Root Only" --i-really-want-to-proceed-with-remote-shutdown \
+  >/tmp/test72-rootonly.log 2>&1
+rc=$?
+set -e
+cat /tmp/test72-rootonly.log
+[ "$rc" -eq 0 ] || { echo "FAIL: Root Only shutdown exited $rc"; exit 1; }
+docker exec eneru-e2e-ssh test -e /tmp/eneru-rootonly-ran || {
+  echo "FAIL: the root-only shutdown did not run through sudo"; exit 1; }
+
+docker exec eneru-e2e-ssh rm -f /tmp/eneru-rootonly-ran
+echo "PASS: root-only sudo binaries pass config check and run; backgrounding is flagged"
+)
+
+# ======================================================================
+# Test 73: shell-less remotes get commands verbatim (issue #128)
+# ======================================================================
+# Some remotes have no POSIX shell at all (MikroTik RouterOS, Cisco, Junos):
+# like slipping a typed note under a door that only takes spoken words, the
+# `sh -c` wrapper made RouterOS reject the whole line, so the switch never
+# got its command. posix_shell: auto must detect that and send the command
+# byte-for-byte; posix_shell: false does it without asking.
+(
+echo ""
+echo ">>> Running: Test 73: shell-less remotes get commands verbatim (issue #128)"
+
+docker exec eneru-e2e-ssh sh -c '
+  id routeros >/dev/null 2>&1 || adduser -D -s /usr/local/bin/fake-routeros routeros
+  echo "routeros:$(head -c 12 /dev/urandom | od -An -tx1 | tr -d " \n")" | chpasswd >/dev/null
+  mkdir -p /home/routeros/.ssh
+  cp /home/testuser/.ssh/authorized_keys /home/routeros/.ssh/authorized_keys
+  chown -R routeros:routeros /home/routeros/.ssh
+  chmod 700 /home/routeros/.ssh; chmod 600 /home/routeros/.ssh/authorized_keys
+  rm -f /tmp/routeros-received
+'
+
+ROS_CMD='/system scheduler add name="delayed-shutdown" start-time=( [/system clock get time] + 00:03:00 ) interval=0s on-event="/system schedule remove delayed-shutdown;/system shutdown"'
+SSH_OPTS='["-o Port=2222", "-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null", "-o IdentityFile=/tmp/e2e-ssh-key"]'
+cat >/tmp/config-e2e-128.yaml <<YAML
+ups:
+  name: "TestUPS@localhost:3493"
+behavior:
+  dry_run: false
+local_shutdown:
+  enabled: false
+remote_servers:
+  - name: "Switch Auto"
+    enabled: true
+    host: "localhost"
+    user: "routeros"
+    shutdown_command: '$ROS_CMD'
+    ssh_options: $SSH_OPTS
+  - name: "Switch Fixed"
+    enabled: true
+    host: "localhost"
+    user: "routeros"
+    posix_shell: false
+    probe_command: ":put eneru-ok"
+    probe_expect: "eneru-ok"
+    shutdown_command: '$ROS_CMD'
+    ssh_options: $SSH_OPTS
+  - name: "Switch Typo"
+    enabled: true
+    host: "localhost"
+    user: "routeros"
+    posix_shell: false
+    probe_command: ":putt eneru-ok"
+    probe_expect: "eneru-ok"
+    shutdown_command: '$ROS_CMD'
+    ssh_options: $SSH_OPTS
+YAML
+
+set +e
+eneru config check --config /tmp/config-e2e-128.yaml >/tmp/test73-check.log 2>&1
+rc=$?
+set -e
+cat /tmp/test73-check.log
+# The typo'd probe is an ERROR, so config check must exit 1.
+if [ "$rc" -ne 1 ]; then
+  echo "FAIL: config check should exit 1 for the typo'd probe (got $rc)"; exit 1
+fi
+for line in "Switch Auto: SSH as routeros@localhost works" \
+            "Switch Auto: no POSIX shell (detected): shutdown_command is sent exactly as written and was not checked" \
+            "Switch Fixed: SSH as routeros@localhost works" \
+            "Switch Fixed: no POSIX shell (configured): shutdown_command is sent exactly as written and was not checked" \
+            "Switch Typo: probe_command ':putt eneru-ok': probe output did not contain 'eneru-ok'"; do
+  grep -qF -- "$line" /tmp/test73-check.log || {
+    echo "FAIL: config check is missing: $line"; exit 1; }
+done
+if grep -qF -- "Switch Auto: the command checks did not run" /tmp/test73-check.log; then
+  echo "FAIL: config check ran its sh script against the shell-less switch"; exit 1
+fi
+# config check probes; it never sends the shutdown command itself.
+if docker exec eneru-e2e-ssh grep -qxF -- "$ROS_CMD" /tmp/routeros-received; then
+  echo "FAIL: config check sent the RouterOS shutdown command"; exit 1
+fi
+docker exec eneru-e2e-ssh grep -qxF ":put eneru-ok" /tmp/routeros-received || {
+  echo "FAIL: the per-server probe_command was not used"; exit 1; }
+
+for name in "Switch Auto" "Switch Fixed"; do
+  docker exec eneru-e2e-ssh rm -f /tmp/routeros-received
+  set +e
+  timeout 60s eneru shutdown remote --config /tmp/config-e2e-128.yaml \
+    --server "$name" --i-really-want-to-proceed-with-remote-shutdown \
+    >/tmp/test73-shutdown.log 2>&1
+  rc=$?
+  set -e
+  cat /tmp/test73-shutdown.log
+  [ "$rc" -eq 0 ] || { echo "FAIL: remote shutdown of $name exited $rc"; exit 1; }
+  grep -qF "Remote shell: no POSIX shell" /tmp/test73-shutdown.log || {
+    echo "FAIL: drill did not report the shell mode for $name"; exit 1; }
+  grep -qF "Sending shutdown command (as written: no POSIX shell)" /tmp/test73-shutdown.log || {
+    echo "FAIL: $name was not sent verbatim"; exit 1; }
+  # The exact bytes, quotes, brackets and ';' included, reached the device.
+  docker exec eneru-e2e-ssh grep -qxF -- "$ROS_CMD" /tmp/routeros-received || {
+    echo "FAIL: $name did not receive the command byte-for-byte"; exit 1; }
+  if docker exec eneru-e2e-ssh grep -qF "export PATH" /tmp/routeros-received; then
+    echo "FAIL: $name received the POSIX PATH wrapper"; exit 1
+  fi
+done
+
+docker exec eneru-e2e-ssh rm -f /tmp/routeros-received
+echo "PASS: shell-less remotes get their command byte-for-byte"
 )
 
 echo ""

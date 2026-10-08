@@ -154,7 +154,7 @@ SUPPRESSIBLE_EVENTS = (
     "POWER_RESTORED", "VOLTAGE_NORMALIZED", "AVR_BOOST_ACTIVE",
     "AVR_TRIM_ACTIVE", "AVR_INACTIVE", "BYPASS_MODE_INACTIVE",
     "OVERLOAD_RESOLVED", "CONNECTION_RESTORED", "VOLTAGE_AUTODETECT_MISMATCH",
-    "VOLTAGE_FLAP_SUPPRESSED",
+    "VOLTAGE_FLAP_SUPPRESSED", "BATTERY_CHARGE_ANOMALY",
 )
 REPORT_FIELDS = ("events", "battery_health", "self_tests", "energy", "uptime")
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
@@ -236,6 +236,13 @@ TRIGGERS_SECTION = Section(
                            "may trigger (the first minute is noisy).",
                            _d(_DEP, "grace_period"), minimum=0),
                 )),
+        Option("trust_battery_charge", "bool",
+               "Off: this UPS's battery.charge reading can't be believed, so "
+               "the low-battery and depletion-rate triggers are skipped. "
+               "Runtime, time on battery, failed self-test, FSD and a lost "
+               "connection still apply. Requires extended_time to be "
+               "enabled.",
+               _d(_TRG, "trust_battery_charge")),
         Section("extended_time", "Time on battery",
                 "A wall-clock safety net: shut down after being on battery "
                 "for a fixed time, whatever the battery reports.",
@@ -421,6 +428,25 @@ REMOTE_SERVER_SECTION = Section(
         ListSection("pre_shutdown_commands", "Pre-shutdown steps",
                     "Steps run on this server, in order, before the shutdown "
                     "command.", PRE_SHUTDOWN_SECTION, tier=BASIC),
+        Option("posix_shell", "tristate",
+               "Does this machine run commands through a Unix shell? auto = "
+               "Eneru asks it over SSH once (recommended). false = a router, "
+               "switch or Windows box with no POSIX shell (MikroTik RouterOS, "
+               "Cisco, Juniper): shutdown_command is sent exactly as written, "
+               "with no sudo or pre-shutdown steps. true = skip the check.",
+               _d(_RS, "posix_shell"), nullable=True),
+        Option("probe_command", "str",
+               "Harmless health-check command for this server only, replacing "
+               "remote_health.probe_command. Use the device's own no-op on a "
+               "router CLI. Empty = the global probe (shell-less devices: "
+               "\"does it answer over SSH\").",
+               _d(_RS, "probe_command"), nullable=True, example=":put eneru-ok"),
+        Option("probe_expect", "str",
+               "Only with probe_command, and only for a device whose CLI can "
+               "report a failed command as success (RouterOS does): text the "
+               "probe's standard output must contain, so a typo'd probe reads as "
+               "failed instead of flapping. Empty = exit 0 is enough.",
+               _d(_RS, "probe_expect"), nullable=True, example="eneru-ok"),
         Option("connect_timeout", "int",
                "Seconds to wait for the SSH connection.",
                _d(_RS, "connect_timeout"), minimum=1),

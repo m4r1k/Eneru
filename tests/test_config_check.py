@@ -474,6 +474,21 @@ class TestProbeUps:
         out, _ = self.probe(env, {"ups": {"name": "bob@h"}}, fake_run(listing=""))
         assert "available: none" in out[0].message
 
+    def test_untrusted_charge_hints(self, env):
+        """trust_battery_charge: false -> no missing-charge warning, and the
+        missing-runtime hint names only the triggers that are left."""
+        data = {"ups": {"name": "ups@h"},
+                "triggers": {"trust_battery_charge": False}}
+        out, _ = self.probe(env, data, fake_run(vars_="ups.status: OB\n"))
+        text = " ".join(f.message + " " + f.hint for f in out)
+        assert "does not report battery.charge" not in text
+        assert "only extended time, FSD and a lost connection remain" in text
+        out, _ = self.probe(env, {"ups": {"name": "ups@h"}},
+                            fake_run(vars_="ups.status: OB\n"))
+        text = " ".join(f.message + " " + f.hint for f in out)
+        assert "does not report battery.charge" in text
+        assert "charge, depletion and extended-time triggers still work" in text
+
     def test_vars_fail(self, env):
         out, _ = self.probe(env, {"ups": {"name": "ups@h"}}, fake_run(vars_code=1))
         assert out[-1].level == "error" and "var fail" in out[-1].message
@@ -557,7 +572,8 @@ class TestCommandChecks:
     def test_final_use_sudo_prefixes(self):
         checks, notes = cc.command_checks("shutdown -h now", True, final=True,
                                           user="bob")
-        assert self.kinds(checks) == [("exists", "shutdown"), ("sudo", "shutdown")]
+        # #128: through sudo, `sudo -n -l` alone proves presence + permission.
+        assert self.kinds(checks) == [("sudo", "shutdown")]
         assert notes == []
 
     def test_final_non_root_without_sudo_note(self):
@@ -571,11 +587,11 @@ class TestCommandChecks:
     def test_custom_command_use_sudo_applies(self):
         # 6.2: use_sudo prefixes custom commands too, like the runtime.
         checks, notes = cc.command_checks("systemctl stop foo", True)
-        assert self.kinds(checks) == [("exists", "systemctl"), ("sudo", "systemctl")]
+        assert self.kinds(checks) == [("sudo", "systemctl")]
         assert checks[-1].script == "sudo -n -l systemctl stop foo"
         assert notes == []
         checks, notes = cc.command_checks("sudo -n systemctl stop foo", True)
-        assert self.kinds(checks) == [("exists", "systemctl"), ("sudo", "systemctl")]
+        assert self.kinds(checks) == [("sudo", "systemctl")]
         assert notes == []
         checks, notes = cc.command_checks("systemctl stop foo", False)
         assert self.kinds(checks) == [("exists", "systemctl")]
@@ -644,6 +660,16 @@ def server(**kw):
                 shutdown_command="sudo shutdown -h now")
     base.update(kw)
     return RemoteServerConfig(**base)
+
+
+class TestProbeRemoteUnsafeProbe:
+    def test_unsafe_per_server_probe_is_a_config_error_not_ssh(self, env):
+        srv = server(probe_command="reboot")
+        out, rp = TestProbeRemote().run_probe(env, srv)
+        text = " ".join(f.message + " " + f.hint for f in out)
+        assert "probe_command 'reboot': unsafe probe_command rejected" in text
+        assert "SSH to" not in text and "Nothing was sent" in text
+        rp.assert_not_called()
 
 
 class TestProbeRemote:
@@ -740,7 +766,8 @@ class TestProbeRemote:
             lines = []
             for i, c in enumerate(checks):
                 if c.binary == "synoshutdown":
-                    lines.append(f"__ENERU_CHECK__ {i} 1 ")  # missing -> mute sudo
+                    lines.append(f"__ENERU_CHECK__ {i} 1 sudo: synoshutdown: "
+                                 "command not found")
                 elif c.kind == "run":
                     lines.append(f"__ENERU_CHECK__ {i} 1 error: failed to connect")
                 elif c.kind == "sudo":
@@ -768,7 +795,7 @@ class TestProbeRemote:
 
     def test_missing_result_row(self, env):
         out, _ = self.run_probe(env, server(),
-                                script_out=lambda c: (0, "__ENERU_CHECK__ 0 0 x", ""))
+                                script_out=lambda c: (0, "__ENERU_CHECK__ 9 0 x", ""))
         assert "(no result)" in joined(out)
 
     def test_script_did_not_run(self, env):
@@ -1645,10 +1672,19 @@ class TestCubicRound:
 
 
 class TestQuoteAwareCommands:
+    def test_quoted_redirect_is_an_argument(self):
+        # A quoted or escaped `>` is data: sudoers rules may pin it.
+        assert cc.command_binary("sudo tool '>' file") == \
+            ("tool", True, [">", "file"])
+        assert cc.command_binary("sudo tool \\> file") == \
+            ("tool", True, [">", "file"])
+        assert cc.command_binary("sudo tool \"a|b\" > out") == \
+            ("tool", True, ["a|b"])
+
     def test_quoted_operators_stay_in_the_argument(self):
         assert cc.command_binary("sudo -n sh -c 'a; b'") == ("sh", True, ["-c", "a; b"])
         checks, notes = cc.command_checks("sudo -n sh -c 'systemctl stop a; systemctl stop b'", True)
-        assert [c.kind for c in checks] == ["exists", "sudo"]
+        assert [c.kind for c in checks] == ["sudo"]
         assert not [n for n in notes if "first command" in n]
 
     def test_unquoted_operator_ends_the_first_command(self):
@@ -1924,3 +1960,183 @@ class TestGroupIReviewFixes:
     def test_parse_remote_output_ignores_unmarked_lines(self):
         text = (f"junk 0 0 ok\n7 1 fake\n{cc._REMOTE_MARKER} 1 0 real\n")
         assert cc.parse_remote_output(text) == {1: (0, "real")}
+
+
+class TestIssue128SudoPresence:
+    """#128: FreeBSD's /sbin/shutdown is root:operator 4554, so `command -v`
+    as the SSH user fails although sudo can run it. Through sudo, only the
+    `sudo -n -l` answer decides presence."""
+
+    def test_sudo_command_has_no_user_path_check(self):
+        checks, _ = cc.command_checks("sudo /sbin/shutdown -h +3", False,
+                                      final=True, user="bob")
+        assert [(c.kind, c.binary) for c in checks] == [("sudo", "/sbin/shutdown")]
+
+    def test_plain_command_keeps_command_v(self):
+        checks, _ = cc.command_checks("/sbin/shutdown -h now", False)
+        assert [c.kind for c in checks] == ["exists"]
+        assert checks[0].script == "command -v /sbin/shutdown"
+
+    def test_freebsd_operator_binary_passes(self, env):
+        srv = server(shutdown_command="sudo /sbin/shutdown -h +3")
+        out, _ = TestProbeRemote().run_probe(env, srv)
+        text = joined(out)
+        assert "NOT installed" not in text
+        assert "sudo allows '/sbin/shutdown -h +3' without a password" in text
+
+    def test_sudo_command_not_found_is_reported_missing(self, env):
+        srv = server(shutdown_command="sudo /sbin/nope -h now")
+
+        def script_out(checks):
+            return 0, ("__ENERU_CHECK__ 0 1 sudo: /sbin/nope: command not found"), ""
+        out, _ = TestProbeRemote().run_probe(env, srv, script_out=script_out)
+        errors = [f for f in out if f.level == "error"]
+        assert len(errors) == 1
+        assert "'/sbin/nope' is NOT installed (sudo: /sbin/nope: command not found)" \
+            in errors[0].message
+        assert "secure_path" in errors[0].hint
+        assert "refuses" not in errors[0].message
+
+    def test_missing_sudo_is_not_blamed_on_the_binary(self, env):
+        srv = server(shutdown_command="sudo /sbin/shutdown -h now")
+        out, _ = TestProbeRemote().run_probe(env, srv, script_out=lambda c: (
+            0, "__ENERU_CHECK__ 0 127 sh: line 1: sudo: command not found", ""))
+        text = joined(out)
+        assert "sudo is not installed (sh: line 1: sudo: command not found)" in text
+        assert "NOT installed" not in text
+
+    def test_missing_action_binary_mutes_its_sudo_row(self, env):
+        # Action templates keep `command -v` + `sudo -n -l` for the same
+        # binary; a missing binary is one red line, not two.
+        srv = server(use_sudo=True, shutdown_command="poweroff",
+                     pre_shutdown_commands=[RemoteCommandConfig(
+                         action="unmount_filesystems", mounts=["/mnt/data"])])
+
+        def script_out(checks):
+            return 0, "\n".join(
+                f"__ENERU_CHECK__ {i} {1 if c.binary == 'umount' else 0} "
+                for i, c in enumerate(checks)), ""
+        out, _ = TestProbeRemote().run_probe(env, srv, script_out=script_out)
+        text = joined(out)
+        assert "'umount' is NOT installed" in text
+        assert "sudo allows 'umount" not in text
+        assert "sudo refuses it without a password: sudo allows 'umount" not in text
+
+
+
+class TestIssue128Backgrounding:
+    """#128: `cmd &` keeps the SSH session's output attached, so ssh waits
+    (measured on FreeBSD 15 with `shutdown -h +3 &`)."""
+
+    @pytest.mark.parametrize("command,expected", [
+        ("sudo /sbin/shutdown -h +3 &", True),
+        ("sudo /sbin/shutdown -h +3 2>&1 &", True),
+        ("sudo /sbin/shutdown -h +3 2>/dev/null &", True),
+        # stdout gone but stderr still attached: sshd waits for both.
+        ("sudo /sbin/shutdown -h +3 >/dev/null &", True),
+        # order matters: 2>&1 first copies the (still attached) stdout.
+        ("sudo /sbin/shutdown -h +3 2>&1 >/dev/null &", True),
+        ("sudo /sbin/shutdown -h +3 1>/dev/null 2>&1 &", False),
+        ("sudo /sbin/shutdown -h +3 >/dev/null 2>/dev/null &", False),
+        ("sudo /sbin/shutdown -h +3 &>/dev/null &", False),
+        # `>&-` closes stdout only; stderr still holds the session.
+        ("sudo /sbin/shutdown -h +3 >&- &", True),
+        ("sudo /sbin/shutdown -h +3 >&- 2>&- &", False),
+        ("sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &", False),
+        ("sudo shutdown -h +3 </dev/null >/dev/null 2>&1 &", False),
+        ("&", False),
+        ("sudo shutdown -h now", False),
+        # `a` runs in the background and keeps the session after `b` ends.
+        ("a & b", True),
+        ("a >/dev/null 2>&1 & b", False),
+        ("sh -c 'x &'", False),
+        ("echo 'unterminated &", False),
+        ("", False),
+    ])
+    def test_backgrounds_holding_output(self, command, expected):
+        assert cc.backgrounds_holding_output(command) is expected
+
+    @pytest.mark.parametrize("command,chained", [
+        ("a &", False), ("a ;", False), ("a & b", True), ("a; b", True),
+        ("a | b", True), ("a && b", True), ("a >x &", False),
+        ("a >& /dev/null < /dev/null &", False), ("a 2>&1 | b", True),
+    ])
+    def test_trailing_operator_chains_nothing(self, command, chained):
+        assert cc.first_command_tokens(command)[1] is chained
+
+    @pytest.mark.parametrize("command,args", [
+        # A number is a descriptor only when written against the operator.
+        ("sudo tool 123 >log", ["123"]),
+        ("sudo tool 123>log", []),
+        ("sudo tool 2>&1", []),
+        ("sudo tool x 1 2>/dev/null", ["x", "1"]),
+    ])
+    def test_numeric_arguments_survive_redirects(self, command, args):
+        assert cc.command_binary(command) == ("tool", True, args)
+
+    def test_unbalanced_quote_is_unparseable(self):
+        assert cc.first_command_tokens("a & 'unterminated") == (None, False)
+
+    @pytest.mark.parametrize("command", [
+        # The two fixes the background warning itself recommends.
+        "sudo /sbin/shutdown -p +3 >& /dev/null < /dev/null &",
+        "sudo /sbin/shutdown -p +3 </dev/null >/dev/null 2>&1 &",
+    ])
+    def test_recommended_redirects_are_clean(self, command):
+        checks, notes = cc.command_checks(command, False)
+        assert notes == []
+        assert checks[-1].script == "sudo -n -l /sbin/shutdown -p +3"
+        assert cc.command_binary(command) == ("/sbin/shutdown", True, ["-p", "+3"])
+
+    def test_trailing_ampersand_is_not_a_second_command(self):
+        _, notes = cc.command_checks("sudo /sbin/shutdown -h +3 &", False)
+        assert not [n for n in notes if "first command" in n]
+        assert [n for n in notes if "keeps the SSH session's output open" in n]
+
+    def test_background_note_is_a_warning(self, env):
+        out, _ = TestProbeRemote().run_probe(
+            env, server(shutdown_command="sudo /sbin/shutdown -h +3 &"))
+        warn = [f for f in out if "output open" in f.message]
+        assert warn and warn[0].level == cc.LEVEL_WARN
+        assert ">& /dev/null" in warn[0].message
+
+
+class TestIssue128ShellLess:
+    """#128: a remote without a POSIX shell (RouterOS) is not script-checked."""
+
+    def test_configured_shell_less_skips_the_script(self, env):
+        srv = server(posix_shell=False, user="admin",
+                     shutdown_command="/system shutdown")
+        run = MagicMock()
+        with patch("eneru.remote_health._posix_probe", return_value=(False, "", True)), \
+                patch.object(cc, "_run", run):
+            out = cc.probe_remote(Config(), srv)
+        run.assert_not_called()
+        text = joined(out)
+        assert "SSH as admin@10.0.0.2 works" in text
+        assert ("no POSIX shell (configured): shutdown_command is sent exactly "
+                "as written and was not checked") in text
+        assert not [f for f in out if f.level == "error"]
+
+    def test_detected_shell_less_flags_posix_only_settings(self, env):
+        srv = server(use_sudo=True, shutdown_command="/system shutdown",
+                     pre_shutdown_commands=[RemoteCommandConfig(command="x")])
+        run = MagicMock()
+        with patch("eneru.remote_health._posix_probe", return_value=(False, "", True)), \
+                patch.object(cc, "_run", run):
+            out = cc.probe_remote(Config(), srv)
+        run.assert_not_called()
+        errors = [f for f in out if f.level == "error"]
+        assert len(errors) == 1
+        assert ("no POSIX shell detected, but use_sudo and "
+                "pre_shutdown_commands need one") in errors[0].message
+        assert "posix_shell: false" in errors[0].hint
+
+    def test_detected_posix_runs_the_script(self, env):
+        srv = server()
+        with patch("eneru.remote_health._posix_probe", return_value=(True, "", True)), \
+                patch("eneru.remote_health.run_remote_probe",
+                      return_value=(True, "", 3)), \
+                patch.object(cc, "_run", return_value=(0, "", "")) as run:
+            cc.probe_remote(Config(), srv)
+        run.assert_called_once()

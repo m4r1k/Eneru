@@ -312,6 +312,7 @@ Allowed event names:
 | `CONNECTION_RESTORED` |
 | `VOLTAGE_AUTODETECT_MISMATCH` |
 | `VOLTAGE_FLAP_SUPPRESSED` |
+| `BATTERY_CHARGE_ANOMALY` |
 
 Safety-critical events cannot be suppressed. Validation rejects them:
 

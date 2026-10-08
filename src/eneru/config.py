@@ -69,6 +69,15 @@ class TriggersConfig:
     # (vs. dataclass default). Gates the v5.1.1→v5.1.2 migration warning
     # so users who've already chosen a preset don't get a recurring nag.
     voltage_sensitivity_explicit: bool = False
+    # False = this UPS's battery.charge can't be believed (a fuel gauge that
+    # drops from full to half in 90 s while the engine runs fine), so the two
+    # triggers that read it -- low battery (T1) and depletion rate (T3) -- are
+    # skipped. Runtime, time on battery, failed self-test, FSD and connection
+    # loss still apply. Validation refuses False unless extended_time is
+    # enabled: no switching off the gauge without setting a stopwatch.
+    # Last field on purpose: positional TriggersConfig(...) callers keep
+    # their argument order.
+    trust_battery_charge: bool = True
 
 
 VOLTAGE_SENSITIVITY_PRESETS: Dict[str, float] = {
@@ -360,6 +369,7 @@ SUPPRESSIBLE_EVENTS: frozenset = frozenset({
     "CONNECTION_RESTORED",
     "VOLTAGE_AUTODETECT_MISMATCH",
     "VOLTAGE_FLAP_SUPPRESSED",
+    "BATTERY_CHARGE_ANOMALY",
 })
 
 
@@ -458,6 +468,27 @@ class RemoteServerConfig:
     _is_host_loopback_explicit: bool = False
     host_identity_command: str = "cat /etc/machine-id"
     expected_host_identity: Optional[str] = None
+    # Issue #128. ELI5: some doors have no lock to turn (RouterOS, Cisco,
+    # Junos, Windows cmd.exe have no POSIX shell), so wrapping the command in
+    # `sh -c` makes them reject it whole. None = auto-detect over SSH (keeps
+    # the POSIX wrapper until a device proves it has no shell); True = POSIX;
+    # False = send shutdown_command exactly as written, nothing added.
+    posix_shell: Optional[bool] = None
+    # Per-server health probe, overriding remote_health.probe_command (whose
+    # default `true` is not a command on a router CLI; e.g. `:put ok`).
+    probe_command: Optional[str] = None
+    # Text the probe_command's standard output must contain (on top of exit
+    # 0), for a CLI whose exit code can't be trusted: RouterOS can exit 0 for
+    # a failed command, so a typo'd probe would otherwise flap between healthy
+    # and failed (measured: healthy 1 run in 10).
+    probe_expect: Optional[str] = None
+    # Runtime cache of the auto-detection result; never read from YAML.
+    _detected_posix: Optional[bool] = field(default=None, repr=False,
+                                            compare=False)
+    # Set once the shutdown path tried detection, so an unreachable host is
+    # not re-probed before every step of the same run.
+    _runtime_detect_tried: bool = field(default=False, repr=False,
+                                        compare=False)
 
     def __post_init__(self):
         # Default remote host-key checking to accept-new. OpenSSH's own default
@@ -810,6 +841,9 @@ def _sch_number(minimum=None, maximum=None, *, optional=False):
 # next `.get` blows up. Unknown keys here are still swept by the hand-written
 # `_validate_triggers`, so this node does NOT sweep (avoids double-reporting).
 _TRIGGERS_SCHEMA = _sch_map(fatal=True, keys={
+    # A quoted "false" is a truthy str: it would silently keep trusting a
+    # lying charge gauge, so a non-bool is rejected like extended_time.enabled.
+    "trust_battery_charge": _SCH_BOOL,
     "depletion": _sch_map(fatal=True, keys={}),
     "extended_time": _sch_map(fatal=True, keys={"enabled": _SCH_BOOL}),  # F-002
 })
@@ -1383,6 +1417,8 @@ class ConfigLoader:
                 enabled=extended_data.get('enabled', defaults.extended_time.enabled),
                 threshold=extended_data.get('threshold', defaults.extended_time.threshold),
             ),
+            trust_battery_charge=triggers_data.get(
+                'trust_battery_charge', defaults.trust_battery_charge),
             voltage_sensitivity=sensitivity,
             voltage_sensitivity_explicit=sensitivity_explicit,
         )
@@ -1442,8 +1478,34 @@ class ConfigLoader:
                 host_identity_command=server_data.get(
                     'host_identity_command', 'cat /etc/machine-id'),
                 expected_host_identity=server_data.get('expected_host_identity'),
+                posix_shell=cls._parse_posix_shell(server_data.get('posix_shell')),
+                # An empty probe_command means unset, as in the editor; other
+                # values (0, false) reach validation untouched.
+                probe_command=(None if server_data.get('probe_command') == ""
+                               else server_data.get('probe_command')),
+                probe_expect=cls._parse_probe_expect(server_data.get('probe_expect')),
             ))
         return servers
+
+    @staticmethod
+    def _parse_probe_expect(value: Any) -> Any:
+        """Trim text (a stray trailing space would never match); empty = unset.
+
+        Non-text values pass through untouched so validation can reject them.
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @staticmethod
+    def _parse_posix_shell(value: Any) -> Any:
+        """``auto`` (any case) and unset both mean auto-detect (None).
+
+        Anything else passes through untouched so validation can reject it.
+        """
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            return None
+        return value
 
     @classmethod
     def _parse_containers_config(cls, containers_data: Dict[str, Any],
@@ -2154,6 +2216,7 @@ class ConfigLoader:
                 "on_battery_stabilization_delay",
                 "self_test_failure_shutdown_delay", "depletion",
                 "extended_time", "voltage_sensitivity",
+                "trust_battery_charge",
             }
             remote_server_keys = {
                 "name", "enabled", "host", "user", "connect_timeout",
@@ -2165,7 +2228,8 @@ class ConfigLoader:
                 "pre_shutdown_commands", "parallel",
                 "shutdown_order", "shutdown_safety_margin",
                 "is_host_loopback", "host_identity_command",
-                "expected_host_identity",
+                "expected_host_identity", "posix_shell", "probe_command",
+                "probe_expect",
             }
             pre_shutdown_keys = {"action", "command", "timeout", "path", "mounts",
                                  "use_sudo"}
@@ -2405,6 +2469,23 @@ class ConfigLoader:
                     messages.extend(cls._unknown_key_errors(
                         server_section, entry, remote_server_keys,
                     ))
+                    posix_raw = entry.get("posix_shell")
+                    if not (posix_raw is None or isinstance(posix_raw, bool)
+                            or (isinstance(posix_raw, str)
+                                and posix_raw.strip().lower() == "auto")):
+                        messages.append(
+                            f"ERROR: {server_section}.posix_shell must be "
+                            f"true, false or auto, got {posix_raw!r}"
+                        )
+                    if entry.get("augment_remote_path") is False:
+                        # The 6.1.7 opt-out users: 6.1.8 ignored it and their
+                        # shell-less remotes broke (issue #128).
+                        messages.append(
+                            f"WARNING: {server_section}.augment_remote_path is "
+                            "ignored since 6.1.8. For a device without a POSIX "
+                            "shell (router, switch, Windows) set "
+                            "posix_shell: false instead."
+                        )
                     ssh_options = entry.get("ssh_options")
                     if ssh_options is not None:
                         if not isinstance(ssh_options, list):
@@ -2785,6 +2866,19 @@ class ConfigLoader:
                     f"ERROR: {label}.triggers.extended_time.threshold must be a "
                     f"non-negative integer, got {t.extended_time.threshold!r}."
                 )
+            # Ignoring battery.charge switches off T1 and T3. With the
+            # time-on-battery trigger also off, only the UPS's own runtime
+            # estimate (often derived from the same lying gauge) would stand
+            # between the host and a dead battery. Refuse it.
+            if (t.trust_battery_charge is False
+                    and not t.extended_time.enabled):
+                messages.append(
+                    f"ERROR: {label}.triggers.trust_battery_charge is false but "
+                    "triggers.extended_time is disabled. Ignoring the charge "
+                    "reading switches off the low-battery and depletion "
+                    "triggers, so enable extended_time with a time budget "
+                    "(measured from a real battery run) as the safety net."
+                )
             # L2: relationship check -- a stabilization window >= the
             # critical-runtime threshold suppresses the runtime trigger for the
             # entire remaining runtime, so the host could die on battery before
@@ -3067,7 +3161,7 @@ class ConfigLoader:
                 for s in g.remote_servers:
                     yield g.name or "(unnamed)", s
         for owner, srv in _all_remote_servers():
-            if not srv.enabled:
+            if not srv.enabled or srv.posix_shell is False:
                 continue
             user = srv.user.strip().lower()
             if (
@@ -3084,7 +3178,9 @@ class ConfigLoader:
                     f"WARNING: remote_server '{where}' user is {srv.user!r} "
                     "but use_sudo is false. Non-root users typically need "
                     "use_sudo: true unless shutdown_command invokes sudo "
-                    "itself and no generated pre-shutdown actions are enabled."
+                    "itself and no generated pre-shutdown actions are enabled. "
+                    "For a router or switch without a POSIX shell, set "
+                    "posix_shell: false instead."
                 )
 
         # --- Redundancy-group validation (Phase 2) ---
@@ -3318,6 +3414,58 @@ class ConfigLoader:
                         f"ERROR: Remote server '{display}': is_host_loopback "
                         f"must be a boolean, got {server.is_host_loopback!r}"
                     )
+
+                if server.probe_command is not None:
+                    from eneru.remote_health import is_safe_probe_command
+                    if (not isinstance(server.probe_command, str)
+                            or not is_safe_probe_command(server.probe_command)):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': probe_command "
+                            "must be a harmless, non-empty probe without shell "
+                            "operators (e.g. ':put ok' on RouterOS), got "
+                            f"{server.probe_command!r}"
+                        )
+
+                if server.probe_expect is not None:
+                    if (not isinstance(server.probe_expect, str)
+                            or not server.probe_expect.strip()):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': probe_expect "
+                            "must be non-empty text, got "
+                            f"{server.probe_expect!r}"
+                        )
+                    elif not server.probe_command:
+                        messages.append(
+                            f"ERROR: Remote server '{display}': probe_expect "
+                            "needs a probe_command whose output it checks."
+                        )
+
+                # Issue #128: with no POSIX shell Eneru sends shutdown_command
+                # verbatim, so everything it would otherwise generate in sh
+                # (sudo prefix, action templates, the loopback's identity
+                # probe) cannot work there.
+                if server.posix_shell is False:
+                    for key, used in (
+                            ("is_host_loopback", server.is_host_loopback is True),
+                            ("use_sudo", server.use_sudo is True),
+                            ("pre_shutdown_commands",
+                             bool(server.pre_shutdown_commands))):
+                        if used:
+                            messages.append(
+                                f"ERROR: Remote server '{display}': "
+                                f"posix_shell: false cannot be combined with "
+                                f"{key}; it needs a POSIX shell on the remote."
+                            )
+                    command = server.shutdown_command
+                    if not isinstance(command, str) or command.strip() in (
+                            "", RemoteServerConfig.shutdown_command):
+                        messages.append(
+                            f"ERROR: Remote server '{display}': posix_shell: "
+                            "false needs an explicit shutdown_command in the "
+                            "device's own CLI syntax (the default "
+                            f"{RemoteServerConfig.shutdown_command!r} is a Unix "
+                            "command)."
+                        )
 
                 so = server.shutdown_order
                 so_valid = False

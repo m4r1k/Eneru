@@ -429,3 +429,8 @@ def test_every_numeric_bound_is_accepted_by_the_loader(path, opt, builder):
             continue
         errors = _loader_errors(_put(builder(), path, inside))
         assert errors == [], (path, inside, errors)
+
+
+def test_suppressible_events_match_the_validator():
+    """The editor's suppress choices must be exactly what validation accepts."""
+    assert set(cat.SUPPRESSIBLE_EVENTS) == set(C.SUPPRESSIBLE_EVENTS)
