@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Python 3.15 is officially supported.** CI now tests the 3.15.0 release
+  instead of the `3.15-dev` prerelease, the `validate (3.15)` check is required
+  before merging, and the package metadata lists Python 3.15.
+
 ## [6.2.2] - 2026-10-08
 
 ### Added

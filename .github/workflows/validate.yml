@@ -42,18 +42,17 @@ jobs:
       matrix:
         # Reduced matrix on PRs for fast/cheap feedback; full matrix on
         # push to main so a version-specific break is still caught before
-        # release. The span ends (3.9, 3.12) plus the prerelease (3.15-dev,
-        # allowed to fail) cover the common cases on PRs.
+        # release. The span ends (3.9, 3.15) plus 3.12 (the OCI image's
+        # Python, which also runs coverage/lint) cover the common cases on PRs.
         #
-        # OPERATOR ACTION when v6.1 merges: make ONLY the `3.9` and `3.12`
-        # validate checks required in branch protection. The other versions
+        # Branch protection requires ONLY the `3.9`, `3.12` and `3.15`
+        # validate checks. The other versions
         # run on push-to-main (and as non-required PR jobs) but must not be
         # listed as required checks, or PRs wedge on "expected, never
         # reported" for the versions a PR doesn't run. Tradeoff: a
         # 3.10/3.11/3.13/3.14-only break is caught at merge-to-main, not on
         # the PR.
-        python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.9","3.12","3.15-dev"]')) || fromJSON('["3.9","3.10","3.11","3.12","3.13","3.14","3.15-dev"]') }}
-    continue-on-error: ${{ matrix.python-version == '3.15-dev' }}
+        python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.9","3.12","3.15"]')) || fromJSON('["3.9","3.10","3.11","3.12","3.13","3.14","3.15"]') }}
 
     steps:
     - uses: actions/checkout@v7.0.1
@@ -62,7 +61,6 @@ jobs:
       uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
-        allow-prereleases: true
 
     - name: Install dependencies
       # ISS-043/044: one dependency source of truth. Install the `dev` extra
