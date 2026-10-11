@@ -151,9 +151,13 @@ class TestGracePeriodBehavior:
                 monitor._handle_connection_failure("Connection refused")
             mock_event.assert_not_called()
             assert monitor.state.connection_state == "GRACE_PERIOD"
-            # Genuine expiry on the monotonic clock still fires.
-            monitor.state.connection_lost_mono = time.monotonic() - 61
-            monitor._handle_connection_failure("Connection refused")
+            # Genuine expiry on the monotonic clock still fires. Advance the
+            # clock rather than rewinding the anchor: monotonic() is
+            # boot-relative, so `monotonic() - 61` goes negative (= "no
+            # grace") on a CI runner that booted < 61 s ago.
+            expired = monitor.state.connection_lost_mono + 61
+            with patch("eneru.monitor.time.monotonic", return_value=expired):
+                monitor._handle_connection_failure("Connection refused")
             assert mock_event.call_args[0][0] == "CONNECTION_LOST"
             assert monitor.state.connection_lost_mono == 0.0
 

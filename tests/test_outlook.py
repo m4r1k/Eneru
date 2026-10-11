@@ -1014,9 +1014,13 @@ def _read_state(path):
 
 class TestStateFileKeys:
     @pytest.mark.unit
-    def test_new_keys_and_seeded_sidecar(self, minimal_config, tmp_path):
+    def test_new_keys_and_seeded_sidecar(self, minimal_config, tmp_path,
+                                         monkeypatch):
         monitor = _parity_monitor(minimal_config, tmp_path)
-        monitor.state.on_battery_start_mono = time.monotonic() - 42
+        # Pin monotonic: it is boot-relative, so `monotonic() - N` can go
+        # negative (= "not on battery") on a freshly booted CI runner.
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
+        monitor.state.on_battery_start_mono = 5000.0 - 42
         monitor.state.on_battery_start_time = int(time.time()) - 42
         monitor.state.latest_depletion_rate = 1.5
         monitor.state.trigger_active = True

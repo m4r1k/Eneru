@@ -5277,8 +5277,11 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
-    def test_failed_test_triggers_only_after_later_ob_delay(self, tmp_path):
+    def test_failed_test_triggers_only_after_later_ob_delay(self, tmp_path, monkeypatch):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        # Pin monotonic: it is boot-relative, so `monotonic() - N` can go
+        # negative (= "not on battery") on a freshly booted CI runner.
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
         try:
             failed_at = time.time() - 100
             store.set_meta("self_test_failure_latched", str(failed_at))
@@ -5373,8 +5376,11 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
-    def test_failed_test_waits_and_ignores_same_test_ob(self, tmp_path):
+    def test_failed_test_waits_and_ignores_same_test_ob(self, tmp_path, monkeypatch):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        # Pin monotonic: it is boot-relative, so `monotonic() - N` can go
+        # negative (= "not on battery") on a freshly booted CI runner.
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
         try:
             monitor._trigger_immediate_shutdown = MagicMock()
             monitor.state.previous_status = "OB"
@@ -5402,8 +5408,11 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
-    def test_failed_attributed_test_reclassifies_continuing_ob(self, tmp_path):
+    def test_failed_attributed_test_reclassifies_continuing_ob(self, tmp_path, monkeypatch):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        # Pin monotonic: it is boot-relative, so `monotonic() - N` can go
+        # negative (= "not on battery") on a freshly booted CI runner.
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
         try:
             test_id = store.record_self_test(
                 "test.battery.start", "scheduler",
@@ -5443,8 +5452,11 @@ class TestSelfTestPowerContract:
             store.close()
 
     @pytest.mark.unit
-    def test_prior_failure_ignores_attributed_test_ob(self, tmp_path):
+    def test_prior_failure_ignores_attributed_test_ob(self, tmp_path, monkeypatch):
         monitor, store = self._monitor_with_store(tmp_path, delay=30)
+        # Pin monotonic: it is boot-relative, so `monotonic() - N` can go
+        # negative (= "not on battery") on a freshly booted CI runner.
+        monkeypatch.setattr("eneru.monitor.time.monotonic", lambda: 5000.0)
         try:
             store.set_meta("self_test_failure_latched", str(time.time() - 100))
             store.set_meta("self_test_failure_outage_start", "")
