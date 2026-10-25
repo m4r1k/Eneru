@@ -297,13 +297,21 @@ apply_scenario online-charging
 # Generous timeout: this test does login + two reloads + a bad reload, each with
 # its own poll budget. Too short a timeout kills the daemon mid-test.
 PYTHONUNBUFFERED=1 timeout 60s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
-DAEMON_PID=$!
-trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+TIMEOUT_PID=$!
+trap 'kill "$TIMEOUT_PID" 2>/dev/null || true' EXIT
 
 for _ in $(seq 1 20); do
   curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
   sleep 0.5
 done
+
+# Signal eneru itself, never the `timeout` wrapper. Ubuntu 26.04's uutils
+# timeout relays one signal, then waits on the child with no deadline and
+# signals blocked, so a later SIGTERM to the wrapper is never delivered and
+# `wait` hangs forever. GNU timeout keeps relaying, so 24.04 never showed it.
+DAEMON_PID=$(pgrep -P "$TIMEOUT_PID" | head -n1)
+[ -n "$DAEMON_PID" ] || { echo "FAIL: eneru child of timeout not found"; cat /tmp/test54-daemon.log; exit 1; }
+trap 'kill "$DAEMON_PID" "$TIMEOUT_PID" 2>/dev/null || true' EXIT
 
 # Edit the threshold, then SIGHUP -> the daemon applies it live and logs it.
 write_cfg 55
@@ -354,7 +362,7 @@ curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
   || { echo "FAIL: daemon died on bad reload"; cat /tmp/test54-daemon.log; exit 1; }
 
 kill "$DAEMON_PID" 2>/dev/null || true
-wait "$DAEMON_PID" 2>/dev/null || true
+wait "$TIMEOUT_PID" 2>/dev/null || true
 trap - EXIT
 echo "PASS: config hot-reload via SIGHUP and API verified"
 )
