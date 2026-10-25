@@ -79,7 +79,9 @@ jobs:
 
   # Test pip installation across Python versions
   test-pip-install:
-    runs-on: ubuntu-latest
+    # Python 3.9 is EOL and actions/python-versions never built it for
+    # Ubuntu 26.04 (the new ubuntu-latest), so keep 3.9 on 24.04.
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
