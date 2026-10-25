@@ -296,14 +296,22 @@ write_cfg 20
 apply_scenario online-charging
 # Generous timeout: this test does login + two reloads + a bad reload, each with
 # its own poll budget. Too short a timeout kills the daemon mid-test.
-PYTHONFAULTHANDLER=1 PYTHONUNBUFFERED=1 timeout 60s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
-DAEMON_PID=$!
-trap 'kill "$DAEMON_PID" 2>/dev/null || true' EXIT
+PYTHONUNBUFFERED=1 timeout 60s eneru run --config "$CFG" > /tmp/test54-daemon.log 2>&1 &
+TIMEOUT_PID=$!
+trap 'kill "$TIMEOUT_PID" 2>/dev/null || true' EXIT
 
 for _ in $(seq 1 20); do
   curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 && break
   sleep 0.5
 done
+
+# Signal eneru itself, never the `timeout` wrapper. Ubuntu 26.04's uutils
+# timeout relays one signal, then waits on the child with no deadline and
+# signals blocked, so a later SIGTERM to the wrapper is never delivered and
+# `wait` hangs forever. GNU timeout keeps relaying, so 24.04 never showed it.
+DAEMON_PID=$(pgrep -P "$TIMEOUT_PID" | head -n1)
+[ -n "$DAEMON_PID" ] || { echo "FAIL: eneru child of timeout not found"; cat /tmp/test54-daemon.log; exit 1; }
+trap 'kill "$DAEMON_PID" "$TIMEOUT_PID" 2>/dev/null || true' EXIT
 
 # Edit the threshold, then SIGHUP -> the daemon applies it live and logs it.
 write_cfg 55
@@ -320,29 +328,11 @@ grep -Eq "Config reloaded; applied live: .*triggers:TestUPS@localhost:3493" /tmp
   || { echo "FAIL: triggers not applied"; cat /tmp/test54-daemon.log; exit 1; }
 echo "PASS: SIGHUP applied the threshold change live"
 
-# DIAG (temporary, ubuntu-26.04 hang): show process state, then dump every
-# Python thread stack via faulthandler (SIGABRT) into the daemon log.
-t54_diag() {
-  echo "=== DIAG: $1 ==="
-  timeout --version 2>&1 | head -1 || true
-  ps -eo pid,ppid,pgid,stat,wchan:24,etime,cmd | grep -E 'eneru|timeout' | grep -v grep || true
-  ss -ltnp 2>/dev/null | grep 9100 || true
-  cat /tmp/test54-daemon.log
-  for p in $(pgrep -f "eneru run --config $CFG" || true); do kill -ABRT "$p" 2>/dev/null || true; done
-  sleep 2
-  echo "=== DIAG: daemon log after SIGABRT ==="
-  cat /tmp/test54-daemon.log
-}
-timeout --version 2>&1 | head -1 || true
-curl -sS --max-time 15 -o /dev/null -w 'DIAG: /health after SIGHUP -> %{http_code}\n' \
-  http://127.0.0.1:9100/health || { t54_diag "health hung after SIGHUP"; exit 1; }
-
 # API reload endpoint (authenticated) returns a report.
-TOKEN=$(curl -fsS --max-time 15 -X POST -H 'Content-Type: application/json' \
+TOKEN=$(curl -fsS -X POST -H 'Content-Type: application/json' \
   -d '{"username":"operator","password":"s3cret-pw-long"}' \
   http://127.0.0.1:9100/api/v1/auth/login \
-  | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])") \
-  || { t54_diag "login after SIGHUP failed or hung"; exit 1; }
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
 write_cfg 60
 RELOAD_HTTP=$(curl -sS -o /tmp/test54-reload.json -w '%{http_code}' \
   -X POST -H "Authorization: Bearer $TOKEN" \
@@ -372,7 +362,7 @@ curl -fsS http://127.0.0.1:9100/health >/dev/null 2>&1 \
   || { echo "FAIL: daemon died on bad reload"; cat /tmp/test54-daemon.log; exit 1; }
 
 kill "$DAEMON_PID" 2>/dev/null || true
-wait "$DAEMON_PID" 2>/dev/null || true
+wait "$TIMEOUT_PID" 2>/dev/null || true
 trap - EXIT
 echo "PASS: config hot-reload via SIGHUP and API verified"
 )
