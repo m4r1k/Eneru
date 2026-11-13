@@ -2442,12 +2442,11 @@ function eventTipNode(e) {
   return kids;
 }
 
-// Append one event marker (vertical guide + dot) wrapped in a focusable <g>,
-// plus a wide transparent hit line, so hovering/focusing anywhere along the
-// guide shows the tooltip (the bare 3px dot was nearly impossible to hit). The
-// tooltip is the instant themed tip (the old native <title> only appeared after
-// a ~1s delay and looked like a plain OS tooltip). `e` carries the event; cls is
-// the color class.
+// Append one event marker (vertical guide + pin) wrapped in a Tab-focusable <g>
+// with a full-height bounding line (.ev-hit). Pointer hover goes through
+// .chart-hit (see addChartHover + matchChartOverlays, #137), while bindTip keeps
+// the instant themed tooltip wired for keyboard focus/blur. `e` carries the
+// event; cls is the color class.
 function appendEventMarker(svg, e, ex, top, bottom) {
   const cls = eventMarkerClass(e.eventType || e.event);
   const x = parseFloat(ex), yTop = parseFloat(top), yBot = parseFloat(bottom);

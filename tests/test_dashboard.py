@@ -1435,12 +1435,29 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
     assert ".tip .tip-sep" in css
     assert "g.is-hover .ev-line" in css and "g:focus .ev-line" in css
 
+    # Verify both chart renderers wire overlays BEFORE addChartHover so
+    # .chart-hit sits above .outage-band and .ev-marker in SVG paint order, and
+    # drawEnergyChart forwards padR to addChartHover.
+    draw_chart_src = js[js.index("function drawChart"):
+                        js.index("// Show/clear the")]
+    assert (draw_chart_src.index("appendOutageBands(")
+            < draw_chart_src.index("appendEventMarker(")
+            < draw_chart_src.index("addChartHover("))
+    draw_energy_src = js[js.index("function drawEnergyChart"):
+                         js.index("// A compact single-series line plot")]
+    assert (draw_energy_src.index("appendOutageBands(")
+            < draw_energy_src.index("appendEventMarker(")
+            < draw_energy_src.index("addChartHover("))
+    assert "padR, readout" in draw_energy_src
+
+    bind_src = js[js.index("function bindTip"):
+                  js.index("function helpHint")]
     nut_src = js[js.index("function nutStatusTokens"):
                  js.index("function powerStateSignature")]
-    ev_tip_src = js[js.index("function eventTipNode"):
-                    js.index("function appendEventMarker")]
-    out_tip_src = js[js.index("function outageTipNode"):
-                     js.index("const MIN_OUTAGE_PX")]
+    ev_src = js[js.index("function eventMarkerClass"):
+                js.index("function isVoltageMetric")]
+    out_src = js[js.index("function fmtOutageDur"):
+                 js.index("// Per-instance chart")]
     hover_src = js[js.index("const EVENT_HIT_PX"):
                    js.index("// ---- shared chart helpers")]
 
@@ -1467,10 +1484,13 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
                 getAttribute(k) { return attrs[k] || ""; },
                 appendChild(c) { this.children.push(c); return c; },
                 addEventListener(type, fn) { listeners[type] = fn; },
-                getBoundingClientRect() { return { left: 0, width: 500 }; },
+                getBoundingClientRect() { return { left: 0, bottom: 180, width: 500 }; },
               };
             }
-            const document = { createElementNS: (_ns, tag) => makeNode(tag) };
+            const document = {
+              createElementNS: (_ns, tag) => makeNode(tag),
+              getElementById: () => null,
+            };
             function el(tag, opts, children) {
               return { tag, opts: opts || {}, children: children || [] };
             }
@@ -1478,11 +1498,12 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
             function showTip(content, x, y, accent) {
               lastTip = { content, x, y, accent, hidden: false };
             }
+            function moveTip() {}
             function hideTip() {
               if (lastTip) lastTip.hidden = true;
             }
         """)
-        + nut_src + ev_tip_src + out_tip_src + hover_src
+        + bind_src + nut_src + ev_src + out_src + hover_src
         + textwrap.dedent("""
             const svg = makeNode("svg");
             const readout = makeNode("text");
@@ -1497,26 +1518,17 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
             ];
             const x = (t) => t;
             const y = (v) => 200 - v;
-            const cutNode = makeNode("g");
-            const restoreNode = makeNode("g");
-            const markers = [
-              {
-                x: 150, cls: "ev-crit", node: cutNode,
-                event: { ts: 150, eventType: "ON_BATTERY",
-                         detail: "Battery: 95% (Status: OB DISCHRG)" },
-              },
-              {
-                x: 350, cls: "ev-ok", node: restoreNode,
-                event: { ts: 350, eventType: "POWER_RESTORED",
-                         detail: "Utility back (Status: OL CHRG)" },
-              },
+            const events = [
+              { ts: 150, eventType: "ON_BATTERY",
+                detail: "Battery: 95% (Status: OB DISCHRG)" },
+              { ts: 350, eventType: "POWER_RESTORED",
+                detail: "Utility back (Status: OL CHRG)" },
             ];
-            const outages = [{
-              left: 150, right: 350, head: "Outage · 3m 20s",
-              span: { start: 150, end: 350,
-                      cut: markers[0].event, restore: markers[1].event,
-                      endedAtBoundary: false },
-            }];
+            const outages = appendOutageBands(svg, events, x, 100, 400, 5, 186);
+            const markers = events.map((e) =>
+              appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, "186.0"));
+            const cutNode = markers[0].node;
+            const restoreNode = markers[1].node;
             const cross = addChartHover(
               svg,
               { x, W: 500, H: 220, pad: 34, padR: 40, readout, band: false },
@@ -1524,7 +1536,9 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
                  valueAt: (p) => p.value, y, fmt: (v) => v + " %" }],
               { markers, outages },
             );
+            const childClasses = svg.children.map((c) => c.attrs.class);
             const hit = svg.children.find((c) => c.attrs.class === "chart-hit");
+            const outageNode = svg.children.find((c) => c.attrs.class === "outage-band");
             const tipTexts = () => (lastTip && !lastTip.hidden)
               ? lastTip.content.map((n) => n.opts.text || ("<" + n.opts.class + ">"))
               : [];
@@ -1571,9 +1585,22 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
               crossHidden: cross.style.display === "none",
             };
 
+            // 6) Keyboard Tab focus/blur on both .ev-marker and .outage-band
+            //    still summons and dismisses the themed tooltip via bindTip.
+            cutNode.listeners.focus();
+            const markerFocusTexts = tipTexts();
+            cutNode.listeners.blur();
+            const markerBlurHidden = lastTip.hidden;
+            outageNode.listeners.focus();
+            const outageFocusTexts = tipTexts();
+            outageNode.listeners.blur();
+            const outageBlurHidden = lastTip.hidden;
+
             process.stdout.write(JSON.stringify({
               hitWidth: hit.attrs.width,
+              childClasses,
               plain, inOutage, onMarker, onGapInOutage, afterLeave,
+              markerFocusTexts, markerBlurHidden, outageFocusTexts, outageBlurHidden,
             }));
         """)
     )
@@ -1583,6 +1610,9 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
 
     # Dual-axis padR (40) honored on .chart-hit width: 500 - 34 - 40 = 426.0
     assert data["hitWidth"] == "426.0"
+    # SVG paint order: outage band -> markers -> crosshair -> .chart-hit on top
+    assert data["childClasses"].index("outage-band") < data["childClasses"].index("chart-hit")
+    assert data["childClasses"].index("ev-marker") < data["childClasses"].index("chart-hit")
 
     assert data["plain"]["crossShown"] is True
     assert data["plain"]["accent"] == "ev-info"
@@ -1615,3 +1645,7 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
         "readout": "now 100 %",
         "crossHidden": True,
     }
+    assert "Power failure" in data["markerFocusTexts"]
+    assert data["markerBlurHidden"] is True
+    assert "Outage · 3m 20s" in data["outageFocusTexts"]
+    assert data["outageBlurHidden"] is True

@@ -568,9 +568,9 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .band-nominal { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3;
                        opacity: 0.6; }
 /* Event markers: a small color-coded triangle pinned to the time axis, with a
-   FAINT vertical guide that only brightens on hover (a bold full-height line per
-   event looked like noise). A wide transparent hit line makes the whole column
-   hoverable so the tooltip is easy to summon. */
+   FAINT vertical guide that brightens when .chart-hit matches the marker column
+   (.is-hover) or on keyboard Tab :focus (a bold full-height line per event
+   looked like noise). .ev-hit gives the focusable <g> a full-column bounding box. */
 /* Chart decoration and overlays stay non-interactive for pointers so .chart-hit
    drives one uninterrupted crosshair + value readout across outage bands and
    event pins alike (#137); markers and outage bands remain Tab-focusable. */
