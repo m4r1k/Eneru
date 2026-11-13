@@ -1039,7 +1039,7 @@ class RemoteShutdownMixin:
 
             if self.config.behavior.dry_run:
                 self._log_message(
-                    f"    🧪  [{display_name}] [DRY-RUN] Would execute on {display_name}"
+                    f"    🧪  [{display_name}] [DRY-RUN] Would execute"
                 )
                 continue
 

@@ -2019,8 +2019,7 @@ class TestParallelShutdownResilience:
 
         log_text = "\n".join(
             str(c) for c in remote_monitor.logger.log.call_args_list)
-        assert "still in progress" in log_text
-        assert "hang" in log_text
+        assert "still in progress (hang; continuing with next phase)" in log_text
 
     @pytest.mark.unit
     def test_worker_crash_flags_result_and_counts_in_summary(self, remote_monitor):
@@ -2479,7 +2478,7 @@ class TestParallelRemoteLogPrefixes:
         remote_monitor.config.behavior.dry_run = True
         with patch.object(remote_monitor, "_log_message", side_effect=logs.append):
             remote_monitor._shutdown_remote_server(server)
-        assert any("[NAS] [DRY-RUN] Would execute on NAS" in m for m in logs)
+        assert any(m.endswith("[NAS] [DRY-RUN] Would execute") for m in logs)
         assert any(
             "[NAS] [DRY-RUN] Would send command 'sudo poweroff' to admin@10.0.0.2" in m
             for m in logs

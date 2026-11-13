@@ -589,10 +589,10 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .graph .crosshair { pointer-events: none; }
 .graph .crosshair-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .graph .crosshair-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 1.5; }
-.graph g:hover .ev-line, .graph g.is-hover .ev-line,
+.graph g.is-hover .ev-line,
 .graph g:focus .ev-line { opacity: 0.7; }
 .graph .ev-pin { stroke: var(--bg); stroke-width: 0.5; }
-.graph g:hover .ev-pin, .graph g.is-hover .ev-pin,
+.graph g.is-hover .ev-pin,
 .graph g:focus .ev-pin { stroke-width: 1; }
 .graph .ev-crit { stroke: var(--crit); fill: var(--crit); }   /* outage / danger */
 .graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
