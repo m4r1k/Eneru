@@ -1416,3 +1416,202 @@ def test_dashboard_chart_feed_keeps_boundary_events(minimal_config):
         {"start": 100, "end": 150}, {"start": 300, "end": 350}]
     # And the boundary rows never render as chart marker dots.
     assert data["markerTypes"] == ["ON_BATTERY", "ON_BATTERY"]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_config):
+    """Issue #137: hovering inside an outage band or over an event marker must
+    keep the crosshair, top-right readout, and metric value tooltip active while
+    appending matched event/outage details into the same tooltip."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+
+    # CSS keeps .outage-band and .ev-marker non-blocking to pointer hover while
+    # preserving .is-hover/:focus highlighting and the .tip-sep divider.
+    assert ".graph .outage-band" in css and ".graph .ev-marker" in css
+    assert ".tip .tip-sep" in css
+    assert "g.is-hover .ev-line" in css and "g:focus .ev-line" in css
+
+    nut_src = js[js.index("function nutStatusTokens"):
+                 js.index("function powerStateSignature")]
+    ev_tip_src = js[js.index("function eventTipNode"):
+                    js.index("function appendEventMarker")]
+    out_tip_src = js[js.index("function outageTipNode"):
+                     js.index("const MIN_OUTAGE_PX")]
+    hover_src = js[js.index("const EVENT_HIT_PX"):
+                   js.index("// ---- shared chart helpers")]
+
+    script = (
+        textwrap.dedent("""
+            const SVG_NS = "http://www.w3.org/2000/svg";
+            function makeNode(tag) {
+              const attrs = {};
+              const listeners = {};
+              const classes = new Set();
+              return {
+                tag,
+                attrs,
+                listeners,
+                children: [],
+                style: {},
+                textContent: "",
+                classList: {
+                  add(c) { classes.add(c); },
+                  remove(c) { classes.delete(c); },
+                  has(c) { return classes.has(c); },
+                },
+                setAttribute(k, v) { attrs[k] = String(v); },
+                getAttribute(k) { return attrs[k] || ""; },
+                appendChild(c) { this.children.push(c); return c; },
+                addEventListener(type, fn) { listeners[type] = fn; },
+                getBoundingClientRect() { return { left: 0, width: 500 }; },
+              };
+            }
+            const document = { createElementNS: (_ns, tag) => makeNode(tag) };
+            function el(tag, opts, children) {
+              return { tag, opts: opts || {}, children: children || [] };
+            }
+            let lastTip = null;
+            function showTip(content, x, y, accent) {
+              lastTip = { content, x, y, accent, hidden: false };
+            }
+            function hideTip() {
+              if (lastTip) lastTip.hidden = true;
+            }
+        """)
+        + nut_src + ev_tip_src + out_tip_src + hover_src
+        + textwrap.dedent("""
+            const svg = makeNode("svg");
+            const readout = makeNode("text");
+            readout.setAttribute("data-idle", "now 100 %");
+            readout.textContent = "now 100 %";
+            const pts = [
+              { ts: 100, value: 100 },
+              { ts: 200, value: 84 },
+              { ts: 280, value: null },
+              { ts: 350, value: 92 },
+              { ts: 400, value: 96 },
+            ];
+            const x = (t) => t;
+            const y = (v) => 200 - v;
+            const cutNode = makeNode("g");
+            const restoreNode = makeNode("g");
+            const markers = [
+              {
+                x: 150, cls: "ev-crit", node: cutNode,
+                event: { ts: 150, eventType: "ON_BATTERY",
+                         detail: "Battery: 95% (Status: OB DISCHRG)" },
+              },
+              {
+                x: 350, cls: "ev-ok", node: restoreNode,
+                event: { ts: 350, eventType: "POWER_RESTORED",
+                         detail: "Utility back (Status: OL CHRG)" },
+              },
+            ];
+            const outages = [{
+              left: 150, right: 350, head: "Outage · 3m 20s",
+              span: { start: 150, end: 350,
+                      cut: markers[0].event, restore: markers[1].event,
+                      endedAtBoundary: false },
+            }];
+            const cross = addChartHover(
+              svg,
+              { x, W: 500, H: 220, pad: 34, padR: 40, readout, band: false },
+              [{ label: "Battery charge (%)", pts,
+                 valueAt: (p) => p.value, y, fmt: (v) => v + " %" }],
+              { markers, outages },
+            );
+            const hit = svg.children.find((c) => c.attrs.class === "chart-hit");
+            const tipTexts = () => (lastTip && !lastTip.hidden)
+              ? lastTip.content.map((n) => n.opts.text || ("<" + n.opts.class + ">"))
+              : [];
+
+            // 1) Normal region outside outage: metric only, ev-info accent.
+            hit.listeners.mousemove({ clientX: 100, clientY: 50 });
+            const plain = {
+              texts: tipTexts(), accent: lastTip.accent,
+              readout: readout.textContent, crossShown: cross.style.display === "",
+            };
+
+            // 2) Inside outage band away from markers: metric stays live AND
+            //    outage summary is appended below a separator, ev-crit accent.
+            hit.listeners.mousemove({ clientX: 200, clientY: 50 });
+            const inOutage = {
+              texts: tipTexts(), accent: lastTip.accent,
+              readout: readout.textContent, crossShown: cross.style.display === "",
+              cutHover: cutNode.classList.has("is-hover"),
+            };
+
+            // 3) Right over the POWER_RESTORED marker column (within 5.5px):
+            //    metric + event detail + outage summary, marker guide highlighted,
+            //    ev-ok accent from the marker.
+            hit.listeners.mousemove({ clientX: 348, clientY: 50 });
+            const onMarker = {
+              texts: tipTexts(), accent: lastTip.accent,
+              restoreHover: restoreNode.classList.has("is-hover"),
+              crossShown: cross.style.display === "",
+            };
+
+            // 4) Over a null-valued gap sample inside the outage band: crosshair
+            //    hides and readout resets, but the outage tooltip still renders.
+            hit.listeners.mousemove({ clientX: 280, clientY: 50 });
+            const onGapInOutage = {
+              texts: tipTexts(), accent: lastTip.accent,
+              readout: readout.textContent, crossHidden: cross.style.display === "none",
+              restoreHoverCleared: !restoreNode.classList.has("is-hover"),
+            };
+
+            // 5) Mouseleave clears hover state and hides tooltip.
+            hit.listeners.mouseleave();
+            const afterLeave = {
+              tipHidden: lastTip.hidden, readout: readout.textContent,
+              crossHidden: cross.style.display === "none",
+            };
+
+            process.stdout.write(JSON.stringify({
+              hitWidth: hit.attrs.width,
+              plain, inOutage, onMarker, onGapInOutage, afterLeave,
+            }));
+        """)
+    )
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # Dual-axis padR (40) honored on .chart-hit width: 500 - 34 - 40 = 426.0
+    assert data["hitWidth"] == "426.0"
+
+    assert data["plain"]["crossShown"] is True
+    assert data["plain"]["accent"] == "ev-info"
+    assert data["plain"]["texts"][0] == "100 %"
+    assert "<tip-sep>" not in data["plain"]["texts"]
+
+    assert data["inOutage"]["crossShown"] is True
+    assert data["inOutage"]["accent"] == "ev-crit"
+    assert data["inOutage"]["texts"][0] == "84 %"
+    assert "84 %" in data["inOutage"]["readout"]
+    assert "<tip-sep>" in data["inOutage"]["texts"]
+    assert "Outage · 3m 20s" in data["inOutage"]["texts"]
+    assert data["inOutage"]["cutHover"] is False
+
+    assert data["onMarker"]["crossShown"] is True
+    assert data["onMarker"]["accent"] == "ev-ok"
+    assert data["onMarker"]["restoreHover"] is True
+    assert data["onMarker"]["texts"][0] == "92 %"
+    assert "Power restored" in data["onMarker"]["texts"]
+    assert "Outage · 3m 20s" in data["onMarker"]["texts"]
+
+    assert data["onGapInOutage"]["crossHidden"] is True
+    assert data["onGapInOutage"]["readout"] == "now 100 %"
+    assert data["onGapInOutage"]["restoreHoverCleared"] is True
+    assert data["onGapInOutage"]["accent"] == "ev-crit"
+    assert "Outage · 3m 20s" in data["onGapInOutage"]["texts"]
+
+    assert data["afterLeave"] == {
+        "tipHidden": True,
+        "readout": "now 100 %",
+        "crossHidden": True,
+    }

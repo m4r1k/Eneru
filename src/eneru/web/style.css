@@ -513,6 +513,7 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
 .tip .tip-head { font-weight: 700; }
 .tip .tip-sub { color: var(--muted); font-size: 0.76rem; margin-top: 0.05rem; }
 .tip .tip-body { margin-top: 0.3rem; color: var(--text-2); }
+.tip .tip-sep { border-top: 1px solid var(--line); margin: 0.35rem 0; }
 .tip.ev-ok   { border-left-color: var(--ok); }
 .tip.ev-warn { border-left-color: var(--warn); }
 .tip.ev-crit { border-left-color: var(--crit); }
@@ -570,28 +571,29 @@ meter.bar.crit::-moz-meter-bar { background: var(--crit); }
    FAINT vertical guide that only brightens on hover (a bold full-height line per
    event looked like noise). A wide transparent hit line makes the whole column
    hoverable so the tooltip is easy to summon. */
-/* Chart decoration is non-interactive so an event marker's full-height hit
-   target receives the hover ANYWHERE along its column. The area fill + plot line
-   used to swallow pointer events over the lower part of the guide, so the
-   tooltip only appeared when hovering above the plotted data. */
+/* Chart decoration and overlays stay non-interactive for pointers so .chart-hit
+   drives one uninterrupted crosshair + value readout across outage bands and
+   event pins alike (#137); markers and outage bands remain Tab-focusable. */
 .graph .grid, .graph .axis, .graph .area, .graph .plot, .graph .plot-load,
 .graph .plot-watts, .graph .plot-band, .graph .plot-band-watts,
 .graph .plot-band-load, .graph .now-dot, .graph .band,
 .graph .band-edge, .graph .band-nominal, .graph .chart-title,
-.graph .chart-readout { pointer-events: none; }
+.graph .chart-readout, .graph .outage-band,
+.graph .ev-marker { pointer-events: none; }
 .graph .ev-line { stroke-width: 1; opacity: 0.12; }
 .graph .ev-hit { stroke: transparent; stroke-width: 11; }
-/* Hover crosshair: a transparent capture rect over the plot area drives a
-   vertical guide + per-line highlight dot and the floating value readout. It is
-   added to the SVG BEFORE the event markers + outage bands, so those sit on top
-   and keep their own tips; the readout only fires over empty plot area. */
+/* Hover crosshair: a transparent capture rect over the plot area drives the
+   vertical guide + per-line highlight dot and floating value readout, appending
+   any hovered event marker or active outage span into the same tooltip (#137). */
 .graph .chart-hit { fill: transparent; cursor: crosshair; }
 .graph .crosshair { pointer-events: none; }
 .graph .crosshair-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .graph .crosshair-dot { fill: var(--accent); stroke: var(--panel); stroke-width: 1.5; }
-.graph g:hover .ev-line { opacity: 0.7; }
+.graph g:hover .ev-line, .graph g.is-hover .ev-line,
+.graph g:focus .ev-line { opacity: 0.7; }
 .graph .ev-pin { stroke: var(--bg); stroke-width: 0.5; }
-.graph g:hover .ev-pin { stroke-width: 1; }
+.graph g:hover .ev-pin, .graph g.is-hover .ev-pin,
+.graph g:focus .ev-pin { stroke-width: 1; }
 .graph .ev-crit { stroke: var(--crit); fill: var(--crit); }   /* outage / danger */
 .graph .ev-warn { stroke: var(--warn); fill: var(--warn); }   /* over-voltage / overload */
 .graph .ev-ok   { stroke: var(--ok);   fill: var(--ok); }     /* power restored / recovered */
