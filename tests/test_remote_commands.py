@@ -2020,6 +2020,7 @@ class TestParallelShutdownResilience:
         log_text = "\n".join(
             str(c) for c in remote_monitor.logger.log.call_args_list)
         assert "still in progress" in log_text
+        assert "hang" in log_text
 
     @pytest.mark.unit
     def test_worker_crash_flags_result_and_counts_in_summary(self, remote_monitor):
@@ -2359,3 +2360,168 @@ class TestWithSudoHelper:
         assert with_sudo(command, False) == command
         # The mixin's staticmethod is a thin alias of the shared helper.
         assert RemoteShutdownMixin._with_sudo(command, True) == expected
+
+
+class TestParallelRemoteLogPrefixes:
+    """Issue #128: every per-server intermediate log line names its server so
+    parallel remote phases never interleave anonymous step output."""
+
+    @pytest.fixture
+    def remote_monitor(self, minimal_config, tmp_path):
+        minimal_config.logging.state_file = str(tmp_path / "state")
+        minimal_config.logging.battery_history_file = str(tmp_path / "history")
+        minimal_config.logging.shutdown_flag_file = str(tmp_path / "flag")
+        minimal_config.logging.file = None
+        minimal_config.behavior.dry_run = False
+        monitor = UPSGroupMonitor(minimal_config)
+        monitor.state = MonitorState()
+        monitor.logger = MagicMock()
+        monitor._notification_worker = MagicMock()
+        return monitor
+
+    @pytest.mark.unit
+    def test_parallel_servers_tag_every_intermediate_step_line(self, remote_monitor):
+        proxmox = RemoteServerConfig(
+            name="Proxmox Node 1", enabled=True, host="192.168.100.3", user="root",
+            posix_shell=True,
+            shutdown_command="sudo shutdown -h +1",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="stop_proxmox_vms", timeout=120),
+                RemoteCommandConfig(action="sync", timeout=15),
+            ],
+        )
+        truenas = RemoteServerConfig(
+            name="TrueNAS Fileserver", enabled=True, host="192.168.100.2",
+            user="truenas_admin", posix_shell=True,
+            shutdown_command="sudo /sbin/shutdown -p +1 'Power failure'",
+        )
+        unnamed = RemoteServerConfig(
+            name="", enabled=True, host="192.168.100.4", user="root",
+            posix_shell=True,
+            shutdown_command="sudo poweroff",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(command="failing-hook", timeout=10),
+                RemoteCommandConfig(action="unknown_action"),
+                RemoteCommandConfig(action="stop_compose"),
+                RemoteCommandConfig(action="unmount_filesystems"),
+                RemoteCommandConfig(),
+            ],
+        )
+
+        logs = []
+        log_lock = threading.Lock()
+
+        def record_log(msg):
+            with log_lock:
+                logs.append(msg)
+
+        def fake_run(server, command, timeout, description, **_kw):
+            if command == "failing-hook":
+                return False, "exit code 1"
+            return True, ""
+
+        with patch.object(remote_monitor, "_log_message", side_effect=record_log), \
+             patch.object(remote_monitor, "_run_remote_command", side_effect=fake_run):
+            results = remote_monitor._shutdown_servers_parallel(
+                [proxmox, truenas, unnamed]
+            )
+
+        assert len(results) == 3
+        assert results[0].success is True
+        assert results[1].success is True
+        assert results[2].pre_commands.failed == 5
+
+        assert any(
+            "[Proxmox Node 1] Executing 2 pre-shutdown command(s)..." in m
+            for m in logs
+        )
+        assert any(
+            "[Proxmox Node 1] [1/2] stop_proxmox_vms (timeout: 120s)" in m
+            for m in logs
+        )
+        assert any(
+            "[Proxmox Node 1] [1/2] stop_proxmox_vms completed" in m
+            for m in logs
+        )
+        assert any("[Proxmox Node 1] [2/2] sync (timeout: 15s)" in m for m in logs)
+        assert any("[Proxmox Node 1] [2/2] sync completed" in m for m in logs)
+        assert any(
+            "[Proxmox Node 1] Sending shutdown command: sudo shutdown -h +1" in m
+            for m in logs
+        )
+        assert any(
+            "[TrueNAS Fileserver] Sending shutdown command: "
+            "sudo /sbin/shutdown -p +1 'Power failure'" in m
+            for m in logs
+        )
+        # Unnamed server falls back to host on every warning/failure/send line.
+        assert any("[192.168.100.4] [1/5] failing-hook failed: exit code 1" in m for m in logs)
+        assert any("[192.168.100.4] [2/5] Unknown action: unknown_action" in m for m in logs)
+        assert any("[192.168.100.4] [3/5] stop_compose requires 'path'" in m for m in logs)
+        assert any("[192.168.100.4] [4/5] unmount_filesystems requires 'mounts'" in m for m in logs)
+        assert any("[192.168.100.4] [5/5] No action or command specified" in m for m in logs)
+        assert any("[192.168.100.4] Sending shutdown command: sudo poweroff" in m for m in logs)
+
+    @pytest.mark.unit
+    def test_deadline_dry_run_and_loopback_lines_carry_server_prefix(self, remote_monitor):
+        logs = []
+        server = RemoteServerConfig(
+            name="NAS", enabled=True, host="10.0.0.2", user="admin",
+            posix_shell=True,
+            shutdown_command="sudo poweroff",
+            pre_shutdown_commands=[
+                RemoteCommandConfig(action="sync", timeout=5),
+                RemoteCommandConfig(action="sync", timeout=5),
+            ],
+        )
+
+        # Dry-run tags pre-step, pre-dry-run, final send, and final dry-run lines.
+        remote_monitor.config.behavior.dry_run = True
+        with patch.object(remote_monitor, "_log_message", side_effect=logs.append):
+            remote_monitor._shutdown_remote_server(server)
+        assert any("[NAS] [DRY-RUN] Would execute on NAS" in m for m in logs)
+        assert any(
+            "[NAS] [DRY-RUN] Would send command 'sudo poweroff' to admin@10.0.0.2" in m
+            for m in logs
+        )
+
+        # Deadline cutoffs (before loop and mid-loop) tag the server too.
+        remote_monitor.config.behavior.dry_run = False
+        logs.clear()
+        with patch.object(remote_monitor, "_log_message", side_effect=logs.append), \
+             patch.object(remote_monitor, "_remote_deadline_exceeded", return_value=True):
+            remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True, deadline=1.0
+            )
+        assert any(
+            "[NAS] [1/2] Skipping remaining pre-shutdown commands" in m
+            for m in logs
+        )
+
+        logs.clear()
+        with patch.object(remote_monitor, "_log_message", side_effect=logs.append), \
+             patch.object(remote_monitor, "_remote_deadline_exceeded",
+                          side_effect=[False, True]), \
+             patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")):
+            remote_monitor._execute_remote_pre_shutdown(
+                server, collect_result=True, deadline=1.0
+            )
+        assert any(
+            "[NAS] Remote shutdown deadline reached during pre-shutdown" in m
+            for m in logs
+        )
+
+        # Loopback final poweroff tags [display] on Sending shutdown command.
+        logs.clear()
+        lb = RemoteServerConfig(
+            name="Localhost", enabled=True, host="127.0.0.1", user="root",
+            is_host_loopback=True, shutdown_command="shutdown -h now",
+        )
+        lb_res = RemoteShutdownResult(server="Localhost", host="127.0.0.1")
+        with patch.object(remote_monitor, "_log_message", side_effect=logs.append), \
+             patch.object(remote_monitor, "_run_remote_command", return_value=(True, "")):
+            remote_monitor._shutdown_loopback_command(lb, lb_res)
+        assert any(
+            "[Localhost] Sending shutdown command: shutdown -h now" in m
+            for m in logs
+        )
