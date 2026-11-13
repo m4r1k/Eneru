@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.3] - 2026-11-13
+
+### Fixed
+
+- **Dashboard chart hover keeps working across outage bands and event markers.**
+  Outage shading and event pins sat above the chart hit area and stole pointer
+  events, so moving the cursor into a power event froze the crosshair and
+  top-right readout and hid the metric value. Power, Battery, and Energy charts
+  now track the cursor across the plot area and stop cleanly at the right-axis
+  margin on dual-axis Energy charts. Any nearby event pin or active outage
+  window appears below a divider in the same tooltip, and keyboard Tab focus on
+  markers and outage bands still works. (#137)
+- **Parallel remote shutdown logs name the server on every step.** When remotes
+  ran in parallel (`parallel: true` or a shared `shutdown_order`), only the
+  opening and closing lines named the target while pre-shutdown steps,
+  `Sending shutdown command`, and `[DRY-RUN]` lines interleaved without a
+  label. Every per-step remote and host-loopback line now carries `[<name>]`
+  (or `[<host>]`), and the phase-timeout warning lists which servers are still
+  running. (#128)
+
 ### Changed
 
 - **Python 3.15 is officially supported.** CI now tests the 3.15.0 release
