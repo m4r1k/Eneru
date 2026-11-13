@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unit tests pass inside a running container.** About 23 tests read the real
+  machine's container markers (`/.dockerenv`, `/proc/1/cgroup`) and failed under
+  `docker run` (devcontainers, the OSS Scanner image), while passing on CI and
+  during `docker build`. An autouse fixture in `tests/conftest.py` now pins the
+  runtime to bare metal; container scenarios still patch it explicitly.
+
 ## [6.2.3] - 2026-11-13
 
 ### Fixed
