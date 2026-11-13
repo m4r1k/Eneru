@@ -2442,12 +2442,11 @@ function eventTipNode(e) {
   return kids;
 }
 
-// Append one event marker (vertical guide + dot) wrapped in a focusable <g>,
-// plus a wide transparent hit line, so hovering/focusing anywhere along the
-// guide shows the tooltip (the bare 3px dot was nearly impossible to hit). The
-// tooltip is the instant themed tip (the old native <title> only appeared after
-// a ~1s delay and looked like a plain OS tooltip). `e` carries the event; cls is
-// the color class.
+// Append one event marker (vertical guide + pin) wrapped in a Tab-focusable <g>
+// with a full-height bounding line (.ev-hit). Pointer hover goes through
+// .chart-hit (see addChartHover + matchChartOverlays, #137), while bindTip keeps
+// the instant themed tooltip wired for keyboard focus/blur. `e` carries the
+// event; cls is the color class.
 function appendEventMarker(svg, e, ex, top, bottom) {
   const cls = eventMarkerClass(e.eventType || e.event);
   const x = parseFloat(ex), yTop = parseFloat(top), yBot = parseFloat(bottom);
@@ -2475,6 +2474,7 @@ function appendEventMarker(svg, e, ex, top, bottom) {
   g.appendChild(tri);
   bindTip(g, () => eventTipNode(e), cls);
   svg.appendChild(g);
+  return { event: e, x, cls, node: g };
 }
 
 function isVoltageMetric(metric) {
@@ -2523,14 +2523,70 @@ function metricMinSpan(metric) {
   return 0;
 }
 
-// Add a hover crosshair + value readout to a chart. The capture rect is appended
-// HERE (early), so it sits BELOW the event markers + outage bands that are drawn
-// afterwards — those keep their own tips and the readout only fires over empty
-// plot area. The returned crosshair group is non-interactive and must be appended
-// LAST by the caller so the highlight dot draws on top of the plotted line.
+const EVENT_HIT_PX = 5.5;   // half of .ev-hit's 11px column width
+
+// Pure hit-test over chart overlays at `svgX` (no DOM, testable in Node).
+// Picks the closest tier-1 marker within EVENT_HIT_PX (ties go to the later
+// marker, matching SVG paint order) and the narrowest outage band covering
+// `svgX` so a brief sliver next to a longer outage stays reachable.
+function matchChartOverlays(svgX, markers, outages, hitPx) {
+  const tol = typeof hitPx === "number" ? hitPx : EVENT_HIT_PX;
+  let marker = null, bestD = Infinity;
+  for (const m of (markers || [])) {
+    const d = Math.abs(m.x - svgX);
+    if (d <= tol && d <= bestD) {
+      bestD = d;
+      marker = m;
+    }
+  }
+  let outage = null, bestW = Infinity;
+  for (const o of (outages || [])) {
+    if (svgX >= o.left && svgX <= o.right) {
+      const w = o.right - o.left;
+      if (w <= bestW) {
+        bestW = w;
+        outage = o;
+      }
+    }
+  }
+  return { marker, outage };
+}
+
+// Combine the hovered sample's metric value(s) with any matched event marker or
+// outage span into one tooltip payload (#137). Metric values lead so readings
+// stay readable across every power event; matched overlays follow below a rule.
+function buildChartHoverTip(valueLines, sampleTs, match) {
+  const nodes = [];
+  if (valueLines && valueLines.length) {
+    nodes.push(...valueLines);
+    if (sampleTs != null) {
+      nodes.push(el("div", { class: "tip-sub",
+        text: new Date(sampleTs * 1000).toLocaleString() }));
+    }
+  }
+  if (match && match.marker) {
+    if (nodes.length) nodes.push(el("div", { class: "tip-sep" }));
+    nodes.push(...eventTipNode(match.marker.event));
+  }
+  if (match && match.outage) {
+    if (nodes.length) nodes.push(el("div", { class: "tip-sep" }));
+    nodes.push(...outageTipNode(match.outage.head, match.outage.span));
+  }
+  const accent = (match && match.marker) ? match.marker.cls
+    : (match && match.outage) ? "ev-crit" : "ev-info";
+  return { nodes, accent };
+}
+
+// ELI5: think of a sheet of clear glass laid over a map that has pins and
+// shaded storm zones. Before #137, each storm zone and pin was a sticker pasted
+// ON TOP of the glass, so sliding your finger into an outage hid the road
+// elevation underneath. Now one capture rect owns pointer hover across the
+// whole plot while reading off any marker or outage span at the cursor's X;
+// markers and outage bands stay focusable via Tab for keyboard users.
 // `series`: [{ y(v)->py, valueAt(point)->number, fmt(number)->string, label }].
-function addChartHover(svg, geom, series) {
+function addChartHover(svg, geom, series, overlays) {
   const { x, W, H, pad } = geom;
+  const padR = geom.padR != null ? geom.padR : 5;
   const readout = geom.readout;   // persistent top-right value/min/max/time readout
   const base = (series.find((s) => s.pts && s.pts.length) || {}).pts || [];
   const cross = document.createElementNS(SVG_NS, "g");
@@ -2555,40 +2611,64 @@ function addChartHover(svg, geom, series) {
     }
     return best;
   };
+  let hoveredMarker = null;
+  const setMarkerHover = (nextNode) => {
+    if (hoveredMarker === nextNode) return;
+    if (hoveredMarker && hoveredMarker.classList) {
+      hoveredMarker.classList.remove("is-hover");
+    }
+    hoveredMarker = nextNode || null;
+    if (hoveredMarker && hoveredMarker.classList) {
+      hoveredMarker.classList.add("is-hover");
+    }
+  };
   const hit = document.createElementNS(SVG_NS, "rect");
   hit.setAttribute("x", pad); hit.setAttribute("y", 5);
-  hit.setAttribute("width", Math.max(0, W - pad - 5).toFixed(1));
+  hit.setAttribute("width", Math.max(0, W - pad - padR).toFixed(1));
   hit.setAttribute("height", Math.max(0, H - pad - 5).toFixed(1));
   hit.setAttribute("class", "chart-hit");
   // Hide the crosshair + floating tip. Used on mouseleave AND on every early
   // exit from move(): a sample with no plottable value (a gap) must clear any
   // readout left pinned by a prior move, not leave it stuck until mouseleave.
   const hideHover = () => {
-    cross.style.display = "none"; hideTip();
+    cross.style.display = "none";
+    setMarkerHover(null);
+    hideTip();
     if (readout) readout.textContent = readout.getAttribute("data-idle") || "";
   };
   const move = (ev) => {
-    if (!base.length) return hideHover();
     const r = svg.getBoundingClientRect();
     if (!r.width) return hideHover();
-    const p = nearest((ev.clientX - r.left) * (W / r.width));
-    if (!p) return hideHover();
-    const cx = x(p.ts);
-    vline.setAttribute("x1", cx.toFixed(1)); vline.setAttribute("x2", cx.toFixed(1));
+    const svgX = (ev.clientX - r.left) * (W / r.width);
+    const match = matchChartOverlays(
+      svgX, overlays && overlays.markers, overlays && overlays.outages);
+    setMarkerHover(match.marker ? match.marker.node : null);
+    const p = base.length ? nearest(svgX) : null;
     const valueLines = [];
-    series.forEach((s, i) => {
-      const v = s.valueAt(p);
-      if (typeof v === "number" && !isNaN(v)) {
-        dots[i].setAttribute("cx", cx.toFixed(1));
-        dots[i].setAttribute("cy", s.y(v).toFixed(1));
-        dots[i].style.display = "";
-        valueLines.push(el("div", { class: "tip-head",
-          text: (series.length > 1 ? s.label + ": " : "") + s.fmt(v) }));
-      } else {
-        dots[i].style.display = "none";
-      }
-    });
-    if (!valueLines.length) return hideHover();
+    if (p) {
+      const cx = x(p.ts);
+      vline.setAttribute("x1", cx.toFixed(1)); vline.setAttribute("x2", cx.toFixed(1));
+      series.forEach((s, i) => {
+        const v = s.valueAt(p);
+        if (typeof v === "number" && !isNaN(v)) {
+          dots[i].setAttribute("cx", cx.toFixed(1));
+          dots[i].setAttribute("cy", s.y(v).toFixed(1));
+          dots[i].style.display = "";
+          valueLines.push(el("div", { class: "tip-head",
+            text: (series.length > 1 ? s.label + ": " : "") + s.fmt(v) }));
+        } else {
+          dots[i].style.display = "none";
+        }
+      });
+    }
+    if (!valueLines.length) {
+      cross.style.display = "none";
+      if (readout) readout.textContent = readout.getAttribute("data-idle") || "";
+      if (!match.marker && !match.outage) { hideTip(); return; }
+      const tip = buildChartHoverTip([], null, match);
+      showTip(tip.nodes, ev.clientX, ev.clientY, tip.accent);
+      return;
+    }
     // Persistent readout: actual value at this time, plus the min–max of the
     // surrounding bucket for a stats-band chart (the "what was the range here").
     if (readout) {
@@ -2598,7 +2678,7 @@ function addChartHover(svg, geom, series) {
         let txt = prim.fmt(av);
         if (geom.band && base.length > 2) {
           const spanS = base[base.length - 1].ts - base[0].ts;
-          const halfW = Math.max(1, (spanS / Math.max(1, W - pad - 5)) * 3);
+          const halfW = Math.max(1, (spanS / Math.max(1, W - pad - padR)) * 3);
           let mn = Infinity, mx = -Infinity;
           for (const q of base) {
             if (Math.abs(q.ts - p.ts) > halfW) continue;
@@ -2613,9 +2693,8 @@ function addChartHover(svg, geom, series) {
       }
     }
     cross.style.display = "";
-    showTip(valueLines.concat([el("div", { class: "tip-sub",
-      text: new Date(p.ts * 1000).toLocaleString() })]),
-      ev.clientX, ev.clientY, "ev-info");
+    const tip = buildChartHoverTip(valueLines, p.ts, match);
+    showTip(tip.nodes, ev.clientX, ev.clientY, tip.accent);
   };
   hit.addEventListener("mousemove", move);
   hit.addEventListener("mouseleave", hideHover);
@@ -2918,23 +2997,16 @@ function drawChart(hostId, series, options) {
   const stats = statsBandPaths(drawn, (p) => p.value, x, y, W - pad - 5);
   const d = stats.meanD, hasGap = stats.hasGap;
 
-  // Hover crosshair + value readout. The capture rect is added now, BELOW the
-  // outage bands + event markers added next, so those keep their own tooltips
-  // and the readout only fires over empty plot area. The crosshair group itself
-  // is appended last (on top of the plotted line).
-  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: !!stats.bandD },
-    [{ label: metricLabel(metric), pts,
-       valueAt: (p) => p.value, y, fmt: (v) => formatMetricValue(metric, v) }]);
-
   // Outage spans: shade ON_BATTERY -> POWER_RESTORED intervals behind the
   // markers + data line so brief outages stay visible (see appendOutageBands).
-  appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
+  const outages = appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
 
   // Event overlays: vertical guides at each event timestamp inside the range,
   // colored by type. Cap markers so a dense window doesn't drown the SVG.
   // Markers are tier-1 only — the feed also carries boundary (DAEMON_*) rows
   // for the outage-band math above, which must not render as dots (F-094).
   const events = options.events || [];
+  const markers = [];
   if (events.length) {
     const inRange = events.filter(
       (e) => e.ts >= t0 && e.ts <= t1 && isTier1Event(e.eventType || e.event));
@@ -2943,7 +3015,7 @@ function drawChart(hostId, series, options) {
       ? inRange.filter((_e, i) => i % Math.ceil(inRange.length / MAX) === 0)
       : inRange;
     shown.forEach((e) => {
-      appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
+      markers.push(appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1)));
     });
     if (inRange.length > shown.length) {
       const note = document.createElementNS(SVG_NS, "text");
@@ -2953,6 +3025,14 @@ function drawChart(hostId, series, options) {
       svg.appendChild(note);
     }
   }
+
+  // Hover crosshair + value readout, wired AFTER overlays so the capture rect
+  // sits above outage bands and event markers (#137) while merging any matched
+  // event/outage details into the same tooltip.
+  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: !!stats.bandD },
+    [{ label: metricLabel(metric), pts,
+       valueAt: (p) => p.value, y, fmt: (v) => formatMetricValue(metric, v) }],
+    { markers, outages });
 
   // The data line. Break the path across gaps (a run of missing samples longer
   // than ~2.5x the typical spacing) so we don't draw a confident straight line
@@ -3195,8 +3275,9 @@ function computeOutageSpans(events, t0, t1) {
 
 function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
   const spans = computeOutageSpans(events, t0, t1);
-  if (!spans.length) return;
+  if (!spans.length) return [];
   const top = parseFloat(yTop), bot = parseFloat(yBot);
+  const bands = [];
   for (const s of spans) {
     if (s.end < t0 || s.start > t1) continue;     // outage entirely off-chart
     const sx = x(Math.max(s.start, t0));
@@ -3219,7 +3300,9 @@ function appendOutageBands(svg, events, x, t0, t1, yTop, yBot) {
     rect.setAttribute("aria-label", outageLabel(head, s));
     bindTip(rect, () => outageTipNode(head, s), "ev-crit");
     svg.appendChild(rect);
+    bands.push({ left, right: left + width, head, span: s });
   }
+  return bands;
 }
 
 // Per-instance chart over the /history series. Owns its DOM hosts + caches and
@@ -3446,9 +3529,16 @@ function drawEnergyChart(hostId, rows, options) {
     } else { enote.hidden = true; enote.textContent = ""; }
   }
 
-  // Hover crosshair + readout for whichever line(s) are shown. The capture rect
-  // is added now, BELOW the outage bands + event markers added next, so those
-  // keep their own tooltips; the crosshair group is appended last (on top).
+  // Outage spans + tier-1 markers behind the plotted lines; boundary (DAEMON_*)
+  // rows stay out of the marker pins (F-094). Hover capture goes on top (#137).
+  const outages = appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
+  const markers = (options.events || [])
+    .filter((e) => e.ts >= t0 && e.ts <= t1
+                   && isTier1Event(e.eventType || e.event))
+    .slice(0, 100)
+    .map((e) => appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1)));
+
+  // Hover crosshair + readout for whichever line(s) are shown (#137).
   const hoverSeries = [];
   if (wattS) hoverSeries.push({ label: "Power", pts, y: wattS.y,
     valueAt: (p) => p.watts, fmt: (v) => v.toFixed(0) + " W" });
@@ -3460,7 +3550,7 @@ function drawEnergyChart(hostId, rows, options) {
   readout.setAttribute("text-anchor", "end");
   readout.setAttribute("class", "chart-readout");
   svg.appendChild(readout);
-  const dense = pts.length > Math.max(2, W - pad - 5) * 3;
+  const dense = pts.length > Math.max(2, W - pad - padR) * 3;
   const lastVal = hoverSeries.length
     ? [...pts].reverse().map((p) => hoverSeries[0].valueAt(p))
         .find((v) => typeof v === "number" && !isNaN(v)) : null;
@@ -3468,19 +3558,8 @@ function drawEnergyChart(hostId, rows, options) {
     const idle = "now " + hoverSeries[0].fmt(lastVal);
     readout.setAttribute("data-idle", idle); readout.textContent = idle;
   }
-  const crosshair = addChartHover(svg, { x, W, H, pad, readout, band: dense }, hoverSeries);
-
-  // Outage spans behind the markers (see appendOutageBands).
-  appendOutageBands(svg, options.events || [], x, t0, t1, 5, H - pad);
-  // tier-1 event markers only — the feed also carries boundary (DAEMON_*)
-  // rows for the outage bands above; they must not render as dots (F-094).
-  (options.events || [])
-    .filter((e) => e.ts >= t0 && e.ts <= t1
-                   && isTier1Event(e.eventType || e.event))
-    .slice(0, 100)
-    .forEach((e) => {
-      appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, (H - pad).toFixed(1));
-    });
+  const crosshair = addChartHover(
+    svg, { x, W, H, pad, padR, readout, band: dense }, hoverSeries, { markers, outages });
 
   function plot(key, sc, cls, bandCls) {
     if (!sc) return;

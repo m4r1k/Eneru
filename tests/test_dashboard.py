@@ -1416,3 +1416,240 @@ def test_dashboard_chart_feed_keeps_boundary_events(minimal_config):
         {"start": 100, "end": 150}, {"start": 300, "end": 350}]
     # And the boundary rows never render as chart marker dots.
     assert data["markerTypes"] == ["ON_BATTERY", "ON_BATTERY"]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(NODE is None, reason="needs node")
+def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_config):
+    """Issue #137: hovering inside an outage band or over an event marker must
+    keep the crosshair, top-right readout, and metric value tooltip active while
+    appending matched event/outage details into the same tooltip."""
+    js = _handler(minimal_config, path="/app.js")._serve_static(
+        "/app.js")[1].decode("utf-8")
+    css = _handler(minimal_config, path="/style.css")._serve_static(
+        "/style.css")[1].decode("utf-8")
+
+    # CSS keeps .outage-band and .ev-marker non-blocking to pointer hover while
+    # preserving .is-hover/:focus highlighting and the .tip-sep divider.
+    assert ".graph .outage-band" in css and ".graph .ev-marker" in css
+    assert ".tip .tip-sep" in css
+    assert "g.is-hover .ev-line" in css and "g:focus .ev-line" in css
+
+    # Verify both chart renderers wire overlays BEFORE addChartHover so
+    # .chart-hit sits above .outage-band and .ev-marker in SVG paint order, and
+    # drawEnergyChart forwards padR to addChartHover.
+    draw_chart_src = js[js.index("function drawChart"):
+                        js.index("// Show/clear the")]
+    assert (draw_chart_src.index("appendOutageBands(")
+            < draw_chart_src.index("appendEventMarker(")
+            < draw_chart_src.index("addChartHover(")
+            < draw_chart_src.index("svg.appendChild(crosshair)"))
+    draw_energy_src = js[js.index("function drawEnergyChart"):
+                         js.index("// A compact single-series line plot")]
+    assert (draw_energy_src.index("appendOutageBands(")
+            < draw_energy_src.index("appendEventMarker(")
+            < draw_energy_src.index("addChartHover(")
+            < draw_energy_src.index("svg.appendChild(crosshair)"))
+    assert "padR, readout" in draw_energy_src
+
+    bind_src = js[js.index("function bindTip"):
+                  js.index("function helpHint")]
+    nut_src = js[js.index("function nutStatusTokens"):
+                 js.index("function powerStateSignature")]
+    ev_src = js[js.index("function eventMarkerClass"):
+                js.index("function isVoltageMetric")]
+    out_src = js[js.index("function fmtOutageDur"):
+                 js.index("// Per-instance chart")]
+    hover_src = js[js.index("const EVENT_HIT_PX"):
+                   js.index("// ---- shared chart helpers")]
+
+    script = (
+        textwrap.dedent("""
+            const SVG_NS = "http://www.w3.org/2000/svg";
+            function makeNode(tag) {
+              const attrs = {};
+              const listeners = {};
+              const classes = new Set();
+              return {
+                tag,
+                attrs,
+                listeners,
+                children: [],
+                style: {},
+                textContent: "",
+                classList: {
+                  add(c) { classes.add(c); },
+                  remove(c) { classes.delete(c); },
+                  has(c) { return classes.has(c); },
+                },
+                setAttribute(k, v) { attrs[k] = String(v); },
+                getAttribute(k) { return attrs[k] || ""; },
+                appendChild(c) { this.children.push(c); return c; },
+                addEventListener(type, fn) { listeners[type] = fn; },
+                getBoundingClientRect() { return { left: 0, bottom: 180, width: 500 }; },
+              };
+            }
+            const document = {
+              createElementNS: (_ns, tag) => makeNode(tag),
+              getElementById: () => null,
+            };
+            function el(tag, opts, children) {
+              return { tag, opts: opts || {}, children: children || [] };
+            }
+            let lastTip = null;
+            function showTip(content, x, y, accent) {
+              lastTip = { content, x, y, accent, hidden: false };
+            }
+            function moveTip() {}
+            function hideTip() {
+              if (lastTip) lastTip.hidden = true;
+            }
+        """)
+        + bind_src + nut_src + ev_src + out_src + hover_src
+        + textwrap.dedent("""
+            const svg = makeNode("svg");
+            const readout = makeNode("text");
+            readout.setAttribute("data-idle", "now 100 %");
+            readout.textContent = "now 100 %";
+            const pts = [
+              { ts: 100, value: 100 },
+              { ts: 200, value: 84 },
+              { ts: 280, value: null },
+              { ts: 350, value: 92 },
+              { ts: 400, value: 96 },
+            ];
+            const x = (t) => t;
+            const y = (v) => 200 - v;
+            const events = [
+              { ts: 150, eventType: "ON_BATTERY",
+                detail: "Battery: 95% (Status: OB DISCHRG)" },
+              { ts: 350, eventType: "POWER_RESTORED",
+                detail: "Utility back (Status: OL CHRG)" },
+            ];
+            const outages = appendOutageBands(svg, events, x, 100, 400, 5, 186);
+            const markers = events.map((e) =>
+              appendEventMarker(svg, e, x(e.ts).toFixed(1), 5, "186.0"));
+            const cutNode = markers[0].node;
+            const restoreNode = markers[1].node;
+            const cross = addChartHover(
+              svg,
+              { x, W: 500, H: 220, pad: 34, padR: 40, readout, band: false },
+              [{ label: "Battery charge (%)", pts,
+                 valueAt: (p) => p.value, y, fmt: (v) => v + " %" }],
+              { markers, outages },
+            );
+            svg.appendChild(cross);
+            const childClasses = svg.children.map((c) => c.attrs.class);
+            const hit = svg.children.find((c) => c.attrs.class === "chart-hit");
+            const outageNode = svg.children.find((c) => c.attrs.class === "outage-band");
+            const tipTexts = () => (lastTip && !lastTip.hidden)
+              ? lastTip.content.map((n) => n.opts.text || ("<" + n.opts.class + ">"))
+              : [];
+
+            // 1) Normal region outside outage: metric only, ev-info accent.
+            hit.listeners.mousemove({ clientX: 100, clientY: 50 });
+            const plain = {
+              texts: tipTexts(), accent: lastTip.accent,
+              readout: readout.textContent, crossShown: cross.style.display === "",
+            };
+
+            // 2) Inside outage band away from markers: metric stays live AND
+            //    outage summary is appended below a separator, ev-crit accent.
+            hit.listeners.mousemove({ clientX: 200, clientY: 50 });
+            const inOutage = {
+              texts: tipTexts(), accent: lastTip.accent,
+              readout: readout.textContent, crossShown: cross.style.display === "",
+              cutHover: cutNode.classList.has("is-hover"),
+            };
+
+            // 3) Right over the POWER_RESTORED marker column (within 5.5px):
+            //    metric + event detail + outage summary, marker guide highlighted,
+            //    ev-ok accent from the marker.
+            hit.listeners.mousemove({ clientX: 348, clientY: 50 });
+            const onMarker = {
+              texts: tipTexts(), accent: lastTip.accent,
+              restoreHover: restoreNode.classList.has("is-hover"),
+              crossShown: cross.style.display === "",
+            };
+
+            // 4) Over a null-valued gap sample inside the outage band: crosshair
+            //    hides and readout resets, but the outage tooltip still renders.
+            hit.listeners.mousemove({ clientX: 280, clientY: 50 });
+            const onGapInOutage = {
+              texts: tipTexts(), accent: lastTip.accent,
+              readout: readout.textContent, crossHidden: cross.style.display === "none",
+              restoreHoverCleared: !restoreNode.classList.has("is-hover"),
+            };
+
+            // 5) Mouseleave clears hover state and hides tooltip.
+            hit.listeners.mouseleave();
+            const afterLeave = {
+              tipHidden: lastTip.hidden, readout: readout.textContent,
+              crossHidden: cross.style.display === "none",
+            };
+
+            // 6) Keyboard Tab focus/blur on both .ev-marker and .outage-band
+            //    still summons and dismisses the themed tooltip via bindTip.
+            cutNode.listeners.focus();
+            const markerFocusTexts = tipTexts();
+            cutNode.listeners.blur();
+            const markerBlurHidden = lastTip.hidden;
+            outageNode.listeners.focus();
+            const outageFocusTexts = tipTexts();
+            outageNode.listeners.blur();
+            const outageBlurHidden = lastTip.hidden;
+
+            process.stdout.write(JSON.stringify({
+              hitWidth: hit.attrs.width,
+              childClasses,
+              plain, inOutage, onMarker, onGapInOutage, afterLeave,
+              markerFocusTexts, markerBlurHidden, outageFocusTexts, outageBlurHidden,
+            }));
+        """)
+    )
+    result = subprocess.run([NODE, "-"], input=script, text=True,
+                            capture_output=True, check=True)
+    data = json.loads(result.stdout)
+
+    # Dual-axis padR (40) honored on .chart-hit width: 500 - 34 - 40 = 426.0
+    assert data["hitWidth"] == "426.0"
+    # SVG paint order: outage band -> markers -> .chart-hit -> crosshair on top
+    assert data["childClasses"].index("outage-band") < data["childClasses"].index("chart-hit")
+    assert data["childClasses"].index("ev-marker") < data["childClasses"].index("chart-hit")
+    assert data["childClasses"][-1] == "crosshair"
+
+    assert data["plain"]["crossShown"] is True
+    assert data["plain"]["accent"] == "ev-info"
+    assert data["plain"]["texts"][0] == "100 %"
+    assert "<tip-sep>" not in data["plain"]["texts"]
+
+    assert data["inOutage"]["crossShown"] is True
+    assert data["inOutage"]["accent"] == "ev-crit"
+    assert data["inOutage"]["texts"][0] == "84 %"
+    assert "84 %" in data["inOutage"]["readout"]
+    assert "<tip-sep>" in data["inOutage"]["texts"]
+    assert "Outage · 3m 20s" in data["inOutage"]["texts"]
+    assert data["inOutage"]["cutHover"] is False
+
+    assert data["onMarker"]["crossShown"] is True
+    assert data["onMarker"]["accent"] == "ev-ok"
+    assert data["onMarker"]["restoreHover"] is True
+    assert data["onMarker"]["texts"][0] == "92 %"
+    assert "Power restored" in data["onMarker"]["texts"]
+    assert "Outage · 3m 20s" in data["onMarker"]["texts"]
+
+    assert data["onGapInOutage"]["crossHidden"] is True
+    assert data["onGapInOutage"]["readout"] == "now 100 %"
+    assert data["onGapInOutage"]["restoreHoverCleared"] is True
+    assert data["onGapInOutage"]["accent"] == "ev-crit"
+    assert "Outage · 3m 20s" in data["onGapInOutage"]["texts"]
+
+    assert data["afterLeave"] == {
+        "tipHidden": True,
+        "readout": "now 100 %",
+        "crossHidden": True,
+    }
+    assert "Power failure" in data["markerFocusTexts"]
+    assert data["markerBlurHidden"] is True
+    assert "Outage · 3m 20s" in data["outageFocusTexts"]
+    assert data["outageBlurHidden"] is True

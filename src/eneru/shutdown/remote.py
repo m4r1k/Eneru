@@ -522,14 +522,16 @@ class RemoteShutdownMixin:
         )
 
         shutdown_command = self._with_sudo(server.shutdown_command, server.use_sudo)
-        self._log_message(f"  🔌  Sending shutdown command: {shutdown_command}")
+        self._log_message(
+            f"  🔌  [{display}] Sending shutdown command: {shutdown_command}"
+        )
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True
             result.dry_run = True
             self._log_message(
-                f"  🧪  [DRY-RUN] Would send command '{shutdown_command}' to "
-                f"{server.user}@{server.host}"
+                f"  🧪  [{display}] [DRY-RUN] Would send command "
+                f"'{shutdown_command}' to {server.user}@{server.host}"
             )
             return
 
@@ -697,11 +699,15 @@ class RemoteShutdownMixin:
             remaining = max(0.0, deadline - time.monotonic())
             t.join(timeout=remaining)
 
-        still_running = [t for t in threads if t.is_alive()]
+        still_running = [
+            server.name or server.host
+            for t, server in zip(threads, servers)
+            if t.is_alive()
+        ]
         if still_running:
             self._log_message(
                 f"  ⚠️  {len(still_running)} remote shutdown(s) still in progress "
-                "(continuing with next phase)"
+                f"({', '.join(still_running)}; continuing with next phase)"
             )
 
         final_results: List[RemoteShutdownResult] = []
@@ -918,15 +924,21 @@ class RemoteShutdownMixin:
         cmd_count = len(server.pre_shutdown_commands)
         result = RemotePreShutdownResult()
 
-        self._log_message(f"  📋  Executing {cmd_count} pre-shutdown command(s)...")
+        # ELI5: two cooks shouting "timer started!" in the same kitchen tell you
+        # nothing unless each one calls out their station. Parallel remote
+        # threads interleave line-by-line (#128), so every per-server step line
+        # carries [display_name] instead of relying on the header above it.
+        self._log_message(
+            f"  📋  [{display_name}] Executing {cmd_count} pre-shutdown command(s)..."
+        )
 
         for idx, cmd_config in enumerate(server.pre_shutdown_commands, 1):
             if self._remote_deadline_exceeded(deadline):
                 result.timed_out = True
                 result.error = "remote shutdown deadline exceeded before pre-shutdown completed"
                 self._log_message(
-                    f"    ⚠️  [{idx}/{cmd_count}] Skipping remaining pre-shutdown "
-                    "commands: remote shutdown deadline exceeded"
+                    f"    ⚠️  [{display_name}] [{idx}/{cmd_count}] Skipping remaining "
+                    "pre-shutdown commands: remote shutdown deadline exceeded"
                 )
                 break
 
@@ -941,7 +953,8 @@ class RemoteShutdownMixin:
 
                 if action_name not in REMOTE_ACTIONS:
                     self._log_message(
-                        f"    ⚠️  [{idx}/{cmd_count}] Unknown action: {action_name} (skipping)"
+                        f"    ⚠️  [{display_name}] [{idx}/{cmd_count}] Unknown action: "
+                        f"{action_name} (skipping)"
                     )
                     result.failed += 1
                     continue
@@ -952,7 +965,8 @@ class RemoteShutdownMixin:
                 # command slip through.
                 if action_name == "stop_compose" and not cmd_config.path:
                     self._log_message(
-                        f"    ⚠️  [{idx}/{cmd_count}] stop_compose requires 'path' parameter (skipping)"
+                        f"    ⚠️  [{display_name}] [{idx}/{cmd_count}] stop_compose "
+                        "requires 'path' parameter (skipping)"
                     )
                     result.failed += 1
                     continue
@@ -976,8 +990,9 @@ class RemoteShutdownMixin:
                     umount_targets = serialize_umount_targets(cmd_config.mounts)
                     if not umount_targets:
                         self._log_message(
-                            f"    ⚠️  [{idx}/{cmd_count}] unmount_filesystems "
-                            "requires 'mounts' on regular remote servers (skipping)"
+                            f"    ⚠️  [{display_name}] [{idx}/{cmd_count}] "
+                            "unmount_filesystems requires 'mounts' on regular "
+                            "remote servers (skipping)"
                         )
                         result.failed += 1
                         continue
@@ -1009,17 +1024,23 @@ class RemoteShutdownMixin:
 
             else:
                 self._log_message(
-                    f"    ⚠️  [{idx}/{cmd_count}] No action or command specified (skipping)"
+                    f"    ⚠️  [{display_name}] [{idx}/{cmd_count}] No action or "
+                    "command specified (skipping)"
                 )
                 result.failed += 1
                 continue
 
             # Log what we're about to do
-            self._log_message(f"    ➡️  [{idx}/{cmd_count}] {description} (timeout: {timeout}s)")
+            self._log_message(
+                f"    ➡️  [{display_name}] [{idx}/{cmd_count}] {description} "
+                f"(timeout: {timeout}s)"
+            )
             result.attempted += 1
 
             if self.config.behavior.dry_run:
-                self._log_message(f"    🧪  [DRY-RUN] Would execute on {display_name}")
+                self._log_message(
+                    f"    🧪  [{display_name}] [DRY-RUN] Would execute"
+                )
                 continue
 
             # Execute the command
@@ -1028,19 +1049,22 @@ class RemoteShutdownMixin:
             )
 
             if success:
-                self._log_message(f"    ✅  [{idx}/{cmd_count}] {description} completed")
+                self._log_message(
+                    f"    ✅  [{display_name}] [{idx}/{cmd_count}] {description} completed"
+                )
             else:
                 result.failed += 1
                 self._log_message(
-                    f"    ⚠️  [{idx}/{cmd_count}] {description} failed: {error_msg} (continuing)"
+                    f"    ⚠️  [{display_name}] [{idx}/{cmd_count}] {description} "
+                    f"failed: {error_msg} (continuing)"
                 )
 
             if self._remote_deadline_exceeded(deadline):
                 result.timed_out = True
                 result.error = "remote shutdown deadline exceeded during pre-shutdown"
                 self._log_message(
-                    "    ⚠️  Remote shutdown deadline reached during pre-shutdown; "
-                    "final shutdown command will not be sent"
+                    f"    ⚠️  [{display_name}] Remote shutdown deadline reached "
+                    "during pre-shutdown; final shutdown command will not be sent"
                 )
                 break
 
@@ -1121,14 +1145,14 @@ class RemoteShutdownMixin:
                      server, server.command_timeout, deadline))
         verbatim = "" if posix else " (as written: no POSIX shell)"
         self._log_message(
-            f"  🔌  Sending shutdown command{verbatim}: {shutdown_command}")
+            f"  🔌  [{display_name}] Sending shutdown command{verbatim}: {shutdown_command}")
 
         if self.config.behavior.dry_run:
             result.shutdown_sent = True
             result.dry_run = True
             self._log_message(
-                f"  🧪  [DRY-RUN] Would send command '{shutdown_command}' to "
-                f"{server.user}@{server.host}"
+                f"  🧪  [{display_name}] [DRY-RUN] Would send command "
+                f"'{shutdown_command}' to {server.user}@{server.host}"
             )
             return result
 
