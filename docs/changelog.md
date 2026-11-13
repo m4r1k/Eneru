@@ -25,9 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran in parallel (`parallel: true` or a shared `shutdown_order`), only the
   opening and closing lines named the target while pre-shutdown steps,
   `Sending shutdown command`, and `[DRY-RUN]` lines interleaved without a
-  label. Every per-step remote and host-loopback line now carries `[<name>]`
-  (or `[<host>]`), and the phase-timeout warning lists which servers are still
-  running. (#128)
+  label. Previously unlabeled per-step remote and host-loopback lines now carry
+  `[<name>]` (or `[<host>]`), and the phase-timeout warning lists which servers
+  are still running. (#128)
 
 ### Changed
 

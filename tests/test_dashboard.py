@@ -1442,12 +1442,14 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
                         js.index("// Show/clear the")]
     assert (draw_chart_src.index("appendOutageBands(")
             < draw_chart_src.index("appendEventMarker(")
-            < draw_chart_src.index("addChartHover("))
+            < draw_chart_src.index("addChartHover(")
+            < draw_chart_src.index("svg.appendChild(crosshair)"))
     draw_energy_src = js[js.index("function drawEnergyChart"):
                          js.index("// A compact single-series line plot")]
     assert (draw_energy_src.index("appendOutageBands(")
             < draw_energy_src.index("appendEventMarker(")
-            < draw_energy_src.index("addChartHover("))
+            < draw_energy_src.index("addChartHover(")
+            < draw_energy_src.index("svg.appendChild(crosshair)"))
     assert "padR, readout" in draw_energy_src
 
     bind_src = js[js.index("function bindTip"):
@@ -1536,6 +1538,7 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
                  valueAt: (p) => p.value, y, fmt: (v) => v + " %" }],
               { markers, outages },
             );
+            svg.appendChild(cross);
             const childClasses = svg.children.map((c) => c.attrs.class);
             const hit = svg.children.find((c) => c.attrs.class === "chart-hit");
             const outageNode = svg.children.find((c) => c.attrs.class === "outage-band");
@@ -1610,9 +1613,10 @@ def test_dashboard_chart_hover_keeps_metrics_during_events_and_outages(minimal_c
 
     # Dual-axis padR (40) honored on .chart-hit width: 500 - 34 - 40 = 426.0
     assert data["hitWidth"] == "426.0"
-    # SVG paint order: outage band -> markers -> crosshair -> .chart-hit on top
+    # SVG paint order: outage band -> markers -> .chart-hit -> crosshair on top
     assert data["childClasses"].index("outage-band") < data["childClasses"].index("chart-hit")
     assert data["childClasses"].index("ev-marker") < data["childClasses"].index("chart-hit")
+    assert data["childClasses"][-1] == "crosshair"
 
     assert data["plain"]["crossShown"] is True
     assert data["plain"]["accent"] == "ev-info"
