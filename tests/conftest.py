@@ -247,6 +247,35 @@ def _reset_runtime_context_cache():
 
 
 @pytest.fixture(autouse=True)
+def _pin_bare_metal_runtime(monkeypatch):
+    """Make every test see a bare-metal host, wherever pytest really runs.
+
+    Think of a thermostat test that reads the real room temperature: it passes
+    in the office and fails in a cold server room. The container detectors read
+    the real machine (/.dockerenv, /proc/1/cgroup, env vars), so tests that
+    expect bare-metal behaviour failed inside `docker run` (OSS Scanner image,
+    devcontainers) while passing on CI and during `docker build`, which has no
+    /.dockerenv. Pin the three detectors that production code calls through
+    their module attribute. Tests that simulate a container still monkeypatch
+    them (later patches win), and tests of the detectors themselves call the
+    real functions: they import them directly (eneru.cli re-export,
+    deferred_delivery top-level import, test_run_command's saved reference),
+    so this patch does not reach them.
+    """
+    from eneru import deferred_delivery, runtime, utils
+
+    def _bare_process() -> str:
+        return "bare process"
+
+    # Forward to the real function's cache: _reset_runtime_context_cache may
+    # see this stub, and the detector tests rely on that reset between them.
+    _bare_process.cache_clear = runtime._detect_runtime_context.cache_clear
+    monkeypatch.setattr(runtime, "_detect_runtime_context", _bare_process)
+    monkeypatch.setattr(utils, "running_in_container", lambda: False)
+    monkeypatch.setattr(deferred_delivery, "_running_in_container", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_tui_live_buffers():
     """The TUI live-graph deques are process-global and keyed by the stats-DB
     stem, which is the same UPS name across tests. A leftover buffer from an

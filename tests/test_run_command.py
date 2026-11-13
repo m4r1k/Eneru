@@ -6,6 +6,9 @@ from unittest.mock import mock_open, patch
 from eneru import run_command, command_exists
 from eneru import utils as eneru_utils
 
+# The real detector, saved before conftest pins it to "bare metal" per test.
+_real_running_in_container = eneru_utils.running_in_container
+
 
 class TestRunCommand:
     """Test the run_command helper function."""
@@ -279,13 +282,13 @@ class TestRuntimeSshOptions:
             "eneru.utils.os.path.exists",
             side_effect=lambda path: path == "/.dockerenv",
         ):
-            assert eneru_utils.running_in_container() is True
+            assert _real_running_in_container() is True
 
     @pytest.mark.unit
     def test_running_in_container_detects_kubernetes_env(self, monkeypatch):
         monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
         with patch("eneru.utils.os.path.exists", return_value=False):
-            assert eneru_utils.running_in_container() is True
+            assert _real_running_in_container() is True
 
     @pytest.mark.unit
     def test_running_in_container_detects_cgroup_marker(self, monkeypatch):
@@ -294,7 +297,7 @@ class TestRuntimeSshOptions:
         with patch("eneru.utils.os.path.exists", return_value=False), patch(
             "builtins.open", mock_open(read_data="0::/kubepods.slice/pod123")
         ):
-            assert eneru_utils.running_in_container() is True
+            assert _real_running_in_container() is True
 
     @pytest.mark.unit
     def test_running_in_container_returns_false_without_markers(self, monkeypatch):
@@ -303,7 +306,7 @@ class TestRuntimeSshOptions:
         with patch("eneru.utils.os.path.exists", return_value=False), patch(
             "builtins.open", side_effect=OSError("missing cgroup")
         ):
-            assert eneru_utils.running_in_container() is False
+            assert _real_running_in_container() is False
 
     @pytest.mark.unit
     @pytest.mark.parametrize("ssh_options", [
